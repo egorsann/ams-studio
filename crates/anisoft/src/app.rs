@@ -63,6 +63,7 @@ pub struct App {
     vfrac: f32,
     browser_open: bool,
     browser_dir: PathBuf,
+    browser_back: Vec<PathBuf>,
     spec_color_open: bool,
 
     show_k: [bool; 3],
@@ -118,6 +119,7 @@ impl App {
             vfrac: 0.5,
             browser_open: true,
             browser_dir: std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default(),
+            browser_back: vec![],
             spec_color_open: false,
             show_k: [true; 3],
             marker: 4.0,
@@ -197,6 +199,8 @@ impl App {
                 }
                 self.doc = Some(d);
                 self.dirty = true;
+                // recompute now: the rest of this frame (plots, table) indexes `derived` per specimen
+                self.refresh();
                 self.last_anchor = None;
                 self.save_state();
             }
@@ -227,6 +231,9 @@ impl App {
 
     fn points(&self) -> Vec<Pt> {
         let Some(doc) = &self.doc else { return vec![] };
+        if self.derived.len() != doc.specs.len() {
+            return vec![];
+        }
         let idx: Vec<usize> = (0..doc.specs.len())
             .filter(|&i| doc.active[i] && (self.filter == 0 || doc.selected[i]))
             .collect();
@@ -527,6 +534,19 @@ fn sep(ui: &mut Ui) {
     ui.add_space(4.0);
 }
 
+fn small_icon(ui: &mut Ui, icon: Icon, tip: &str, enabled: bool, dark: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(26.0), if enabled { Sense::click() } else { Sense::hover() });
+    let pa = ui.painter();
+    if resp.hovered() && enabled {
+        pa.rect_filled(rect, 6.0, ui.visuals().widgets.hovered.bg_fill);
+    }
+    icons::paint(pa, Rect::from_center_size(rect.center(), Vec2::splat(18.0)), icon, dark);
+    if !enabled {
+        pa.rect_filled(rect, 6.0, ui.visuals().panel_fill.gamma_multiply(0.62));
+    }
+    resp.on_hover_text(tip).clicked() && enabled
+}
+
 fn item(ui: &mut Ui, label: &str, sc: &str, enabled: bool) -> bool {
     let b = egui::Button::new(label).shortcut_text(sc);
     let r = ui.add_enabled(enabled, b).clicked();
@@ -689,7 +709,7 @@ impl eframe::App for App {
             });
         } else {
             egui::Panel::left("browser_strip").resizable(false).exact_size(30.0).show(ui, |ui| {
-                if ui.button("▶").on_hover_text("Show file browser  Ctrl+B").clicked() {
+                if small_icon(ui, Icon::Sidebar(false), "Show file browser  Ctrl+B", true, self.dark) {
                     actions.push(Action::ToggleBrowser);
                 }
                 ui.add_space(6.0);
@@ -758,22 +778,28 @@ impl App {
     }
 
     fn browser_ui(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        let mut back = false;
         let mut go: Option<PathBuf> = None;
         let mut open: Option<PathBuf> = None;
+        let dark = self.dark;
         ui.horizontal(|ui| {
-            if ui.button("◀").on_hover_text("Hide file browser  Ctrl+B").clicked() {
-                actions.push(Action::ToggleBrowser);
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if small_icon(ui, Icon::Back, "Back to the previous folder", !self.browser_back.is_empty(), dark) {
+                back = true;
             }
-            ui.heading("Files");
+            if small_icon(ui, Icon::Up, "Parent folder", self.browser_dir.parent().is_some(), dark) {
+                go = self.browser_dir.parent().map(|p| p.to_path_buf());
+            }
+            if small_icon(ui, Icon::Home, "Home folder", true, dark) {
+                go = std::env::var_os("HOME").map(PathBuf::from);
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("⬆").on_hover_text("Parent folder").clicked() {
-                    go = self.browser_dir.parent().map(|p| p.to_path_buf());
-                }
-                if ui.button("🏠").on_hover_text("Home folder").clicked() {
-                    go = std::env::var_os("HOME").map(PathBuf::from);
+                if small_icon(ui, Icon::Sidebar(true), "Hide file browser  Ctrl+B", true, dark) {
+                    actions.push(Action::ToggleBrowser);
                 }
             });
         });
+        ui.strong("Files");
         ui.label(RichText::new(self.browser_dir.display().to_string()).small().weak());
         ui.separator();
         let cur = self.doc.as_ref().map(|d| d.path.clone());
@@ -809,8 +835,16 @@ impl App {
                 ui.label(RichText::new("No folders or .ams files here").weak());
             }
         });
-        if let Some(p) = go {
-            self.browser_dir = p;
+        if back {
+            if let Some(p) = self.browser_back.pop() {
+                self.browser_dir = p;
+                self.save_state();
+            }
+        } else if let Some(p) = go {
+            if p != self.browser_dir {
+                self.browser_back.push(std::mem::replace(&mut self.browser_dir, p));
+                self.browser_back.truncate(64);
+            }
             self.save_state();
         }
         if let Some(p) = open {
@@ -1062,6 +1096,9 @@ fn select(doc: &mut Doc, i: usize, mods: Modifiers, anchor: &mut Option<usize>) 
 impl App {
     fn target_idx(&self) -> Vec<usize> {
         let Some(d) = &self.doc else { return vec![] };
+        if self.derived.len() != d.specs.len() {
+            return vec![];
+        }
         let sel: Vec<usize> = (0..d.specs.len()).filter(|&i| d.selected[i] && d.active[i]).collect();
         if sel.is_empty() { (0..d.specs.len()).filter(|&i| d.active[i]).collect() } else { sel }
     }
@@ -1175,6 +1212,9 @@ impl App {
         let mods = ctx.input(|i| i.modifiers);
         egui::Window::new("Data Table").open(&mut open).default_size([900.0, 420.0]).default_pos([300.0, 160.0]).show(ctx, |ui| {
             let Some(doc) = &self.doc else { return };
+            if self.derived.len() != doc.specs.len() {
+                return;
+            }
             let cols = ["Specimen", "Km", "K1", "K2", "K3", "K1 Dec", "K1 Inc", "K2 Dec", "K2 Inc", "K3 Dec", "K3 Inc", "P", "Pj", "T", "F", "F12", "F23"];
             egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                 egui::Grid::new("tbl").striped(true).min_col_width(52.0).show(ui, |ui| {

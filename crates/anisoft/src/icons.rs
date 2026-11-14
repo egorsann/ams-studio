@@ -27,6 +27,11 @@ pub enum Icon {
     PaleoV,
     GroupStats,
     Contour,
+    Back,
+    Up,
+    Home,
+    /// File-browser panel; `true` = panel is open (button hides it).
+    Sidebar(bool),
 }
 
 fn p(r: Rect, x: f32, y: f32) -> Pos2 {
@@ -177,6 +182,30 @@ pub fn paint(pa: &Painter, r: Rect, icon: Icon, dark: bool) {
             pts.extend(arc(r, 0.5, 0.5, 0.44, 0.9, 2.2));
             poly(pa, pts, Color32::from_rgb(60, 120, 220), Stroke::NONE);
             pa.circle_stroke(r.center(), r.width() * 0.44, thin);
+        }
+        Icon::Back | Icon::Up => {
+            let pts = if icon == Icon::Back {
+                vec![p(r, 0.78, 0.5), p(r, 0.22, 0.5)]
+            } else {
+                vec![p(r, 0.5, 0.78), p(r, 0.5, 0.22)]
+            };
+            line(pa, pts, 2.4, ink);
+            let tip = if icon == Icon::Back { [p(r, 0.46, 0.22), p(r, 0.2, 0.5), p(r, 0.46, 0.78)] } else { [p(r, 0.22, 0.46), p(r, 0.5, 0.2), p(r, 0.78, 0.46)] };
+            line(pa, tip.to_vec(), 2.4, ink);
+        }
+        Icon::Home => {
+            poly(pa, vec![p(r, 0.5, 0.12), p(r, 0.92, 0.48), p(r, 0.8, 0.48), p(r, 0.8, 0.86), p(r, 0.2, 0.86), p(r, 0.2, 0.48), p(r, 0.08, 0.48)], Color32::from_rgb(120, 150, 200), Stroke::new(1.0, ink));
+            pa.rect_filled(Rect::from_min_max(p(r, 0.42, 0.58), p(r, 0.58, 0.86)), 1.0, Color32::from_rgb(245, 205, 70));
+        }
+        Icon::Sidebar(open) => {
+            let frame = Rect::from_min_max(p(r, 0.08, 0.16), p(r, 0.92, 0.84));
+            let strip = Rect::from_min_max(frame.min, Pos2::new(p(r, 0.38, 0.0).x, frame.max.y));
+            let accent = Color32::from_rgb(59, 130, 246);
+            pa.rect_filled(strip, 2.0, if open { accent.gamma_multiply(0.8) } else { accent.gamma_multiply(0.25) });
+            pa.rect_stroke(frame, 3.0, Stroke::new(1.6, ink), egui::StrokeKind::Inside);
+            line(pa, vec![Pos2::new(strip.max.x, frame.min.y), Pos2::new(strip.max.x, frame.max.y)], 1.4, ink);
+            let tip = if open { [p(r, 0.62, 0.36), p(r, 0.5, 0.5), p(r, 0.62, 0.64)] } else { [p(r, 0.52, 0.36), p(r, 0.64, 0.5), p(r, 0.52, 0.64)] };
+            line(pa, tip.to_vec(), 1.8, ink);
         }
         Icon::Contour => {
             pa.circle_filled(r.center(), r.width() * 0.44, Color32::from_gray(245));
