@@ -159,7 +159,7 @@ impl Frame2D {
     }
 }
 
-fn draw_axes(ui: &Ui, outer: Rect, x: (f64, f64), y: (f64, f64), xlabel: &str, ylabel: &str, th: &Theme) -> Frame2D {
+fn draw_axes(ui: &Ui, outer: Rect, x: (f64, f64), y: (f64, f64), xlabel: &str, ylabel: &str, th: &Theme, xlog: bool) -> Frame2D {
     let pa = ui.painter_at(outer);
     let plot = Rect::from_min_max(
         Pos2::new(outer.min.x + 54.0, outer.min.y + 12.0),
@@ -168,12 +168,35 @@ fn draw_axes(ui: &Ui, outer: Rect, x: (f64, f64), y: (f64, f64), xlabel: &str, y
     let f = Frame2D { plot, x, y };
     pa.rect_filled(plot, 2.0, th.canvas());
     let font = FontId::proportional(11.0);
-    let (xt, xd) = nice_ticks(x.0, x.1, (plot.width() / 70.0) as usize);
-    for v in xt {
-        let s = f.to_screen(v, y.0);
-        pa.line_segment([Pos2::new(s.x, plot.max.y), Pos2::new(s.x, plot.max.y + 4.0)], Stroke::new(1.0, th.ink()));
-        pa.line_segment([Pos2::new(s.x, plot.min.y), Pos2::new(s.x, plot.max.y)], Stroke::new(0.5, th.faint().gamma_multiply(0.5)));
-        pa.text(Pos2::new(s.x, plot.max.y + 6.0), Align2::CENTER_TOP, format!("{v:.xd$}"), font.clone(), th.ink());
+    if xlog {
+        // x is log10(value): decades are major ticks; 2..9 are minor, with 2 and 5 labelled when zoomed in
+        let span = x.1 - x.0;
+        for k in (x.0.floor() as i32)..=(x.1.ceil() as i32) {
+            for m in 1..=9 {
+                let v = k as f64 + (m as f64).log10();
+                if v < x.0 - 1e-9 || v > x.1 + 1e-9 {
+                    continue;
+                }
+                let major = m == 1;
+                if !major && span > 3.0 {
+                    continue;
+                }
+                let s = f.to_screen(v, y.0);
+                pa.line_segment([Pos2::new(s.x, plot.max.y), Pos2::new(s.x, plot.max.y + if major { 5.0 } else { 3.0 })], Stroke::new(1.0, th.ink()));
+                pa.line_segment([Pos2::new(s.x, plot.min.y), Pos2::new(s.x, plot.max.y)], Stroke::new(0.5, th.faint().gamma_multiply(if major { 0.5 } else { 0.25 })));
+                if major || (span < 2.0 && (m == 2 || m == 5)) {
+                    pa.text(Pos2::new(s.x, plot.max.y + 7.0), Align2::CENTER_TOP, format!("{m}E{k:+}"), font.clone(), th.ink());
+                }
+            }
+        }
+    } else {
+        let (xt, xd) = nice_ticks(x.0, x.1, (plot.width() / 70.0) as usize);
+        for v in xt {
+            let s = f.to_screen(v, y.0);
+            pa.line_segment([Pos2::new(s.x, plot.max.y), Pos2::new(s.x, plot.max.y + 4.0)], Stroke::new(1.0, th.ink()));
+            pa.line_segment([Pos2::new(s.x, plot.min.y), Pos2::new(s.x, plot.max.y)], Stroke::new(0.5, th.faint().gamma_multiply(0.5)));
+            pa.text(Pos2::new(s.x, plot.max.y + 6.0), Align2::CENTER_TOP, format!("{v:.xd$}"), font.clone(), th.ink());
+        }
     }
     let (yt, yd) = nice_ticks(y.0, y.1, (plot.height() / 36.0) as usize);
     for v in yt {
@@ -317,7 +340,7 @@ pub fn hist_km(ui: &mut Ui, rect: Rect, pts: &[Pt], bins: usize, th: &Theme) -> 
         counts[b.min(nb - 1)] += 1;
     }
     let ymax = (*counts.iter().max().unwrap_or(&1)).max(1) as f64;
-    let f = draw_axes(ui, rect, (lo * sc, hi * sc), (0.0, (ymax * 1.1).ceil()), &format!("Kmean [E{exp:+03} SI]"), "N", th);
+    let f = draw_axes(ui, rect, (lo * sc, hi * sc), (0.0, (ymax * 1.1).ceil()), &format!("Kmean [E{exp:+03} SI]"), "N", th, false);
     let pa = ui.painter_at(rect);
     let mut out = PlotOut::default();
     let resp = ui.interact(f.plot, ui.scope_id().with("hist"), Sense::hover());
@@ -348,19 +371,32 @@ pub struct ScatterSpec<'a> {
     pub yr: Option<(f64, f64)>,
     pub zero_line: bool,
     pub salt: &'a str,
+    /// Plot log10 of x (values <= 0 cannot be shown).
+    pub xlog: bool,
 }
 
 pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: ScatterSpec, size: f32, th: &Theme, x_exp: Option<i32>) -> PlotOut {
-    let sc = x_exp.map_or(1.0, |e| 10f64.powi(-e));
+    let sc = if spec.xlog { 1.0 } else { x_exp.map_or(1.0, |e| 10f64.powi(-e)) };
+    let mut hidden = 0usize;
     let xs: Vec<(usize, f64, f64)> = pts
         .iter()
         .enumerate()
-        .filter_map(|(i, p)| Some((i, (spec.x)(p)? * sc, (spec.y)(p)?)))
+        .filter_map(|(i, p)| {
+            let (x, y) = ((spec.x)(p)?, (spec.y)(p)?);
+            if spec.xlog {
+                if x > 0.0 { Some((i, x.log10(), y)) } else { hidden += 1; None }
+            } else {
+                Some((i, x * sc, y))
+            }
+        })
         .collect();
     let xr = spec.xr.unwrap_or_else(|| range_of(xs.iter().map(|v| v.1), 0.06));
     let yr = spec.yr.unwrap_or_else(|| range_of(xs.iter().map(|v| v.2), 0.06));
-    let f = draw_axes(ui, rect, xr, yr, spec.xlabel, spec.ylabel, th);
+    let f = draw_axes(ui, rect, xr, yr, spec.xlabel, spec.ylabel, th, spec.xlog);
     let pa = ui.painter_at(rect);
+    if hidden > 0 {
+        pa.text(Pos2::new(f.plot.max.x - 6.0, f.plot.min.y + 6.0), Align2::RIGHT_TOP, format!("{hidden} with Km <= 0 not shown"), FontId::proportional(11.0), th.faint());
+    }
     if spec.zero_line && yr.0 < 0.0 && yr.1 > 0.0 {
         let a = f.to_screen(xr.0, 0.0);
         let b = f.to_screen(xr.1, 0.0);

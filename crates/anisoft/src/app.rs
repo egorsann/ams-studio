@@ -88,6 +88,7 @@ pub struct App {
     marker: f32,
     bins: usize,
     export: [bool; 4],
+    log_km: bool,
     pane_settings: [bool; 4],
     color_on: bool,
     palette: u8,
@@ -147,6 +148,7 @@ impl App {
             marker: 4.0,
             bins: 12,
             export: [true; 4],
+            log_km: false,
             pane_settings: [false; 4],
             color_on: false,
             palette: 0,
@@ -191,6 +193,7 @@ impl App {
             match k {
                 "last_dir" if Path::new(v).is_dir() => self.browser_dir = PathBuf::from(v),
                 "dark" => self.dark = v == "1",
+                "logkm" => self.log_km = v == "1",
                 "browser" => self.browser_open = v != "0",
                 "hfrac" => self.hfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
                 "vfrac" => self.vfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
@@ -207,12 +210,13 @@ impl App {
         let _ = std::fs::write(
             p,
             format!(
-                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\n",
+                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nlogkm={}\n",
                 self.browser_dir.display(),
                 self.dark as u8,
                 self.browser_open as u8,
                 self.hfrac,
-                self.vfrac
+                self.vfrac,
+                self.log_km as u8
             ),
         );
     }
@@ -1016,7 +1020,7 @@ impl App {
                         ui,
                         body,
                         &pts,
-                        ScatterSpec { xlabel: &format!("Kmean [E{exp:+03} SI]"), ylabel: "P", x: Box::new(|p| Some(p.km)), y: Box::new(|p| p.p), xr: None, yr: None, zero_line: false, salt: "pkm" },
+                        ScatterSpec { xlabel: &(if self.log_km { "Kmean [SI]".to_string() } else { format!("Kmean [E{exp:+03} SI]") }), ylabel: "P", xlog: self.log_km, x: Box::new(|p| Some(p.km)), y: Box::new(|p| p.p), xr: None, yr: None, zero_line: false, salt: "pkm" },
                         self.marker,
                         th,
                         Some(exp),
@@ -1026,7 +1030,7 @@ impl App {
                     ui,
                     body,
                     &pts,
-                    ScatterSpec { xlabel: "P", ylabel: "T", x: Box::new(|p| p.p), y: Box::new(|p| p.t), xr: None, yr: Some((-1.0, 1.0)), zero_line: true, salt: "tp" },
+                    ScatterSpec { xlabel: "P", ylabel: "T", x: Box::new(|p| p.p), y: Box::new(|p| p.t), xr: None, yr: Some((-1.0, 1.0)), zero_line: true, salt: "tp", xlog: false },
                     self.marker,
                     th,
                     None,
@@ -1073,9 +1077,16 @@ impl App {
         }
         let txt = if self.hover[i].is_empty() { RichText::new(name).weak() } else { RichText::new(&self.hover[i]) };
         child.label(txt);
+        let mut log_changed = false;
         child.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.checkbox(&mut self.export[i], "Export graphics");
+            if i == 2 {
+                log_changed = ui.checkbox(&mut self.log_km, "Log Km").on_hover_text("Logarithmic Kmean axis").changed();
+            }
         });
+        if log_changed {
+            self.save_state();
+        }
         let mut top = header.max.y + 2.0;
         if self.pane_settings[i] {
             let strip = Rect::from_min_size(Pos2::new(rect.min.x + 8.0, top), Vec2::new(rect.width() - 16.0, 26.0));
