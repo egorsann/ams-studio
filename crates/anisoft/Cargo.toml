@@ -1,0 +1,12 @@
+[package]
+name = "anisoft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anisoft-core = { version = "0.1.0", path = "../anisoft-core" }
+eframe = "0.37.0"
+egui = "0.37"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+rfd = "0.18.0"
