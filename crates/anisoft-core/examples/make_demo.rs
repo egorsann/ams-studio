@@ -47,7 +47,8 @@ fn main() {
         let r = mat_mul(&rot_z(dec + 12.0 * rng.gauss()), &rot_x(dip + 8.0 * rng.gauss()));
         let t = anisoft_core::tensor::rotate_tensor(&base, &r);
         let scaled = |m: f64| -> Mat3 { let mut x = t; for row in x.iter_mut() { for v in row.iter_mut() { *v *= m; } } x };
-        let ip = Phase { km, sd: [2e-3, 2e-3, 2e-3], tensor: scaled(km), ftest: [20.0 + 60.0 * rng.next(), 5.0, 8.0] };
+        // like real files: the stored tensor is normalised (trace 3), Km is stored separately
+        let ip = Phase { km, sd: [2e-3, 2e-3, 2e-3], tensor: t, ftest: [20.0 + 60.0 * rng.next(), 5.0, 8.0] };
         let op = Phase { km: km * 0.01, sd: [3e-2; 3], tensor: scaled(km * 0.01 * (1.0 + 0.5 * rng.gauss())), ftest: [1.5, 1.0, 1.0] };
         bytes.extend(build_record(&format!("{site}-{}{}", ["A", "B", "C"][i % 3], i / 3 + 1), &ip, &op, 400.0, 1220.0));
     }

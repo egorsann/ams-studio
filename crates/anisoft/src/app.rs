@@ -1,12 +1,10 @@
 use crate::doc::{self, Derived, Doc};
 use crate::icons::{self, Icon};
 use crate::plots::{self, Pt, ScatterSpec, StereoOpts, Theme};
+mod analysis_ui;
 mod tools_ui;
 use anisoft_core::coords::{CoordSys, Orientation};
-use anisoft_core::density;
 use anisoft_core::export;
-use anisoft_core::stats;
-use anisoft_core::tensor::{from_dec_inc, Vec3};
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Key, Layout, Modifiers, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
 use std::path::{Path, PathBuf};
 
@@ -20,6 +18,7 @@ pub enum Action {
     SaveActive,
     AppendSel,
     ExportCsv,
+    ExportSelection,
     Close,
     Exit,
     EditData,
@@ -115,8 +114,7 @@ pub struct App {
     win_factors: bool,
     win_about: bool,
     win_edit: bool,
-    contour_axis: usize,
-    contour_k: f64,
+    ana: analysis_ui::AnaState,
     edit_name: String,
     info: Option<String>,
     hover: [String; 4],
@@ -197,8 +195,7 @@ impl App {
             win_factors: false,
             win_about: false,
             win_edit: false,
-            contour_axis: 0,
-            contour_k: 60.0,
+            ana: Default::default(),
             edit_name: String::new(),
             info: None,
             hover: Default::default(),
@@ -418,6 +415,22 @@ impl App {
                     }
                 }
             }
+            Action::ExportSelection => {
+                if let Some(d) = &self.doc {
+                    let rows: Vec<&_> = (0..d.specs.len()).filter(|&i| d.selected[i]).map(|i| &d.specs[i]).collect();
+                    if rows.is_empty() {
+                        self.info = Some("Nothing is selected. Select specimens first (click, drag, or a rubber band in a plot).".into());
+                    } else {
+                        let suffix = if self.out_phase { "oop" } else { "ip" };
+                        let name = d.path.file_stem().map(|s| format!("{}_selection_{suffix}.csv", s.to_string_lossy())).unwrap_or("selection.csv".into());
+                        if let Some(p) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(name).save_file() {
+                            if let Err(e) = std::fs::write(&p, export::csv(&rows, self.out_phase)) {
+                                self.info = Some(format!("Could not export: {e}"));
+                            }
+                        }
+                    }
+                }
+            }
             Action::Close => {
                 self.doc = None;
                 self.dirty = true;
@@ -555,6 +568,7 @@ impl App {
             (c, Key::I, Action::Import),
             (c, Key::S, Action::SaveActive),
             (c, Key::A, Action::AppendSel),
+            (Modifiers::CTRL | Modifiers::SHIFT, Key::E, Action::ExportSelection),
             (c, Key::E, Action::ExportCsv),
             (c, Key::Q, Action::Close),
             (c, Key::X, Action::Exit),
@@ -705,6 +719,7 @@ impl eframe::App for App {
                     if item(ui, "Save Active Records As", "Ctrl+S", has) { actions.push(Action::SaveActive) }
                     if item(ui, "Append Selected Records Into", "Ctrl+A", has) { actions.push(Action::AppendSel) }
                     if item(ui, "Export Data File (CSV)", "Ctrl+E", has) { actions.push(Action::ExportCsv) }
+                    if item(ui, "Export Selection (CSV)", "Ctrl+Shift+E", has) { actions.push(Action::ExportSelection) }
                     ui.separator();
                     if item(ui, "Close Current Data File(s)", "Ctrl+Q", has) { actions.push(Action::Close) }
                     if item(ui, "Exit Program", "Ctrl+X", true) { actions.push(Action::Exit) }
@@ -1323,14 +1338,6 @@ fn select(doc: &mut Doc, i: usize, mods: Modifiers, anchor: &mut Option<usize>) 
 // -------------------------------------------------------------- windows
 
 impl App {
-    fn target_idx(&self) -> Vec<usize> {
-        let Some(d) = &self.doc else { return vec![] };
-        if self.derived.len() != d.specs.len() {
-            return vec![];
-        }
-        let sel: Vec<usize> = (0..d.specs.len()).filter(|&i| d.selected[i] && d.active[i]).collect();
-        if sel.is_empty() { (0..d.specs.len()).filter(|&i| d.active[i]).collect() } else { sel }
-    }
 
     /// Replace the open document (used by tools that build data in memory).
     fn set_doc(&mut self, d: Doc) {
@@ -1400,6 +1407,8 @@ impl App {
         if let Some(msg) = self.info.clone() {
             let mut open = true;
             egui::Window::new("Anisoft").open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+                tools_ui::pop_style(ui, 1.4);
+                ui.set_max_width(640.0);
                 ui.label(&msg);
                 if ui.button("OK").clicked() {
                     self.info = None;
@@ -1411,7 +1420,8 @@ impl App {
         }
 
         let mut open = self.win_about;
-        self.base_window(ctx, "About Anisoft", W_ABOUT, Vec2::new(420.0, 120.0)).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+        self.base_window(ctx, "About Anisoft", W_ABOUT, Vec2::new(760.0, 220.0)).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            tools_ui::pop_style(ui, 1.4);
             ui.heading("Anisoft for Linux");
             ui.label("An independent reimplementation of AGICO's Anisoft 6, written in Rust with egui.");
             ui.label("Reads Safyr7 .ams files; anisotropy results were checked against csv exports of the original program.");
@@ -1420,7 +1430,8 @@ impl App {
         self.win_about = open;
 
         let mut open = self.win_factors;
-        self.base_window(ctx, "Anisotropy Quantitative Factors", W_FACTORS, Vec2::new(480.0, 260.0)).open(&mut open).resizable(false).show(ctx, |ui| {
+        self.base_window(ctx, "Anisotropy Quantitative Factors", W_FACTORS, Vec2::new(900.0, 480.0)).open(&mut open).resizable(false).show(ctx, |ui| {
+            tools_ui::pop_style(ui, 1.4);
             egui::Grid::new("fx").striped(true).show(ui, |ui| {
                 for (n, f) in [
                     ("L", "K1 / K2"), ("F", "K2 / K3"), ("P", "K1 / K3"),
@@ -1440,7 +1451,8 @@ impl App {
         let mut open = self.win_orient;
         let mut changed = false;
         let mut orient = self.orient;
-        self.base_window(ctx, "Orientation Parameters", W_ORIENT, Vec2::new(340.0, 240.0)).open(&mut open).resizable(false).show(ctx, |ui| {
+        self.base_window(ctx, "Orientation Parameters", W_ORIENT, Vec2::new(640.0, 440.0)).open(&mut open).resizable(false).show(ctx, |ui| {
+            tools_ui::pop_style(ui, 1.4);
             ui.label(RichText::new("Not stored in .ams files. Applied to all specimens of the open file.").weak());
             egui::Grid::new("or").show(ui, |ui| {
                 for (n, v, r) in [
@@ -1469,7 +1481,8 @@ impl App {
 
         let mut open = self.win_colors;
         let mut kc = self.k_colors;
-        self.base_window(ctx, "Default Colors", W_COLORS, Vec2::new(200.0, 140.0)).open(&mut open).resizable(false).show(ctx, |ui| {
+        self.base_window(ctx, "Default Colors", W_COLORS, Vec2::new(360.0, 260.0)).open(&mut open).resizable(false).show(ctx, |ui| {
+            tools_ui::pop_style(ui, 1.4);
             for (i, n) in ["K1", "K2", "K3"].iter().enumerate() {
                 ui.horizontal(|ui| {
                     ui.color_edit_button_srgba(&mut kc[i]);
@@ -1483,7 +1496,8 @@ impl App {
         let mut open = self.win_edit;
         let mut name = self.edit_name.clone();
         let mut apply = false;
-        self.base_window(ctx, "Edit Data", W_EDIT, Vec2::new(320.0, 140.0)).open(&mut open).resizable(false).show(ctx, |ui| {
+        self.base_window(ctx, "Edit Data", W_EDIT, Vec2::new(600.0, 260.0)).open(&mut open).resizable(false).show(ctx, |ui| {
+            tools_ui::pop_style(ui, 1.4);
             ui.label("Specimen name (up to 24 characters):");
             ui.text_edit_singleline(&mut name);
             apply = ui.button("Apply").clicked();
@@ -1522,7 +1536,7 @@ impl App {
             ("P", 60.0), ("Pj", 60.0), ("T", 60.0), ("F", 64.0), ("F12", 64.0), ("F23", 64.0),
         ];
         let total_w: f32 = COLS.iter().map(|c| c.1).sum();
-        let win = self.base_window(ctx, "Data Table", W_TABLE, Vec2::new(940.0, 440.0));
+        let win = self.base_window(ctx, "Data Table", W_TABLE, Vec2::new(1290.0, 700.0));
         let (derived, out_phase) = (self.derived.clone(), self.out_phase);
         let mut drag = self.list_drag.take();
         let mut anchor = self.last_anchor;
@@ -1595,110 +1609,5 @@ impl App {
         self.list_drag = drag;
         self.last_anchor = anchor;
         self.win_table = open;
-    }
-
-    fn group_window(&mut self, ctx: &egui::Context) {
-        if !self.win_group {
-            return;
-        }
-        let mut open = true;
-        let idx = self.target_idx();
-        let tensors: Vec<_> = idx.iter().map(|&i| self.derived[i].tensor).collect();
-        let kms: Vec<f64> = idx.iter().map(|&i| self.derived[i].km).collect();
-        let sel = self.doc.as_ref().map_or(false, |d| d.n_selected() > 0);
-        self.base_window(ctx, "Group Statistics", W_GROUP, Vec2::new(420.0, 340.0)).open(&mut open).resizable(false).show(ctx, |ui| {
-            ui.label(format!("{} specimens ({}), {}", idx.len(), if sel { "selected" } else { "all active" }, if self.out_phase { "out-of-phase" } else { "in-phase" }));
-            match stats::group_stats(&tensors, &kms) {
-                None => {
-                    ui.label("No specimens.");
-                }
-                Some(g) => {
-                    ui.label(format!("Mean Km = {:.4E}", g.mean_km));
-                    egui::Grid::new("gs").striped(true).show(ui, |ui| {
-                        for h in ["", "Eigenvalue", "SD", "Dec", "Inc"] {
-                            ui.strong(h);
-                        }
-                        ui.end_row();
-                        for a in 0..3 {
-                            ui.strong(format!("K{}", a + 1));
-                            ui.label(format!("{:.5}", g.k[a]));
-                            ui.label(format!("{:.5}", g.k_sd[a]));
-                            ui.label(format!("{:.1}", g.dec_inc[a].0));
-                            ui.label(format!("{:.1}", g.dec_inc[a].1));
-                            ui.end_row();
-                        }
-                    });
-                    ui.separator();
-                    let ang = |v: f64| if v.is_finite() { format!("{v:.1}°") } else { "n/a".to_string() };
-                    ui.label(format!("Approx. 95% confidence half-angles:  K1-K2 {}   K2-K3 {}   K1-K3 {}", ang(g.eps12), ang(g.eps23), ang(g.eps13)));
-                    if g.n < 3 {
-                        ui.label(RichText::new("Confidence angles need at least 3 specimens.").small().weak());
-                    }
-                    ui.label(RichText::new("t-based approximation, not Jelinek's exact F-based formula; not yet verified against Anisoft.").small().weak());
-                    ui.separator();
-                    ui.label(format!("P  = {:.4} ± {:.4}", g.mean_p.0, g.mean_p.1));
-                    ui.label(format!("Pj = {:.4} ± {:.4}", g.mean_pj.0, g.mean_pj.1));
-                    ui.label(format!("T  = {:.4} ± {:.4}", g.mean_t.0, g.mean_t.1));
-                    if let Some(s) = g.shape {
-                        ui.label(RichText::new(format!("Mean tensor: P = {:.4}  Pj = {:.4}  T = {:.4}  L = {:.4}  F = {:.4}", s.p, s.pj, s.t, s.l, s.f)).weak());
-                    }
-                }
-            }
-        });
-        self.win_group = open;
-    }
-
-    fn contour_window(&mut self, ctx: &egui::Context) {
-        if !self.win_contour {
-            return;
-        }
-        let mut open = true;
-        let idx = self.target_idx();
-        let axis = self.contour_axis;
-        let vecs: Vec<Vec3> = idx.iter().map(|&i| { let (d, n) = self.derived[i].axes.dec_inc[axis]; from_dec_inc(d, n) }).collect();
-        let k = self.contour_k;
-        let th = self.theme();
-        self.base_window(ctx, "Contour Plot", W_CONTOUR, Vec2::new(430.0, 500.0)).open(&mut open).resizable(false).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                for (a, n) in ["K1", "K2", "K3"].iter().enumerate() {
-                    ui.selectable_value(&mut self.contour_axis, a, *n);
-                }
-                ui.add(egui::Slider::new(&mut self.contour_k, 10.0..=300.0).text("sharpness"));
-            });
-            let n = 70;
-            let g = density::density(&vecs, n, k);
-            let (rect, _) = ui.allocate_exact_size(Vec2::splat(400.0), Sense::hover());
-            let pa = ui.painter_at(rect);
-            let c = rect.center();
-            let r = 175.0;
-            let cell = 2.0 * r / n as f32;
-            for iy in 0..n {
-                for ix in 0..n {
-                    let v = g.z[iy * n + ix];
-                    if v.is_nan() {
-                        continue;
-                    }
-                    let lvl = ((v / g.max.max(1e-9)) * 8.0).floor().min(7.0);
-                    if lvl < 1.0 {
-                        continue;
-                    }
-                    let band = lvl / 7.0;
-                    let p = Pos2::new(c.x - r + ix as f32 * cell, c.y - r + iy as f32 * cell);
-                    pa.rect_filled(Rect::from_min_size(p, Vec2::splat(cell + 0.6)), 0.0, plots::rainbow(band).gamma_multiply(0.85));
-                }
-            }
-            pa.circle_stroke(c, r, Stroke::new(1.2, th.ink()));
-            for (t, pos, al) in [("N", Pos2::new(c.x, c.y - r - 3.0), Align2::CENTER_BOTTOM), ("90", Pos2::new(c.x + r + 4.0, c.y), Align2::LEFT_CENTER), ("180", Pos2::new(c.x, c.y + r + 3.0), Align2::CENTER_TOP), ("270", Pos2::new(c.x - r - 4.0, c.y), Align2::RIGHT_CENTER)] {
-                pa.text(pos, al, t, FontId::proportional(11.0), th.ink());
-            }
-            for (i, v) in vecs.iter().enumerate() {
-                let _ = i;
-                let (d, n) = anisoft_core::tensor::dec_inc(*v);
-                let (x, y) = density::project(d, n);
-                pa.circle_filled(Pos2::new(c.x + x as f32 * r, c.y - y as f32 * r), 1.8, Color32::from_black_alpha(160));
-            }
-            ui.label(format!("{} specimens, peak density {:.1} % per unit area (8 colour bands, % of peak)", idx.len(), g.max));
-        });
-        self.win_contour = open;
     }
 }

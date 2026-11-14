@@ -9,7 +9,8 @@ It keeps the original's window: the same menus, shortcuts and toolbar button ord
 - A modern look with a light and a dark theme (View > Dark Theme).
 
 ![main window](docs/main.png)
-![group statistics and contour plot](docs/analysis.png)
+![group statistics](docs/groupstats.png)
+![contour plot](docs/contour.png)
 
 (Screenshots use made-up data from `make_demo`.)
 
@@ -30,7 +31,10 @@ Needs a Rust toolchain; on Fedora the Wayland/X11 libraries come with the deskto
 | K1-K3, Dec/Inc, L F P Pj T U Q E, F-tests | works, matches Anisoft's csv export (see below) |
 | Four plots, selection, disregard / restore, invert / clear | works |
 | Colour-coding by Km, P, Pj or T (rainbow / shades / grayscale) | works |
-| Data Table (F2), Group Statistics (F9), Contour Plot (F12) | works (see caveats) |
+| Data Table (F2) | works |
+| Group Statistics (F9) | works like the original: stereonet with data points, mean-tensor axes, Jelinek ellipses, optional planes and bootstrap cloud; tables with coloured backdrops (K1 pink, K2 green, K3 lavender, shape parameters cyan); Export Data (CSV). Mean tensor, Jelinek angles, shape parameters, averages and SD reproduce the original exactly on two test files |
+| Contour Plot (F12) | works like the original: K1/K2/K3 input, continuous or discrete levels in the colour of the chosen axis, smoothing, Contours / Data Points / Eigenvectors, eigenvector table (matches the original), colour scale with Max, Copy Data / Copy Graphics. Foliation Pole and Lineation inputs need `.ged` data and are not supported yet |
+| File > Export Selection (CSV) | writes only the selected specimens, in-phase or out-of-phase as shown (Ctrl+Shift+E) |
 | Save active records as `.ams`, append selected records into an `.ams`, export CSV | works; subsets are copied byte for byte |
 | Copy graphics to clipboard, save graphics (one PNG per ticked plot) | works |
 | Edit Data (rename a specimen) | works |
@@ -39,7 +43,7 @@ Needs a Rust toolchain; on Fedora the Wayland/X11 libraries come with the deskto
 | Keys | **Q** previous specimen, **E** next specimen (the list follows), **W** switch in-phase / out-of-phase, **Esc** clear selection |
 | Log Kmean axis | tick **Log Km** in the header of the P-vs-Kmean plot (remembered between runs; specimens with Km <= 0 are not shown) |
 | Disregarded records | moved to the bottom of the list and the table, struck through and very faint |
-| Windows | every menu item opens its window at the same centred place with the same size, however often you use it |
+| Windows | every menu item opens its window at the same centred place with the same size, however often you use it; popups are about twice the size of the original's |
 | Tools > GED Editor | works: open / edit / save `.ged` files (byte-identical to the original's layout) |
 | Tools > Tensor Addition / Subtraction | works, matches the original bit for bit on 86 pairs (in- and out-of-phase) |
 | Tools > Fabric Overprint | works, matches the original (max error 1e-7); replaces the data with the simulated series |
@@ -53,10 +57,10 @@ Import Data File(s) (`.ran`, `.asc`), Set Data Classes, and Paleo-Horizontal / P
 
 ## Caveats
 
-- Group Statistics: the mean tensor and eigenvalues are standard, but the confidence half-angles use a Student-t approximation, not Jelinek's exact F-based formula, and have not been compared with Anisoft.
+- Group Statistics: the Jelinek ellipses follow the formula recovered from the original (tan of the semi-axis = standard deviation of the tilt components). The bootstrap ellipses are this program's own (500 resamples, 95 % region): the original's bootstrap values could not be reproduced. The original calls the spread column "SEM"; it is the standard deviation, so it is labelled SD here.
 - Orientation: G / P / T use the global values in Settings > Orientation Parameters. The original instead reads per-specimen values stored in each `.ams` record (set through Edit Data with a `.ged` file). Its geographic rule has been worked out (see `reference/tools-spec.md` in the checkout) but is not built in yet, so treat G / P / T here as approximate. The rotation conventions (core azimuth/dip, bedding strike/dip, paleo declination) are documented in `anisoft-core/src/coords.rs` and have not been checked against Anisoft's own dialog.
 - Km is shown exactly as stored. No specimen-volume correction is applied.
-- Contour Plot uses an exponential kernel density, not Anisoft's exact contouring.
+- Contour Plot: kernel exp(k (cos^2 - 1)) with k = the smoothing value (64 by default). The original's colour-scale maxima for two test sets were 27.1 and 18.7; this gives 26.4 and 18.8, so the colours differ slightly. The level steps (1, 3, 5 ... for maxima up to 45) were only checked for those two cases.
 
 - Tensor Addition: Find Duplicates keeps the first record of each name and disregards the rest; the original's exact rule was not checked. Deform AMS starts from the isotropic grain population, whereas the original starts from a fabric taken from the main window.
 

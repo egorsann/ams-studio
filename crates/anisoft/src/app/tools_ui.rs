@@ -31,8 +31,27 @@ pub struct ToolsState {
 
 // ------------------------------------------------------------------ shared widgets
 
-fn big_btn(ui: &mut Ui, icon: Icon, label: &str, enabled: bool, dark: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(104.0, 62.0), if enabled { Sense::click() } else { Sense::hover() });
+/// Scale the text, buttons and spacing of everything inside this `ui` (used to make popups bigger).
+pub(super) fn pop_style(ui: &mut Ui, f: f32) {
+    let s = ui.style_mut();
+    for (_, id) in s.text_styles.iter_mut() {
+        id.size *= f;
+    }
+    s.spacing.item_spacing *= f;
+    s.spacing.button_padding *= f;
+    s.spacing.interact_size *= f;
+    s.spacing.icon_width *= f;
+    s.spacing.icon_spacing *= f;
+}
+
+/// How much `pop_style` scaled this ui (1.0 = normal).
+pub(super) fn zf(ui: &Ui) -> f32 {
+    ui.style().text_styles.get(&egui::TextStyle::Body).map_or(1.0, |f| f.size / 14.0)
+}
+
+pub(super) fn big_btn(ui: &mut Ui, icon: Icon, label: &str, enabled: bool, dark: bool) -> bool {
+    let z = zf(ui);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(104.0 * z, 62.0 * z), if enabled { Sense::click() } else { Sense::hover() });
     let v = ui.visuals();
     let fill = if resp.is_pointer_button_down_on() && enabled {
         v.widgets.active.bg_fill
@@ -42,9 +61,9 @@ fn big_btn(ui: &mut Ui, icon: Icon, label: &str, enabled: bool, dark: bool) -> b
         v.widgets.inactive.bg_fill
     };
     ui.painter().rect(rect, 8.0, fill, Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color), StrokeKind::Inside);
-    let ir = Rect::from_center_size(Pos2::new(rect.center().x, rect.min.y + 21.0), Vec2::splat(26.0));
+    let ir = Rect::from_center_size(Pos2::new(rect.center().x, rect.min.y + 21.0 * z), Vec2::splat(26.0 * z));
     icons::paint(ui.painter(), ir, icon, dark);
-    ui.painter().text(Pos2::new(rect.center().x, rect.max.y - 11.0), Align2::CENTER_CENTER, label, FontId::proportional(12.5), if enabled { v.text_color() } else { v.text_color().gamma_multiply(0.4) });
+    ui.painter().text(Pos2::new(rect.center().x, rect.max.y - 11.0 * z), Align2::CENTER_CENTER, label, FontId::proportional(12.5 * z), if enabled { v.text_color() } else { v.text_color().gamma_multiply(0.4) });
     if !enabled {
         ui.painter().rect_filled(rect, 8.0, v.panel_fill.gamma_multiply(0.45));
     }
@@ -69,7 +88,7 @@ fn cell_edit(ui: &mut Ui, text: &mut String, w: f32, enabled: bool) {
     });
 }
 
-fn tint(dark: bool, r: u8, g: u8, b: u8) -> Color32 {
+pub(super) fn tint(dark: bool, r: u8, g: u8, b: u8) -> Color32 {
     let c = Color32::from_rgb(r, g, b);
     if dark { c.gamma_multiply(0.35) } else { c }
 }
@@ -426,7 +445,7 @@ impl App {
         let mut open = true;
         let mut st = std::mem::take(&mut self.tools.ged);
         let mut close = false;
-        self.base_window(ctx, "GED Editor", T_GED, Vec2::new(1120.0, 640.0)).open(&mut open).show(ctx, |ui| {
+        self.base_window(ctx, "GED Editor", T_GED, Vec2::new(1240.0, 720.0)).open(&mut open).show(ctx, |ui| {
             ui.horizontal_top(|ui| {
                 ui.group(|ui| {
                     ui.vertical(|ui| {
@@ -569,7 +588,7 @@ impl App {
         let mut open = true;
         let mut st = std::mem::take(&mut self.tools.tens);
         let mut close = false;
-        self.base_window(ctx, "Tensor Addition / Subtraction", T_TENS, Vec2::new(1060.0, 690.0)).open(&mut open).show(ctx, |ui| {
+        self.base_window(ctx, "Tensor Addition / Subtraction", T_TENS, Vec2::new(1240.0, 780.0)).open(&mut open).show(ctx, |ui| {
             ui.columns(3, |cols| {
                 for (k, ui) in cols.iter_mut().enumerate().take(2) {
                     let tag = if k == 0 { "A" } else { "B" };
@@ -754,13 +773,14 @@ impl App {
             fabric_from_tensor(self.derived[i].km, &self.derived[i].tensor)
         });
         let mut new_doc: Option<Doc> = None;
-        self.base_window(ctx, "Fabric Overprint", T_FAB, Vec2::new(470.0, 430.0)).open(&mut open).resizable(false).show(ctx, |ui| {
+        self.base_window(ctx, "Fabric Overprint", T_FAB, Vec2::new(840.0, 700.0)).open(&mut open).resizable(false).show(ctx, |ui| {
+            pop_style(ui, 1.45);
             ui.horizontal_top(|ui| {
                 for k in 0..2 {
                     let f = if k == 0 { &mut st.a } else { &mut st.b };
                     ui.group(|ui| {
                       ui.vertical(|ui| {
-                        ui.set_width(204.0);
+                        ui.set_width(204.0 * 1.45);
                         ui.label(RichText::new(if k == 0 { "Fabric A" } else { "Fabric B" }).strong().color(if k == 0 { Color32::from_rgb(40, 60, 230) } else { Color32::from_rgb(220, 40, 40) }));
                         egui::Grid::new(("fab-grid", k)).num_columns(3).show(ui, |ui| {
                             ui.label("Kmean");
@@ -862,12 +882,13 @@ impl App {
         let mut open = true;
         let mut st = std::mem::take(&mut self.tools.inter);
         let mut close = false;
-        self.base_window(ctx, "Intersection Toolbox", T_INTER, Vec2::new(560.0, 520.0)).open(&mut open).resizable(false).show(ctx, |ui| {
+        self.base_window(ctx, "Intersection Toolbox", T_INTER, Vec2::new(1000.0, 820.0)).open(&mut open).resizable(false).show(ctx, |ui| {
+            pop_style(ui, 1.3);
             ui.horizontal_top(|ui| {
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(330.0), Sense::hover());
-                let pa = ui.painter_at(rect.expand(24.0));
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(560.0), Sense::hover());
+                let pa = ui.painter_at(rect.expand(30.0));
                 pa.rect_filled(rect, 2.0, if dark { Color32::from_gray(24) } else { Color32::WHITE });
-                let (c, r) = (rect.center(), 140.0);
+                let (c, r) = (rect.center(), 245.0);
                 draw_net(&pa, c, r, ink, true);
                 if let (Some((a, b)), Some(res)) = (st.inputs, st.result) {
                     let mark = |p: Pos2, col: Color32| {
@@ -990,14 +1011,15 @@ impl App {
         let mut st = std::mem::take(&mut self.tools.def);
         let mut close = false;
         let mut copy: Option<Rect> = None;
-        self.base_window(ctx, "Deform AMS", T_DEF, Vec2::new(760.0, 600.0)).open(&mut open).resizable(false).show(ctx, |ui| {
+        self.base_window(ctx, "Deform AMS", T_DEF, Vec2::new(1180.0, 880.0)).open(&mut open).resizable(false).show(ctx, |ui| {
+            pop_style(ui, 1.3);
             ui.horizontal_top(|ui| {
                 // ---- stereonet with the grains
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(360.0), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(540.0), Sense::hover());
                 copy = Some(rect);
-                let pa = ui.painter_at(rect.expand(22.0));
+                let pa = ui.painter_at(rect.expand(26.0));
                 pa.rect_filled(rect, 2.0, if dark { Color32::from_gray(24) } else { Color32::WHITE });
-                let (c, r) = (rect.center(), 150.0);
+                let (c, r) = (rect.center(), 235.0);
                 draw_net(&pa, c, r, ink, true);
                 let to_dec_inc = |q: &anisoft_core::tensor::Vec3| dec_inc([q[1], q[0], q[2]]);
                 for q in st.model.axes() {
@@ -1024,13 +1046,13 @@ impl App {
                 }
                 // ---- controls
                 ui.vertical(|ui| {
-                    ui.set_width(350.0);
+                    ui.set_width(350.0 * 1.3);
                     let mut reset_model = false;
                     ui.group(|ui| {
-                        ui.set_width(336.0);
+                        ui.set_width(336.0 * 1.3);
                         ui.label(RichText::new("Single grain characteristics").strong().color(Color32::from_rgb(40, 60, 230)));
                         let before = st.oblate;
-                        egui::ComboBox::from_id_salt("def-grain").width(318.0).selected_text(if st.oblate { "Oblate Spheroids" } else { "Prolate Spheroids" }).show_ui(ui, |ui| {
+                        egui::ComboBox::from_id_salt("def-grain").width(318.0 * 1.3).selected_text(if st.oblate { "Oblate Spheroids" } else { "Prolate Spheroids" }).show_ui(ui, |ui| {
                             ui.selectable_value(&mut st.oblate, false, "Prolate Spheroids");
                             ui.selectable_value(&mut st.oblate, true, "Oblate Spheroids");
                         });
@@ -1046,10 +1068,10 @@ impl App {
                         });
                     });
                     ui.group(|ui| {
-                        ui.set_width(336.0);
+                        ui.set_width(336.0 * 1.3);
                         ui.label(RichText::new("Strain").strong().color(Color32::from_rgb(40, 60, 230)));
                         let kind = StrainKind::ALL[st.kind];
-                        egui::ComboBox::from_id_salt("def-kind").width(318.0).selected_text(kind.label()).show_ui(ui, |ui| {
+                        egui::ComboBox::from_id_salt("def-kind").width(318.0 * 1.3).selected_text(kind.label()).show_ui(ui, |ui| {
                             for (i, k) in StrainKind::ALL.iter().enumerate() {
                                 if ui.selectable_value(&mut st.kind, i, k.label()).clicked() {
                                     st.axis = 0;
@@ -1059,7 +1081,7 @@ impl App {
                         let axes = StrainKind::ALL[st.kind].axes();
                         if !axes.is_empty() {
                             st.axis = st.axis.min(axes.len() - 1);
-                            egui::ComboBox::from_id_salt(("def-axis", st.kind)).width(318.0).selected_text(axes[st.axis]).show_ui(ui, |ui| {
+                            egui::ComboBox::from_id_salt(("def-axis", st.kind)).width(318.0 * 1.3).selected_text(axes[st.axis]).show_ui(ui, |ui| {
                                 for (i, a) in axes.iter().enumerate() {
                                     ui.selectable_value(&mut st.axis, i, *a);
                                 }
@@ -1154,10 +1176,11 @@ impl App {
 }
 
 fn out_box(ui: &mut Ui, text: &str, fill: Color32) {
-    let w = (text.len() as f32 * 7.5 + 16.0).max(58.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 22.0), Sense::hover());
+    let z = zf(ui);
+    let w = (text.len() as f32 * 7.5 * z + 16.0 * z).max(58.0 * z);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 22.0 * z), Sense::hover());
     ui.painter().rect(rect, 3.0, fill, Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color), StrokeKind::Inside);
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(13.0), Color32::from_gray(if ui.visuals().dark_mode { 235 } else { 20 }));
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(13.0 * z), Color32::from_gray(if ui.visuals().dark_mode { 235 } else { 20 }));
 }
 
 
