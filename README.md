@@ -35,6 +35,7 @@ Needs a Rust toolchain; on Fedora the Wayland/X11 libraries come with the deskto
 | Copy graphics to clipboard, save graphics (one PNG per ticked plot) | works |
 | Edit Data (rename a specimen) | works |
 | Selecting | click a row (the whole row is the target), drag over rows, Ctrl+drag to add; drag a rubber band in the stereonet, P-Kmean and T-P plots. In the stereonet hold **Ctrl** (K1), **Alt** (K2) or **Shift** (K3) to pick only that marker type (combine keys for several); **Esc** clears the selection |
+| Keys | **Q** previous specimen, **E** next specimen (the list follows), **W** switch in-phase / out-of-phase, **Esc** clear selection |
 | Log Kmean axis | tick **Log Km** in the header of the P-vs-Kmean plot (remembered between runs; specimens with Km <= 0 are not shown) |
 | Disregarded records | moved to the bottom of the list and the table, struck through and very faint |
 | Windows | every menu item opens its window at the same centred place with the same size, however often you use it |

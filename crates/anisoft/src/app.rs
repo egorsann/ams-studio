@@ -42,6 +42,8 @@ pub enum Action {
     About,
     ToggleBrowser,
     ToggleTheme,
+    StepSpecimen(i32),
+    TogglePhase,
 }
 
 const METRICS: [&str; 4] = ["Km", "P", "Pj", "T"];
@@ -89,6 +91,9 @@ pub struct App {
     bins: usize,
     export: [bool; 4],
     log_km: bool,
+    scroll_to: Option<usize>,
+    list_off: f32,
+    list_h: f32,
     pane_settings: [bool; 4],
     color_on: bool,
     palette: u8,
@@ -149,6 +154,9 @@ impl App {
             bins: 12,
             export: [true; 4],
             log_km: false,
+            scroll_to: None,
+            list_off: 0.0,
+            list_h: 0.0,
             pane_settings: [false; 4],
             color_on: false,
             palette: 0,
@@ -442,6 +450,36 @@ impl App {
                 self.out_phase = op;
                 self.dirty = true;
             }
+            Action::TogglePhase => {
+                if has {
+                    self.out_phase = !self.out_phase;
+                    self.dirty = true;
+                }
+            }
+            Action::StepSpecimen(dir) => {
+                if let Some(d) = &mut self.doc {
+                    // walk the active specimens in list order, starting from the current selection
+                    let order: Vec<usize> = d.order().into_iter().filter(|&i| d.active[i]).collect();
+                    if !order.is_empty() {
+                        let cur = self
+                            .last_anchor
+                            .filter(|&i| i < d.selected.len() && d.selected[i] && d.active[i])
+                            .or_else(|| order.iter().copied().find(|&i| d.selected[i]))
+                            .and_then(|i| order.iter().position(|&o| o == i));
+                        let pos = match (cur, dir > 0) {
+                            (Some(p), true) => (p + 1).min(order.len() - 1),
+                            (Some(p), false) => p.saturating_sub(1),
+                            (None, true) => 0,
+                            (None, false) => order.len() - 1,
+                        };
+                        let i = order[pos];
+                        d.selected.iter_mut().for_each(|s| *s = false);
+                        d.selected[i] = true;
+                        self.last_anchor = Some(i);
+                        self.scroll_to = Some(pos);
+                    }
+                }
+            }
             Action::Coord(c) => {
                 self.coord = c;
                 self.dirty = true;
@@ -492,6 +530,9 @@ impl App {
             (Modifiers::NONE, Key::F2, Action::DataTable),
             (Modifiers::NONE, Key::F3, Action::Phase(false)),
             (Modifiers::NONE, Key::F4, Action::Phase(true)),
+            (Modifiers::NONE, Key::Q, Action::StepSpecimen(-1)),
+            (Modifiers::NONE, Key::E, Action::StepSpecimen(1)),
+            (Modifiers::NONE, Key::W, Action::TogglePhase),
             (Modifiers::NONE, Key::F5, Action::Coord(CoordSys::Specimen)),
             (Modifiers::NONE, Key::F6, Action::Coord(CoordSys::Geographic)),
             (Modifiers::NONE, Key::F7, Action::Coord(CoordSys::Paleo)),
@@ -647,6 +688,10 @@ impl eframe::App for App {
                     ui.separator();
                     if item(ui, "In-Phase AMS", "F3", has) { actions.push(Action::Phase(false)) }
                     if item(ui, "Out-of-Phase AMS", "F4", has) { actions.push(Action::Phase(true)) }
+                    if item(ui, "Switch In / Out-of-Phase", "W", has) { actions.push(Action::TogglePhase) }
+                    ui.separator();
+                    if item(ui, "Previous Specimen", "Q", has) { actions.push(Action::StepSpecimen(-1)) }
+                    if item(ui, "Next Specimen", "E", has) { actions.push(Action::StepSpecimen(1)) }
                     ui.separator();
                     ui.label(RichText::new("In-Phase AMS Coordinates").weak());
                     if item(ui, "Specimen Coordinates (SPEC)", "F5", has) { actions.push(Action::Coord(CoordSys::Specimen)) }
@@ -922,7 +967,19 @@ impl App {
         let mut clicked: Option<usize> = None;
         let mut started: Option<usize> = None;
         let mut hot: Option<usize> = None;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, ROW_H, order.len(), |ui, range| {
+        let mut sa = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        if let Some(pos) = self.scroll_to.take() {
+            // bring the row into view (only scroll when it is outside the visible part)
+            let pitch = ROW_H + ui.spacing().item_spacing.y;
+            let top = pos as f32 * pitch;
+            let (off, h) = (self.list_off, self.list_h.max(pitch));
+            if top < off {
+                sa = sa.vertical_scroll_offset(top);
+            } else if top + ROW_H > off + h {
+                sa = sa.vertical_scroll_offset(top + ROW_H - h);
+            }
+        }
+        let list_out = sa.show_rows(ui, ROW_H, order.len(), |ui, range| {
             for pos in range {
                 let i = order[pos];
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), Sense::click_and_drag());
@@ -938,6 +995,8 @@ impl App {
                 }
             }
         });
+        self.list_off = list_out.state.clamped_offset().y;
+        self.list_h = list_out.inner_rect.height();
         if let Some(pos) = started {
             let additive = mods.ctrl || mods.command;
             let base = if additive { doc.selected.clone() } else { vec![false; doc.selected.len()] };
