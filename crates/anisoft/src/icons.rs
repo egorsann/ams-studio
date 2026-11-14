@@ -225,8 +225,9 @@ pub fn paint(pa: &Painter, r: Rect, icon: Icon, dark: bool) {
             }
         }
         Icon::Camera => {
-            pa.rect_filled(Rect::from_min_max(p(r, 0.06, 0.28), p(r, 0.94, 0.86)), 4.0, Color32::from_rgb(50, 60, 75));
-            pa.rect_filled(Rect::from_min_max(p(r, 0.3, 0.16), p(r, 0.62, 0.3)), 2.0, Color32::from_rgb(50, 60, 75));
+            let body = if dark { Color32::from_rgb(150, 160, 175) } else { Color32::from_rgb(50, 60, 75) };
+            pa.rect_filled(Rect::from_min_max(p(r, 0.06, 0.28), p(r, 0.94, 0.86)), 4.0, body);
+            pa.rect_filled(Rect::from_min_max(p(r, 0.3, 0.16), p(r, 0.62, 0.3)), 2.0, body);
             pa.circle_filled(p(r, 0.5, 0.57), r.width() * 0.2, Color32::from_rgb(90, 160, 235));
             pa.circle_stroke(p(r, 0.5, 0.57), r.width() * 0.2, Stroke::new(2.0, Color32::from_gray(225)));
         }

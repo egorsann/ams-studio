@@ -143,13 +143,27 @@ pub fn saved_window() -> (Option<[f32; 2]>, bool) {
     (w.zip(h).map(|(w, h)| [w.clamp(760.0, 8000.0), h.clamp(480.0, 8000.0)]), max)
 }
 
+/// The user's home folder on any platform ($HOME on Linux/macOS, %USERPROFILE% on Windows).
+pub fn home_dir() -> PathBuf {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default()
+}
+
+/// Where the layout and preferences are kept: $XDG_CONFIG_HOME or ~/.config on Linux,
+/// %APPDATA% on Windows.
+fn config_dir() -> PathBuf {
+    if let Some(x) = std::env::var_os("XDG_CONFIG_HOME") {
+        return PathBuf::from(x);
+    }
+    if cfg!(windows) {
+        if let Some(a) = std::env::var_os("APPDATA") {
+            return PathBuf::from(a);
+        }
+    }
+    home_dir().join(".config")
+}
+
 fn state_path() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_default()
-        .join("anisoft-linux")
-        .join("state.txt")
+    config_dir().join("anisoft-linux").join("state.txt")
 }
 
 impl App {
@@ -164,7 +178,7 @@ impl App {
             hfrac: 0.5,
             vfrac: 0.5,
             browser_open: true,
-            browser_dir: std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default(),
+            browser_dir: home_dir(),
             browser_back: vec![],
             spec_color_open: false,
             show_k: [true; 3],
@@ -933,7 +947,7 @@ impl App {
                 go = self.browser_dir.parent().map(|p| p.to_path_buf());
             }
             if small_icon(ui, Icon::Home, "Home folder", true, dark) {
-                go = std::env::var_os("HOME").map(PathBuf::from);
+                go = Some(home_dir());
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if small_icon(ui, Icon::Sidebar(true), "Hide file browser  Ctrl+B", true, dark) {

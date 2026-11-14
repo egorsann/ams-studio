@@ -1,91 +1,119 @@
-# Anisoft for Linux
+# anisoft-rs
 
-An independent, native Linux reimplementation of AGICO's **Anisoft 6** (anisotropy of magnetic susceptibility, AMS), written in Rust with [egui](https://github.com/emilk/egui).
+**A fast, modern, open reimplementation of AGICO Anisoft 6** for anisotropy of magnetic susceptibility (AMS) data. It reads Safyr7 `.ams` files, gives the same numbers as the original (checked against it), keeps the original's menus, toolbar order and shortcuts, and adds the things the original never had: a **dark mode**, resizable panes, a file browser, drag selection, and a single executable for **Windows and Linux**.
 
-It keeps the original's window: the same menus, shortcuts and toolbar button order, the Specimens list, the four plots (stereonet, N vs Kmean, P vs Kmean, T vs P) and the coloured status bar. On top of that:
+> **Download:** [latest release](../../releases/latest) → `anisoft-rs-windows-x64.exe` (double-click, no installer) or `anisoft-rs-linux-x64.tar.gz`. Try it with the made-up files in [`examples/`](examples).
 
-- **Resizable panes**: drag the dividers between the four plots, and the edges of the Specimens list and the file browser.
-- **Collapsible file browser** on the left (Ctrl+B), listing `.ams` files; click one to open it.
-- A modern look with a light and a dark theme (View > Dark Theme).
-
-![main window](docs/main.png)
-![group statistics](docs/groupstats.png)
-![contour plot](docs/contour.png)
-
-(Screenshots use made-up data from `make_demo`.)
-
-## Build and run
-
-```
-cargo run --release -p anisoft -- [file.ams]
-```
-
-Needs a Rust toolchain; on Fedora the Wayland/X11 libraries come with the desktop. Tests: `cargo test`.
-
-## What works
-
-| Area | Status |
+| Light | Dark |
 |---|---|
-| Open / previous / next / reload `.ams` (Safyr7) | works; previous/next walk the `.ams` files in the folder |
-| In-phase and out-of-phase AMS (F3 / F4) | works |
-| K1-K3, Dec/Inc, L F P Pj T U Q E, F-tests | works, matches Anisoft's csv export (see below) |
-| Four plots, selection, disregard / restore, invert / clear | works |
-| Colour-coding by Km, P, Pj or T (rainbow / shades / grayscale) | works |
-| Data Table (F2) | works |
-| Group Statistics (F9) | works like the original: stereonet with data points, mean-tensor axes, Jelinek ellipses, optional planes and bootstrap cloud; tables with coloured backdrops (K1 pink, K2 green, K3 lavender, shape parameters cyan); Export Data (CSV). Mean tensor, Jelinek angles, shape parameters, averages and SD reproduce the original exactly on two test files |
-| Contour Plot (F12) | works like the original: K1/K2/K3 input, continuous or discrete levels in the colour of the chosen axis, smoothing, Contours / Data Points / Eigenvectors, eigenvector table (matches the original), colour scale with Max, Copy Data / Copy Graphics. Foliation Pole and Lineation inputs need `.ged` data and are not supported yet |
-| File > Export Selection (CSV) | writes only the selected specimens, in-phase or out-of-phase as shown (Ctrl+Shift+E) |
-| Save active records as `.ams`, append selected records into an `.ams`, export CSV | works; subsets are copied byte for byte |
-| Copy graphics to clipboard, save graphics (one PNG per ticked plot) | works |
-| Edit Data (rename a specimen) | works |
-| Selecting | click a row (the whole row is the target), drag over rows, Ctrl+drag to add; drag a rubber band in the stereonet, P-Kmean and T-P plots. In the stereonet hold **Ctrl** (K1), **Alt** (K2) or **Shift** (K3) to pick only that marker type (combine keys for several); **Esc** clears the selection |
-| Layout | the window size (and maximised state), the widths of the file browser and Specimens panels, the plot dividers, and the open/closed file browser are remembered between runs (`~/.config/anisoft-linux/state.txt`) |
-| Keys | **Q** previous specimen, **E** next specimen (the list follows), **W** switch in-phase / out-of-phase, **Esc** clear selection |
-| Log Kmean axis | tick **Log Km** in the header of the P-vs-Kmean plot (remembered between runs; specimens with Km <= 0 are not shown) |
-| Disregarded records | moved to the bottom of the list and the table, struck through and very faint |
-| Windows | every menu item opens its window at the same centred place with the same size, however often you use it; popups are about twice the size of the original's |
-| Tools > GED Editor | works: open / edit / save `.ged` files (byte-identical to the original's layout) |
-| Tools > Tensor Addition / Subtraction | works, matches the original bit for bit on 86 pairs (in- and out-of-phase) |
-| Tools > Fabric Overprint | works, matches the original (max error 1e-7); replaces the data with the simulated series |
-| Tools > Intersection Toolbox | works, matches the original's numbers and plot |
-| Tools > Deform AMS | works, matches the original to about 1e-6 (7 test cases, prolate and oblate grains, step order, all strain types) |
-| Coordinates S / G / P / T (F5-F8) | works with user-set orientation parameters, conventions unverified |
+| ![light](docs/img/main_light.png) | ![dark](docs/img/main_dark.png) |
 
-## Not implemented yet
+## What is better than the original
 
-Import Data File(s) (`.ran`, `.asc`), Set Data Classes, and Paleo-Horizontal / Paleo-Vertical. Their menu items and buttons are present so the layout matches; most show a short "not implemented yet" note. Edit Data only renames a specimen: the original also stores per-specimen orientation values (from a `.ged` file) in the `.ams` records, which this version does not read or write yet.
+| | Original Anisoft 6 | anisoft-rs |
+|---|---|---|
+| **Look** | One fixed light look | **Light and dark theme** (View menu, remembered), flat vector icons, rounded cards. The toolbar buttons are in the same places as in the original, so muscle memory carries over |
+| **Layout** | Four plots at a fixed split | **Drag the dividers** between the plots, resize the Specimens list and the file browser. Window size, panel widths and dividers are **remembered** between runs |
+| **Opening files** | File dialog, previous / next buttons | **Collapsible file browser** on the side (like a code editor): folders, back / up / home, click a file to open it, previous / next file in the folder |
+| **Selecting** | Click rows | **Whole-row click**, **drag over rows**, **rubber-band** selection in the stereonet, P-Kmean and T-P plots. Hold **Ctrl / Alt / Shift** to pick only **K1 / K2 / K3** markers. **Esc** clears |
+| **Keyboard** | Function keys | Function keys as before, plus **Q / E** previous / next specimen (the list follows), **W** switches in-phase / out-of-phase, **Esc** clears the selection |
+| **Kmean axis** | Linear | **Log Km** checkbox on the P-vs-Kmean plot |
+| **Popups** | Tool windows open in a different place every time | About **twice as large**, always open **centred at the same size** |
+| **Exports** | Export all active records | Adds **Export Selection (CSV)** (Ctrl+Shift+E) for just the specimens you selected |
+| **Install** | Windows only; installer that brings the Visual Basic 6 runtime and OCX controls | **One executable**, nothing to install, runs on **Windows and Linux** |
+| **Trust** | Closed source | **Open source**, 42 automated tests, results checked against the original on its own output files (see below) |
 
-## Caveats
+Also: disregarded records **sink to the bottom** of the list and the Data Table, struck through and faded; the colour-coding panel, the Export graphics tick boxes and the status bar colours of the original are kept.
 
-- Group Statistics: the Jelinek ellipses follow the formula recovered from the original (tan of the semi-axis = standard deviation of the tilt components). The bootstrap ellipses are this program's own (500 resamples, 95 % region): the original's bootstrap values could not be reproduced. The original calls the spread column "SEM"; it is the standard deviation, so it is labelled SD here.
-- Orientation: G / P / T use the global values in Settings > Orientation Parameters. The original instead reads per-specimen values stored in each `.ams` record (set through Edit Data with a `.ged` file). Its geographic rule has been worked out (see `reference/tools-spec.md` in the checkout) but is not built in yet, so treat G / P / T here as approximate. The rotation conventions (core azimuth/dip, bedding strike/dip, paleo declination) are documented in `anisoft-core/src/coords.rs` and have not been checked against Anisoft's own dialog.
-- Km is shown exactly as stored. No specimen-volume correction is applied.
-- Contour Plot: kernel exp(k (cos^2 - 1)) with k = the smoothing value (64 by default). The original's colour-scale maxima for two test sets were 27.1 and 18.7; this gives 26.4 and 18.8, so the colours differ slightly. The level steps (1, 3, 5 ... for maxima up to 45) were only checked for those two cases.
+## What it can do
 
-- Tensor Addition: Find Duplicates keeps the first record of each name and disregards the rest; the original's exact rule was not checked. Deform AMS starts from the isotropic grain population, whereas the original starts from a fabric taken from the main window.
+Everything below is in the program today.
 
-## Validation
+- **Open and browse** Safyr7 `.ams` files (in-phase and out-of-phase), step through the files of a folder, reload.
+- **Four live plots**: equal-area stereonet of K1/K2/K3, Kmean histogram, P vs Kmean, T vs P (Jelinek-style). Colour-code the specimens by Km, P, Pj or T (rainbow, shades or grayscale). Hover for values, click to select.
+- **Coordinate systems** S, G, P, T and the in-phase / out-of-phase switch (F3 / F4 / **W**).
+- **Data Table** with all parameters (Km, K1-K3 with directions, P, Pj, T, F-tests...), whole-row selection, disregarded records last.
+- **Group Statistics** (F9) with the original's colour-coded tables and a stereonet with data points, mean-tensor axes, **Jelinek confidence ellipses**, optional great-circle planes and a **bootstrap cloud**; display toggles for everything.
+- **Contour Plot** (F12) for K1, K2, K3: continuous or discrete levels in the axis colour, adjustable smoothing, contour lines, data points, eigenvectors with their eigenvalue table, colour scale.
+- **Tools menu**, all five windows: **GED Editor** (read/write `.ged` files), **Tensor Addition / Subtraction** (pair two files by specimen name, add or subtract tensors, save), **Fabric Overprint** (mix two fabrics, simulate the series), **Intersection Toolbox** (two lineations to a plane, two foliations to a lineation, with the net drawn), **Deform AMS** (grain-population model with seven strain types, step by step).
+- **Edit** (rename specimens, invert / disregard / restore / clear selection), **Save Active Records As**, **Append Selected Records Into** (records are copied byte for byte), **Export CSV**, **Export Selection (CSV)**.
+- **Graphics**: copy to the clipboard or save PNGs of the plots you tick under *Export graphics*.
 
-The `.ams` reader and the tensor maths were checked against a csv exported by the original Anisoft 6 for an 88-specimen file. Over all 88 specimens: Km, K1-K3, L, F, P, Pj, E and the F-tests agree to about 1e-7 (relative), principal directions to under 0.002 degrees, T, U and Q to about 1e-5.
+### Screenshots
 
-```
-cargo run -p anisoft-core --example validate -- file.ams anisoft_export.csv
-```
+| Group Statistics (light) | Group Statistics (dark) |
+|---|---|
+| ![group statistics light](docs/img/groupstats_light.png) | ![group statistics dark](docs/img/groupstats_dark.png) |
 
-(Specimens are joined on Km, because names can differ between a csv and an `.ams` that was renamed afterwards.)
+| Contour plot (K2, discrete, all overlays) | Deform AMS after three steps (dark) |
+|---|---|
+| ![contour](docs/img/contour_light.png) | ![deform](docs/img/deform_dark.png) |
 
-The Tools were checked the same way, against files the original wrote: `cargo run -p anisoft-core --example check_tools -- A.ams B.ams added.ams subtracted.ams overprint.ams`.
+![intersection toolbox](docs/img/intersection.png)
 
-## Layout
+(All screenshots use the made-up demo files; no measurement data is in this repository.)
 
-- `crates/anisoft-core`: `.ams` parsing (`ams`), eigen-decomposition and anisotropy parameters (`tensor`), coordinate systems (`coords`), group statistics (`stats`), contour density (`density`), CSV export (`export`), `.ged` files (`ged`) and the Tools maths (`tools`).
-- `crates/anisoft`: the egui application.
-- `crates/anisoft-core/examples/make_demo.rs`: writes a made-up `.ams` for demos and screenshots.
+## Same results as the original
 
-## `.ams` layout
+The numbers were checked by running the original Anisoft 6 on made-up data and comparing what it printed or wrote:
 
-Fixed 640-byte records, no header. Name at byte 0; field (A/m) at 28; frequency (Hz) at 40; instrument text at 44; reference volume (10.0 cm3) at 68; the in-phase block at 180 and the out-of-phase block at 324 (144 bytes each). Inside a block: Km at +0, K1-K3 standard deviations at +20, the raw tensor at +32 in the order Tyy, Txx, Tzz, Txy, Txz, Tyz, and the F-tests at +128. K1-K3 are always recomputed from the tensor; the K1-K3 floats stored at +8 are not reliable.
+| Area | Agreement with the original |
+|---|---|
+| Km, K1-K3, L, F, P, Pj, E, F-tests (88 specimens) | about 1e-7 relative |
+| Principal directions | under 0.002 degrees |
+| T, U, Q | about 1e-5 |
+| Group statistics: mean tensor, Jelinek ellipse angles, shape parameters, averages and standard deviations | **exact** on two files (N = 12 and N = 60) |
+| Contour eigenvector table | matches to 5 digits |
+| Tensor Addition / Subtraction (86 pairs, both phases) | identical |
+| Fabric Overprint series | 1e-7 |
+| Intersection Toolbox | exact |
+| Deform AMS (prolate and oblate grains, step order, all strain types) | about 1e-6 |
+| `.ged` files | written byte for byte like the original |
+
+Each check is reproducible: `cargo run -p anisoft-core --example validate` and `--example check_tools` compare against files exported by the original, and `cargo test` contains regression tests built from numbers the original printed.
+
+## Not (yet) the same
+
+Honest list of the gaps:
+
+- **Per-specimen orientation.** The original takes geographic, paleo and tectonic coordinates from orientation values stored in each `.ams` record (written by *Edit Data* from a `.ged` file). Here the G / P / T views use the global values in *Settings > Orientation Parameters*, which is only an approximation. The geographic and paleo rules are decoded (see [`docs/ORIGINAL_BEHAVIOUR.md`](docs/ORIGINAL_BEHAVIOUR.md)); the tectonic rule is not.
+- **Bootstrap ellipses** are this program's own method (500 resamples, 95 % region) and differ from the original's.
+- **Contour density** is very close to the original (colour-scale maxima within about 3 %) but not identical.
+- **Not implemented:** import of `.asc` / `.ran` files, *Set Data Classes*, Paleo-Horizontal / Paleo-Vertical, and the contour inputs *Foliation Pole* / *Lineation* (they need the orientation data above). Their menu items are present so the layout matches.
+- Deform AMS starts from the isotropic grain population; the original starts from the fabric of the open data.
+
+## Run it
+
+**Windows:** download `anisoft-rs-windows-x64.exe` from the [latest release](../../releases/latest) and double-click it. The executable is not code-signed, so Windows SmartScreen may say "unknown publisher": choose *More info* then *Run anyway*. Preferences are kept in `%APPDATA%\anisoft-linux\state.txt` (delete it to reset the layout).
+
+**Linux:** unpack `anisoft-rs-linux-x64.tar.gz`, run `./anisoft-rs [file.ams]` (needs a Wayland or X11 session). Preferences are in `~/.config/anisoft-linux/state.txt`.
+
+**From source:** `cargo run --release -p anisoft -- examples/demo_60_specimens.ams` (a recent stable Rust; no other dependencies).
+
+The program never uses the network.
+
+### Keyboard
+
+| Key | Action | Key | Action |
+|---|---|---|---|
+| Ctrl+O / P / N / R | open / previous / next file / reload | F3 / F4 / **W** | in-phase / out-of-phase / switch |
+| Ctrl+S / A | save active as / append selected | F5 - F8 | S, G, P, T coordinates |
+| Ctrl+E / **Ctrl+Shift+E** | export all / **export selection** (CSV) | F9 / F12 | group statistics / contour |
+| Ctrl+C / Ctrl+F | copy / save graphics | F2 | data table |
+| Shift+Ins / Shift+Del / Alt+Backspace | invert / disregard / restore all | **Q / E** | previous / next specimen |
+| **Esc** | clear selection | Ctrl+B | show / hide the file browser |
+
+Mouse: click a row or marker to select, **drag over rows** or **drag a rubber band** in a plot to select several; with **Ctrl / Alt / Shift** held the band only picks K1 / K2 / K3 markers. Drag the dividers between plots and the panel edges to resize.
+
+## For developers and other LLMs
+
+Everything needed to follow or redo the work is in the repository:
+
+- [`AGENTS.md`](AGENTS.md): repository map, commands, rules.
+- [`docs/ORIGINAL_BEHAVIOUR.md`](docs/ORIGINAL_BEHAVIOUR.md): every rule recovered from the original, with how closely it is verified.
+- [`docs/FORMATS.md`](docs/FORMATS.md): the `.ams` record layout, `.ged`, csv, preferences.
+- [`docs/RECREATING.md`](docs/RECREATING.md): how the original was studied (installer and VB6 structure, REA + Ghidra, the black-box calibration rig), the traps, architecture, egui 0.37 specifics, headless testing, open items.
 
 ## Legal
 
-This is an independent reimplementation. It contains no AGICO code, binaries or assets. Anisoft is a program of AGICO, Brno; this project is not affiliated with AGICO.
+anisoft-rs is an independent reimplementation written from observed behaviour. It contains **no AGICO code, binaries, icons or screenshots**. Anisoft and Safyr are products of AGICO, Brno; this project is not affiliated with or endorsed by AGICO. The `.ams` layout was worked out from files; check your own licence terms if that matters for your use. MIT licensed.
