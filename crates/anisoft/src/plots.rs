@@ -1,7 +1,7 @@
 //! The four plots of the main window, drawn directly with egui's painter.
 
 use anisoft_core::density::project;
-use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
+use egui::{Align2, Color32, FontId, Modifiers, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2};
 
 #[derive(Clone, Debug)]
 pub struct Pt {
@@ -20,6 +20,48 @@ pub struct Pt {
 pub struct PlotOut {
     pub click: Option<usize>,
     pub hover: Option<String>,
+    /// Specimen indices inside a rubber band that was just released.
+    pub band: Option<Vec<usize>>,
+}
+
+/// Marker types a selection may touch: no modifier = all shown types; Ctrl = K1, Alt = K2, Shift = K3
+/// (combinations select the union).
+pub fn axis_mask(m: Modifiers) -> [bool; 3] {
+    let (a, b, c) = (m.ctrl || m.command, m.alt, m.shift);
+    if !(a || b || c) {
+        [true; 3]
+    } else {
+        [a, b, c]
+    }
+}
+
+/// Rubber-band state for a drag on `resp`: (rect while dragging, rect when released).
+fn band(ui: &mut Ui, resp: &Response, key: &str) -> (Option<Rect>, Option<Rect>) {
+    let id = resp.id.with(key);
+    if resp.drag_started() {
+        // where the button went down (the pointer has already moved on by the time a drag is detected)
+        if let Some(p) = ui.input(|i| i.pointer.press_origin()).or_else(|| resp.interact_pointer_pos()) {
+            ui.memory_mut(|m| m.data.insert_temp(id, p));
+        }
+    }
+    let start: Option<Pos2> = ui.memory(|m| m.data.get_temp(id));
+    let cur = resp.interact_pointer_pos().or_else(|| ui.input(|i| i.pointer.latest_pos()));
+    let rect = |a: Pos2, b: Pos2| Rect::from_two_pos(a, b);
+    let live = if resp.dragged() { start.zip(cur).map(|(a, b)| rect(a, b)) } else { None };
+    let done = if resp.drag_stopped() {
+        let r = start.zip(cur).map(|(a, b)| rect(a, b)).filter(|r| r.width() > 3.0 || r.height() > 3.0);
+        ui.memory_mut(|m| m.data.remove::<Pos2>(id));
+        r
+    } else {
+        None
+    };
+    (live, done)
+}
+
+fn paint_band(ui: &Ui, clip: Rect, r: Rect, th: &Theme) {
+    let pa = ui.painter_at(clip);
+    pa.rect_filled(r, 0.0, th.accent.gamma_multiply(0.18));
+    pa.rect_stroke(r, 0.0, Stroke::new(1.2, th.accent), egui::StrokeKind::Inside);
 }
 
 pub struct Theme {
@@ -171,7 +213,9 @@ pub struct StereoOpts {
 }
 
 pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Theme, label: &str) -> PlotOut {
-    let resp = ui.interact(rect, ui.scope_id().with("stereo"), Sense::click());
+    let resp = ui.interact(rect, ui.scope_id().with("stereo"), Sense::click_and_drag());
+    let mask = axis_mask(ui.input(|i| i.modifiers));
+    let (live, done) = band(ui, &resp, "band");
     let pa = ui.painter_at(rect);
     let r = (rect.width().min(rect.height()) / 2.0 - 26.0).max(20.0);
     let c = rect.center();
@@ -207,6 +251,7 @@ pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Th
 
     let hover = resp.hover_pos();
     let mut best: Option<(f32, usize, usize)> = None;
+    let mut inside: Vec<usize> = vec![];
     // draw unselected first, selected on top
     for pass in [false, true] {
         for (pi, p) in pts.iter().enumerate().filter(|(_, p)| p.selected == pass) {
@@ -218,10 +263,18 @@ pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Th
                 let s = Pos2::new(c.x + x as f32 * r, c.y - y as f32 * r);
                 let fill = p.color.unwrap_or(th.k_colors[a]);
                 marker(&pa, s, a as u8, opts.size, fill, th.ink(), p.selected);
+                if !mask[a] {
+                    continue;
+                }
                 if let Some(h) = hover {
                     let d = s.distance(h);
                     if d < 9.0 && best.map_or(true, |b| d < b.0) {
                         best = Some((d, pi, a));
+                    }
+                }
+                if let Some(b) = done {
+                    if b.contains(s) && !inside.contains(&p.idx) {
+                        inside.push(p.idx);
                     }
                 }
             }
@@ -234,6 +287,12 @@ pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Th
         pa.text(Pos2::new(rect.min.x + 32.0, y), Align2::LEFT_CENTER, *name, f.clone(), th.ink());
     }
     let mut out = PlotOut::default();
+    if let Some(l) = live {
+        paint_band(ui, rect, l, th);
+    }
+    if done.is_some() {
+        out.band = Some(inside);
+    }
     if let Some((_, pi, a)) = best {
         let p = &pts[pi];
         out.hover = Some(format!("Dec = {:5.1}   Inc = {:4.1}", p.di[a].0, p.di[a].1));
@@ -307,7 +366,9 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: ScatterSpec, size: f32
         let b = f.to_screen(xr.1, 0.0);
         pa.line_segment([a, b], Stroke::new(1.2, th.ink()));
     }
-    let resp = ui.interact(f.plot, ui.scope_id().with(spec.salt), Sense::click());
+    let resp = ui.interact(f.plot, ui.scope_id().with(spec.salt), Sense::click_and_drag());
+    let (live, done) = band(ui, &resp, "band");
+    let mut inside: Vec<usize> = vec![];
     let hover = resp.hover_pos();
     let mut best: Option<(f32, usize)> = None;
     let clip = ui.painter_at(f.plot);
@@ -315,6 +376,11 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: ScatterSpec, size: f32
         for (i, x, y) in xs.iter().filter(|(i, _, _)| pts[*i].selected == pass) {
             let s = f.to_screen(*x, *y);
             marker(&clip, s, 2, size, pts[*i].color.unwrap_or(th.accent), th.ink(), pts[*i].selected);
+            if let Some(b) = done {
+                if b.contains(s) {
+                    inside.push(pts[*i].idx);
+                }
+            }
             if let Some(h) = hover {
                 let d = s.distance(h);
                 if d < 9.0 && best.map_or(true, |b| d < b.0) {
@@ -324,6 +390,12 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: ScatterSpec, size: f32
         }
     }
     let mut out = PlotOut::default();
+    if let Some(l) = live {
+        paint_band(ui, f.plot, l, th);
+    }
+    if done.is_some() {
+        out.band = Some(inside);
+    }
     if let Some((_, i)) = best {
         let p = &pts[i];
         out.hover = Some(format!("{}   {} = {:.4}   {} = {:.4}", p.name, spec.xlabel.split(' ').next().unwrap_or("x"), (spec.x)(p).unwrap_or(f64::NAN), spec.ylabel, (spec.y)(p).unwrap_or(f64::NAN)));

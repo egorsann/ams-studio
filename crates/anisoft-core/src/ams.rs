@@ -123,6 +123,19 @@ fn parse_phase(rec: &[u8], base: usize) -> Phase {
     }
 }
 
+pub fn parse_phase_pub(rec: &[u8], base: usize) -> Phase {
+    parse_phase(rec, base)
+}
+
+/// Overwrite Km and the six tensor floats of the block starting at `base`.
+pub fn put_phase(rec: &mut [u8], base: usize, km: f64, t: &Mat3) {
+    let mut put = |off: usize, v: f64| rec[base + off..base + off + 4].copy_from_slice(&(v as f32).to_le_bytes());
+    put(0, km);
+    for (i, v) in [t[1][1], t[0][0], t[2][2], t[0][1], t[0][2], t[1][2]].into_iter().enumerate() {
+        put(32 + 4 * i, v);
+    }
+}
+
 pub fn parse(bytes: &[u8]) -> Result<Vec<Specimen>, AmsError> {
     if bytes.is_empty() {
         return Err(AmsError::Empty);

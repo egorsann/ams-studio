@@ -13,6 +13,8 @@ pub struct Doc {
     pub active: Vec<bool>,
     pub selected: Vec<bool>,
     pub modified: bool,
+    /// Built in memory by a tool (e.g. Fabric Overprint); has no file behind it.
+    pub synthetic: bool,
 }
 
 #[derive(Clone)]
@@ -27,7 +29,21 @@ impl Doc {
         let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let specs = ams::parse(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
         let n = specs.len();
-        Ok(Doc { path: path.to_path_buf(), raw, specs, active: vec![true; n], selected: vec![false; n], modified: false })
+        Ok(Doc { path: path.to_path_buf(), raw, specs, active: vec![true; n], selected: vec![false; n], modified: false, synthetic: false })
+    }
+
+    /// A document made by a tool from records already in memory.
+    pub fn simulated(name: &str, raw: Vec<u8>) -> Result<Doc, String> {
+        let specs = ams::parse(&raw).map_err(|e| e.to_string())?;
+        let n = specs.len();
+        Ok(Doc { path: PathBuf::from(name), raw, specs, active: vec![true; n], selected: vec![false; n], modified: false, synthetic: true })
+    }
+
+    /// Specimen indices in list order: active ones first, disregarded ones at the bottom.
+    pub fn order(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = (0..self.specs.len()).filter(|&i| self.active[i]).collect();
+        v.extend((0..self.specs.len()).filter(|&i| !self.active[i]));
+        v
     }
 
     pub fn n_active(&self) -> usize {

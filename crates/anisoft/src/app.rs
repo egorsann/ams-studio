@@ -1,6 +1,7 @@
 use crate::doc::{self, Derived, Doc};
 use crate::icons::{self, Icon};
 use crate::plots::{self, Pt, ScatterSpec, StereoOpts, Theme};
+mod tools_ui;
 use anisoft_core::coords::{CoordSys, Orientation};
 use anisoft_core::density;
 use anisoft_core::export;
@@ -44,6 +45,23 @@ pub enum Action {
 }
 
 const METRICS: [&str; 4] = ["Km", "P", "Pj", "T"];
+
+/// A drag over rows of a list: anchor position, whether it adds to the previous selection, and that selection.
+struct ListDrag {
+    anchor: usize,
+    additive: bool,
+    base: Vec<bool>,
+}
+
+// window slots (index into App::win_serial)
+const W_TABLE: usize = 0;
+const W_GROUP: usize = 1;
+const W_CONTOUR: usize = 2;
+const W_ORIENT: usize = 3;
+const W_COLORS: usize = 4;
+const W_FACTORS: usize = 5;
+const W_ABOUT: usize = 6;
+const W_EDIT: usize = 7;
 
 struct ShotJob {
     copy: bool,
@@ -92,6 +110,10 @@ pub struct App {
     info: Option<String>,
     hover: [String; 4],
     last_anchor: Option<usize>,
+    win_serial: [u64; 16],
+    list_drag: Option<ListDrag>,
+    tools: tools_ui::ToolsState,
+    tool_copy: Option<Rect>,
     shot: Option<ShotJob>,
     shot_box: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<egui::ColorImage>>>>,
     last_title: String,
@@ -146,6 +168,10 @@ impl App {
             info: None,
             hover: Default::default(),
             last_anchor: None,
+            win_serial: [0; 16],
+            list_drag: None,
+            tools: Default::default(),
+            tool_copy: None,
             shot: None,
             shot_box: Default::default(),
             last_title: String::new(),
@@ -286,7 +312,7 @@ impl App {
                 }
             }
             Action::Prev | Action::Next => {
-                if let Some(d) = &self.doc {
+                if let Some(d) = self.doc.as_ref().filter(|d| !d.synthetic) {
                     let (prev, next, _, _) = doc::neighbours(&d.path);
                     if let Some(p) = if a == Action::Prev { prev } else { next } {
                         self.open_path(p);
@@ -294,7 +320,7 @@ impl App {
                 }
             }
             Action::Reload => {
-                if let Some(d) = &self.doc {
+                if let Some(d) = self.doc.as_ref().filter(|d| !d.synthetic) {
                     let p = d.path.clone();
                     self.open_path(p);
                 }
@@ -352,7 +378,7 @@ impl App {
                     let sel: Vec<usize> = (0..d.specs.len()).filter(|&i| d.selected[i]).collect();
                     if sel.len() == 1 {
                         self.edit_name = d.specs[sel[0]].name.clone();
-                        self.win_edit = true;
+                        self.open_win(W_EDIT);
                     } else {
                         self.info = Some("Select exactly one specimen to edit its name.".into());
                     }
@@ -407,7 +433,7 @@ impl App {
                     });
                 }
             }
-            Action::DataTable => self.win_table = !self.win_table,
+            Action::DataTable => self.open_win(W_TABLE),
             Action::Phase(op) => {
                 self.out_phase = op;
                 self.dirty = true;
@@ -416,13 +442,13 @@ impl App {
                 self.coord = c;
                 self.dirty = true;
             }
-            Action::GroupStats => self.win_group = !self.win_group,
-            Action::Contour => self.win_contour = !self.win_contour,
-            Action::Tool(name) => self.info = Some(format!("{name} is not implemented yet.")),
-            Action::Factors => self.win_factors = true,
-            Action::OrientParams => self.win_orient = true,
-            Action::Colors => self.win_colors = true,
-            Action::About => self.win_about = true,
+            Action::GroupStats => self.open_win(W_GROUP),
+            Action::Contour => self.open_win(W_CONTOUR),
+            Action::Tool(name) => self.open_tool(name),
+            Action::Factors => self.open_win(W_FACTORS),
+            Action::OrientParams => self.open_win(W_ORIENT),
+            Action::Colors => self.open_win(W_COLORS),
+            Action::About => self.open_win(W_ABOUT),
             Action::ToggleBrowser => {
                 self.browser_open = !self.browser_open;
                 self.save_state();
@@ -568,6 +594,7 @@ impl eframe::App for App {
 
         // window title like the original: Anisoft - [path (n / total)]
         let title = match &self.doc {
+            Some(d) if d.synthetic => format!("Anisoft - [{}]", d.path.display()),
             Some(d) => {
                 let (_, _, pos, total) = doc::neighbours(&d.path);
                 format!("Anisoft - [{}  ({pos} / {total})]{}", d.path.display(), if d.modified { " *" } else { "" })
@@ -649,7 +676,7 @@ impl eframe::App for App {
         // ------------------------------------------------------------- toolbar
         egui::Panel::top("toolbar").show(ui, |ui| {
             let d = self.dark;
-            let (prev, next) = self.doc.as_ref().map(|dc| { let n = doc::neighbours(&dc.path); (n.0.is_some(), n.1.is_some()) }).unwrap_or((false, false));
+            let (prev, next) = self.doc.as_ref().filter(|dc| !dc.synthetic).map(|dc| { let n = doc::neighbours(&dc.path); (n.0.is_some(), n.1.is_some()) }).unwrap_or((false, false));
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if tool(ui, Icon::Open, "Open Data File(s)  Ctrl+O", true, false, d) { actions.push(Action::Open) }
@@ -743,6 +770,7 @@ impl App {
         let (nfile, nact, nsel) = self.doc.as_ref().map_or((0, 0, 0), |d| (d.specs.len(), d.n_active(), d.n_selected()));
         let ngeo = if self.coord != CoordSys::Specimen { nact } else { 0 };
         let (prev, cur, next) = match &self.doc {
+            Some(d) if d.synthetic => ("NO PREVIOUS FILE".to_string(), d.path.display().to_string(), "NO NEXT FILE".to_string()),
             Some(d) => {
                 let (p, n, _, _) = doc::neighbours(&d.path);
                 let nm = |p: Option<PathBuf>, e: &str| p.and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string())).unwrap_or(e.to_string());
@@ -878,20 +906,46 @@ impl App {
             ui.label(RichText::new("No file open.\nOpen one with Ctrl+O or pick it in the file browser.").weak());
             return;
         };
+        let order = doc.order();
         let mods = ui.input(|i| i.modifiers);
+        let down = ui.input(|i| i.pointer.primary_down());
+        let pointer = ui.input(|i| i.pointer.interact_pos());
+        if !down {
+            self.list_drag = None;
+        }
+        let dark = self.dark;
         let mut clicked: Option<usize> = None;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, 20.0, doc.specs.len(), |ui, range| {
-            for i in range {
-                let mut t = RichText::new(&doc.specs[i].name);
-                if !doc.active[i] {
-                    t = t.strikethrough().weak();
-                }
-                if ui.selectable_label(doc.selected[i], t).clicked() {
+        let mut started: Option<usize> = None;
+        let mut hot: Option<usize> = None;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, ROW_H, order.len(), |ui, range| {
+            for pos in range {
+                let i = order[pos];
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), Sense::click_and_drag());
+                paint_row(ui, rect, doc.selected[i], resp.hovered(), doc.active[i], dark);
+                row_text(ui, rect, 8.0, &doc.specs[i].name, doc.active[i], dark);
+                if resp.drag_started() {
+                    started = Some(pos);
+                } else if resp.clicked() {
                     clicked = Some(i);
+                }
+                if pointer.map_or(false, |p| rect.contains(p)) {
+                    hot = Some(pos);
                 }
             }
         });
-        if let Some(i) = clicked {
+        if let Some(pos) = started {
+            let additive = mods.ctrl || mods.command;
+            let base = if additive { doc.selected.clone() } else { vec![false; doc.selected.len()] };
+            self.list_drag = Some(ListDrag { anchor: pos, additive, base });
+        }
+        if let (Some(d), Some(cur)) = (&self.list_drag, hot) {
+            let (lo, hi) = (d.anchor.min(cur), d.anchor.max(cur));
+            doc.selected = d.base.clone();
+            for pos in lo..=hi {
+                doc.selected[order[pos]] = true;
+            }
+            let _ = d.additive;
+        } else if let Some(i) = clicked {
             select(doc, i, mods, &mut self.last_anchor);
         }
     }
@@ -938,7 +992,7 @@ impl App {
 
         let pts = self.points();
         let mut click: Option<usize> = None;
-        let mods = ui.input(|i| i.modifiers);
+        let mut band: Option<Vec<usize>> = None;
         let cs_label = match self.coord {
             CoordSys::Specimen => "SPEC",
             CoordSys::Geographic => "GEO",
@@ -981,9 +1035,23 @@ impl App {
             if out.click.is_some() {
                 click = out.click;
             }
+            if out.band.is_some() {
+                band = out.band;
+            }
         }
-        if let (Some(i), Some(doc)) = (click, &mut self.doc) {
-            select(doc, i, mods, &mut self.last_anchor);
+        if let Some(b) = band {
+            if let Some(doc) = &mut self.doc {
+                doc.selected.iter_mut().for_each(|s| *s = false);
+                for i in b {
+                    doc.selected[i] = true;
+                }
+            }
+        } else if let (Some(i), Some(doc)) = (click, &mut self.doc) {
+            // a click on a marker selects just that specimen (a second click on it clears)
+            let only = doc.selected[i] && doc.n_selected() == 1;
+            doc.selected.iter_mut().for_each(|s| *s = false);
+            doc.selected[i] = !only;
+            self.last_anchor = Some(i);
         }
         if let Some(job) = &mut self.shot {
             if job.rects.is_empty() {
@@ -1030,8 +1098,20 @@ impl App {
 
     fn handle_screenshot(&mut self, ctx: &egui::Context) {
         let Some(img) = self.shot_box.lock().unwrap().take() else { return };
-        let Some(job) = self.shot.take() else { return };
         let ppp = ctx.pixels_per_point();
+        if let Some(r) = self.tool_copy.take() {
+            let x0 = ((r.min.x * ppp) as usize).min(img.width());
+            let y0 = ((r.min.y * ppp) as usize).min(img.height());
+            let x1 = ((r.max.x * ppp) as usize).clamp(x0, img.width());
+            let y1 = ((r.max.y * ppp) as usize).clamp(y0, img.height());
+            let mut px = Vec::with_capacity((x1 - x0) * (y1 - y0));
+            for y in y0..y1 {
+                px.extend_from_slice(&img.pixels[y * img.width() + x0..y * img.width() + x1]);
+            }
+            ctx.copy_image(egui::ColorImage::new([x1 - x0, y1 - y0], px));
+            return;
+        }
+        let Some(job) = self.shot.take() else { return };
         let crop = |r: Rect| -> egui::ColorImage {
             let x0 = ((r.min.x * ppp) as usize).min(img.width());
             let y0 = ((r.min.y * ppp) as usize).min(img.height());
@@ -1071,6 +1151,34 @@ fn km_exp(pts: &[Pt]) -> i32 {
     if hi > 0.0 { hi.log10().floor() as i32 } else { 0 }
 }
 
+const ROW_H: f32 = 22.0;
+
+fn faded(c: Color32, active: bool) -> Color32 {
+    if active { c } else { c.gamma_multiply(0.28) }
+}
+
+/// Full-width row background: selection, hover. Disregarded rows get a much fainter tint.
+fn paint_row(ui: &Ui, rect: Rect, selected: bool, hovered: bool, active: bool, _dark: bool) {
+    let v = ui.visuals();
+    if selected {
+        let c = if active { v.selection.bg_fill } else { v.selection.bg_fill.gamma_multiply(0.25) };
+        ui.painter().rect_filled(rect.shrink2(Vec2::new(1.0, 0.0)), 3.0, c);
+    } else if hovered {
+        ui.painter().rect_filled(rect.shrink2(Vec2::new(1.0, 0.0)), 3.0, v.widgets.hovered.bg_fill.gamma_multiply(0.5));
+    }
+}
+
+/// Row text; a disregarded row is struck through and very faint.
+fn row_text(ui: &Ui, rect: Rect, dx: f32, text: &str, active: bool, _dark: bool) -> f32 {
+    let col = faded(ui.visuals().text_color(), active);
+    let galley_rect = ui.painter().text(Pos2::new(rect.min.x + dx, rect.center().y), Align2::LEFT_CENTER, text, FontId::proportional(13.5), col);
+    if !active {
+        let y = galley_rect.center().y;
+        ui.painter().line_segment([Pos2::new(galley_rect.min.x, y), Pos2::new(galley_rect.max.x, y)], Stroke::new(1.0, col));
+    }
+    galley_rect.width()
+}
+
 fn select(doc: &mut Doc, i: usize, mods: Modifiers, anchor: &mut Option<usize>) {
     if mods.shift {
         if let Some(a) = *anchor {
@@ -1103,6 +1211,45 @@ impl App {
         if sel.is_empty() { (0..d.specs.len()).filter(|&i| d.active[i]).collect() } else { sel }
     }
 
+    /// Replace the open document (used by tools that build data in memory).
+    fn set_doc(&mut self, d: Doc) {
+        self.doc = Some(d);
+        self.dirty = true;
+        self.refresh();
+        self.last_anchor = None;
+    }
+
+    fn request_shot(&self, ctx: &egui::Context) {
+        let slot = self.shot_box.clone();
+        let c2 = ctx.clone();
+        ctx.request_screenshot(move |img| {
+            *slot.lock().unwrap() = Some(img);
+            c2.request_repaint();
+        });
+    }
+
+    fn open_win(&mut self, k: usize) {
+        self.win_serial[k] += 1;
+        match k {
+            W_TABLE => self.win_table = true,
+            W_GROUP => self.win_group = true,
+            W_CONTOUR => self.win_contour = true,
+            W_ORIENT => self.win_orient = true,
+            W_COLORS => self.win_colors = true,
+            W_FACTORS => self.win_factors = true,
+            W_ABOUT => self.win_about = true,
+            W_EDIT => self.win_edit = true,
+            _ => {}
+        }
+    }
+
+    /// Every window of a kind opens with the same id, size and (centred) position, each time it is opened.
+    fn base_window(&self, ctx: &egui::Context, title: &'static str, slot: usize, size: Vec2) -> egui::Window<'static> {
+        let c = ctx.content_rect().center();
+        let pos = Pos2::new((c.x - size.x / 2.0).max(8.0), (c.y - size.y / 2.0).max(40.0));
+        egui::Window::new(title).id(egui::Id::unique(("anisoft-window", title, self.win_serial[slot]))).default_pos(pos).default_size(size)
+    }
+
     fn windows(&mut self, ctx: &egui::Context) {
         if let Some(msg) = self.info.clone() {
             let mut open = true;
@@ -1118,7 +1265,7 @@ impl App {
         }
 
         let mut open = self.win_about;
-        egui::Window::new("About Anisoft").default_pos([480.0, 140.0]).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+        self.base_window(ctx, "About Anisoft", W_ABOUT, Vec2::new(420.0, 120.0)).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
             ui.heading("Anisoft for Linux");
             ui.label("An independent reimplementation of AGICO's Anisoft 6, written in Rust with egui.");
             ui.label("Reads Safyr7 .ams files; anisotropy results were checked against csv exports of the original program.");
@@ -1127,7 +1274,7 @@ impl App {
         self.win_about = open;
 
         let mut open = self.win_factors;
-        egui::Window::new("Anisotropy Quantitative Factors").default_pos([420.0, 140.0]).open(&mut open).resizable(false).show(ctx, |ui| {
+        self.base_window(ctx, "Anisotropy Quantitative Factors", W_FACTORS, Vec2::new(480.0, 260.0)).open(&mut open).resizable(false).show(ctx, |ui| {
             egui::Grid::new("fx").striped(true).show(ui, |ui| {
                 for (n, f) in [
                     ("L", "K1 / K2"), ("F", "K2 / K3"), ("P", "K1 / K3"),
@@ -1146,61 +1293,70 @@ impl App {
 
         let mut open = self.win_orient;
         let mut changed = false;
-        egui::Window::new("Orientation Parameters").default_pos([420.0, 140.0]).open(&mut open).resizable(false).show(ctx, |ui| {
+        let mut orient = self.orient;
+        self.base_window(ctx, "Orientation Parameters", W_ORIENT, Vec2::new(340.0, 240.0)).open(&mut open).resizable(false).show(ctx, |ui| {
             ui.label(RichText::new("Not stored in .ams files. Applied to all specimens of the open file.").weak());
             egui::Grid::new("or").show(ui, |ui| {
                 for (n, v, r) in [
-                    ("Core azimuth", &mut self.orient.azimuth, 0.0..=360.0),
-                    ("Core dip", &mut self.orient.dip, -90.0..=90.0),
-                    ("Bedding strike", &mut self.orient.bed_strike, 0.0..=360.0),
-                    ("Bedding dip", &mut self.orient.bed_dip, 0.0..=90.0),
-                    ("Paleo declination", &mut self.orient.paleo_dec, -360.0..=360.0),
+                    ("Core azimuth", &mut orient.azimuth, 0.0..=360.0),
+                    ("Core dip", &mut orient.dip, -90.0..=90.0),
+                    ("Bedding strike", &mut orient.bed_strike, 0.0..=360.0),
+                    ("Bedding dip", &mut orient.bed_dip, 0.0..=90.0),
+                    ("Paleo declination", &mut orient.paleo_dec, -360.0..=360.0),
                 ] {
                     ui.label(n);
-                    changed |= ui.add(egui::DragValue::new(v).range(r).suffix(" °").speed(0.5)).changed();
+                    changed |= ui.add(egui::DragValue::new(v).range(r).suffix(" \u{b0}").speed(0.5)).changed();
                     ui.end_row();
                 }
             });
             if ui.button("Reset").clicked() {
-                self.orient = Orientation::default();
+                orient = Orientation::default();
                 changed = true;
             }
-            ui.label(RichText::new("Conventions are not yet verified against Anisoft.").small().weak());
+            ui.label(RichText::new("Approximation: the original reads per-specimen values from the file.").small().weak());
         });
+        self.orient = orient;
         self.win_orient = open;
         if changed {
             self.dirty = true;
         }
 
         let mut open = self.win_colors;
-        egui::Window::new("Default Colors").default_pos([420.0, 140.0]).open(&mut open).resizable(false).show(ctx, |ui| {
+        let mut kc = self.k_colors;
+        self.base_window(ctx, "Default Colors", W_COLORS, Vec2::new(200.0, 140.0)).open(&mut open).resizable(false).show(ctx, |ui| {
             for (i, n) in ["K1", "K2", "K3"].iter().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.color_edit_button_srgba(&mut self.k_colors[i]);
+                    ui.color_edit_button_srgba(&mut kc[i]);
                     ui.label(*n);
                 });
             }
         });
+        self.k_colors = kc;
         self.win_colors = open;
 
         let mut open = self.win_edit;
-        egui::Window::new("Edit Data").default_pos([420.0, 140.0]).open(&mut open).resizable(false).show(ctx, |ui| {
+        let mut name = self.edit_name.clone();
+        let mut apply = false;
+        self.base_window(ctx, "Edit Data", W_EDIT, Vec2::new(320.0, 140.0)).open(&mut open).resizable(false).show(ctx, |ui| {
             ui.label("Specimen name (up to 24 characters):");
-            ui.text_edit_singleline(&mut self.edit_name);
-            if ui.button("Apply").clicked() {
-                if let Some(d) = &mut self.doc {
-                    if let Some(i) = (0..d.specs.len()).find(|&i| d.selected[i]) {
-                        d.rename(i, &self.edit_name);
-                    }
-                }
-                self.win_edit = false;
-            }
+            ui.text_edit_singleline(&mut name);
+            apply = ui.button("Apply").clicked();
         });
-        self.win_edit &= open;
+        self.edit_name = name;
+        if apply {
+            if let Some(d) = &mut self.doc {
+                if let Some(i) = (0..d.specs.len()).find(|&i| d.selected[i]) {
+                    d.rename(i, &self.edit_name);
+                }
+            }
+            open = false;
+        }
+        self.win_edit = open;
 
         self.table_window(ctx);
         self.group_window(ctx);
         self.contour_window(ctx);
+        self.tool_windows(ctx);
     }
 
     fn table_window(&mut self, ctx: &egui::Context) {
@@ -1209,50 +1365,90 @@ impl App {
         }
         let mut open = true;
         let mut clicked = None;
+        let mut started: Option<usize> = None;
+        let mut hot: Option<usize> = None;
         let mods = ctx.input(|i| i.modifiers);
-        egui::Window::new("Data Table").open(&mut open).default_size([900.0, 420.0]).default_pos([300.0, 160.0]).show(ctx, |ui| {
-            let Some(doc) = &self.doc else { return };
-            if self.derived.len() != doc.specs.len() {
-                return;
-            }
-            let cols = ["Specimen", "Km", "K1", "K2", "K3", "K1 Dec", "K1 Inc", "K2 Dec", "K2 Inc", "K3 Dec", "K3 Inc", "P", "Pj", "T", "F", "F12", "F23"];
-            egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                egui::Grid::new("tbl").striped(true).min_col_width(52.0).show(ui, |ui| {
-                    for c in cols {
-                        ui.strong(c);
+        let pointer = ctx.input(|i| i.pointer.interact_pos());
+        let dark = self.dark;
+        const COLS: [(&str, f32); 17] = [
+            ("Specimen", 110.0), ("Km", 80.0), ("K1", 66.0), ("K2", 66.0), ("K3", 66.0),
+            ("K1 Dec", 56.0), ("K1 Inc", 52.0), ("K2 Dec", 56.0), ("K2 Inc", 52.0), ("K3 Dec", 56.0), ("K3 Inc", 52.0),
+            ("P", 60.0), ("Pj", 60.0), ("T", 60.0), ("F", 64.0), ("F12", 64.0), ("F23", 64.0),
+        ];
+        let total_w: f32 = COLS.iter().map(|c| c.1).sum();
+        let win = self.base_window(ctx, "Data Table", W_TABLE, Vec2::new(940.0, 440.0));
+        let (derived, out_phase) = (self.derived.clone(), self.out_phase);
+        let mut drag = self.list_drag.take();
+        let mut anchor = self.last_anchor;
+        if let Some(doc) = &mut self.doc {
+            if derived.len() == doc.specs.len() {
+                win.open(&mut open).show(ctx, |ui| {
+                    let order = doc.order();
+                    egui::ScrollArea::horizontal().show(ui, |ui| {
+                        let (hr, _) = ui.allocate_exact_size(Vec2::new(total_w, 24.0), Sense::hover());
+                        let mut x = hr.min.x;
+                        ui.painter().rect_filled(hr, 0.0, ui.visuals().faint_bg_color);
+                        for (n, w) in COLS {
+                            ui.painter().text(Pos2::new(x + 6.0, hr.center().y), Align2::LEFT_CENTER, n, FontId::proportional(12.5), ui.visuals().strong_text_color());
+                            x += w;
+                        }
+                        egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, ROW_H, order.len(), |ui, range| {
+                            for pos in range {
+                                let i = order[pos];
+                                let (rect, resp) = ui.allocate_exact_size(Vec2::new(total_w, ROW_H), Sense::click_and_drag());
+                                paint_row(ui, rect, doc.selected[i], resp.hovered(), doc.active[i], dark);
+                                let d = &derived[i];
+                                let ph = if out_phase { &doc.specs[i].outphase } else { &doc.specs[i].inphase };
+                                let sh = d.axes.shape;
+                                let f = |v: Option<f64>, p: usize| v.map(|x| format!("{x:.p$}")).unwrap_or_default();
+                                let cells = [
+                                    doc.specs[i].name.clone(), format!("{:.4E}", d.km),
+                                    format!("{:.5}", d.axes.k_norm[0]), format!("{:.5}", d.axes.k_norm[1]), format!("{:.5}", d.axes.k_norm[2]),
+                                    format!("{:.1}", d.axes.dec_inc[0].0), format!("{:.1}", d.axes.dec_inc[0].1),
+                                    format!("{:.1}", d.axes.dec_inc[1].0), format!("{:.1}", d.axes.dec_inc[1].1),
+                                    format!("{:.1}", d.axes.dec_inc[2].0), format!("{:.1}", d.axes.dec_inc[2].1),
+                                    f(sh.map(|s| s.p), 4), f(sh.map(|s| s.pj), 4), f(sh.map(|s| s.t), 4),
+                                    format!("{:.1}", ph.ftest[0]), format!("{:.1}", ph.ftest[1]), format!("{:.1}", ph.ftest[2]),
+                                ];
+                                let mut x = rect.min.x;
+                                for (c, (_, w)) in cells.iter().zip(COLS) {
+                                    row_text(ui, Rect::from_min_size(Pos2::new(x, rect.min.y), Vec2::new(w, ROW_H)), 6.0, c, doc.active[i], dark);
+                                    x += w;
+                                }
+                                if resp.drag_started() {
+                                    started = Some(pos);
+                                } else if resp.clicked() {
+                                    clicked = Some(i);
+                                }
+                                if pointer.map_or(false, |p| rect.contains(p)) {
+                                    hot = Some(pos);
+                                }
+                            }
+                        });
+                    });
+                    if !ui.input(|i| i.pointer.primary_down()) {
+                        drag = None;
                     }
-                    ui.end_row();
-                    for i in 0..doc.specs.len() {
-                        let d = &self.derived[i];
-                        let ph = if self.out_phase { &doc.specs[i].outphase } else { &doc.specs[i].inphase };
-                        let sh = d.axes.shape;
-                        let f = |v: Option<f64>, p: usize| v.map(|x| format!("{x:.p$}")).unwrap_or_default();
-                        let mut name = RichText::new(&doc.specs[i].name);
-                        if !doc.active[i] {
-                            name = name.strikethrough().weak();
+                    if let Some(pos) = started {
+                        let additive = mods.ctrl || mods.command;
+                        let base = if additive { doc.selected.clone() } else { vec![false; doc.selected.len()] };
+                        drag = Some(ListDrag { anchor: pos, additive, base });
+                    }
+                    if let (Some(d), Some(cur)) = (&drag, hot) {
+                        let (lo, hi) = (d.anchor.min(cur), d.anchor.max(cur));
+                        doc.selected = d.base.clone();
+                        for pos in lo..=hi {
+                            doc.selected[order[pos]] = true;
                         }
-                        if ui.selectable_label(doc.selected[i], name).clicked() {
-                            clicked = Some(i);
-                        }
-                        let row = [
-                            format!("{:.4E}", d.km), format!("{:.5}", d.axes.k_norm[0]), format!("{:.5}", d.axes.k_norm[1]), format!("{:.5}", d.axes.k_norm[2]),
-                            format!("{:.1}", d.axes.dec_inc[0].0), format!("{:.1}", d.axes.dec_inc[0].1), format!("{:.1}", d.axes.dec_inc[1].0), format!("{:.1}", d.axes.dec_inc[1].1),
-                            format!("{:.1}", d.axes.dec_inc[2].0), format!("{:.1}", d.axes.dec_inc[2].1),
-                            f(sh.map(|s| s.p), 4), f(sh.map(|s| s.pj), 4), f(sh.map(|s| s.t), 4),
-                            format!("{:.1}", ph.ftest[0]), format!("{:.1}", ph.ftest[1]), format!("{:.1}", ph.ftest[2]),
-                        ];
-                        for c in row {
-                            ui.label(c);
-                        }
-                        ui.end_row();
+                    } else if let Some(i) = clicked {
+                        select(doc, i, mods, &mut anchor);
                     }
                 });
-            });
-        });
-        self.win_table = open;
-        if let (Some(i), Some(d)) = (clicked, &mut self.doc) {
-            select(d, i, mods, &mut self.last_anchor);
+            }
         }
+        self.list_drag = drag;
+        self.last_anchor = anchor;
+        self.win_table = open;
     }
 
     fn group_window(&mut self, ctx: &egui::Context) {
@@ -1264,7 +1460,7 @@ impl App {
         let tensors: Vec<_> = idx.iter().map(|&i| self.derived[i].tensor).collect();
         let kms: Vec<f64> = idx.iter().map(|&i| self.derived[i].km).collect();
         let sel = self.doc.as_ref().map_or(false, |d| d.n_selected() > 0);
-        egui::Window::new("Group Statistics").open(&mut open).resizable(false).default_pos([330.0, 90.0]).show(ctx, |ui| {
+        self.base_window(ctx, "Group Statistics", W_GROUP, Vec2::new(420.0, 340.0)).open(&mut open).resizable(false).show(ctx, |ui| {
             ui.label(format!("{} specimens ({}), {}", idx.len(), if sel { "selected" } else { "all active" }, if self.out_phase { "out-of-phase" } else { "in-phase" }));
             match stats::group_stats(&tensors, &kms) {
                 None => {
@@ -1316,7 +1512,7 @@ impl App {
         let vecs: Vec<Vec3> = idx.iter().map(|&i| { let (d, n) = self.derived[i].axes.dec_inc[axis]; from_dec_inc(d, n) }).collect();
         let k = self.contour_k;
         let th = self.theme();
-        egui::Window::new("Contour Plot").open(&mut open).resizable(false).default_pos([760.0, 90.0]).default_width(420.0).show(ctx, |ui| {
+        self.base_window(ctx, "Contour Plot", W_CONTOUR, Vec2::new(430.0, 500.0)).open(&mut open).resizable(false).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 for (a, n) in ["K1", "K2", "K3"].iter().enumerate() {
                     ui.selectable_value(&mut self.contour_axis, a, *n);

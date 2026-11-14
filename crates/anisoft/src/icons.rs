@@ -30,6 +30,17 @@ pub enum Icon {
     Back,
     Up,
     Home,
+    // tool windows
+    CloseRed,
+    Plus,
+    Minus,
+    Calc,
+    Eraser,
+    Camera,
+    Pair,
+    Dup,
+    AddRow,
+    DelRow,
     /// File-browser panel; `true` = panel is open (button hides it).
     Sidebar(bool),
 }
@@ -182,6 +193,62 @@ pub fn paint(pa: &Painter, r: Rect, icon: Icon, dark: bool) {
             pts.extend(arc(r, 0.5, 0.5, 0.44, 0.9, 2.2));
             poly(pa, pts, Color32::from_rgb(60, 120, 220), Stroke::NONE);
             pa.circle_stroke(r.center(), r.width() * 0.44, thin);
+        }
+        Icon::CloseRed => {
+            pa.circle_filled(r.center(), r.width() * 0.46, Color32::from_rgb(222, 50, 50));
+            line(pa, vec![p(r, 0.32, 0.32), p(r, 0.68, 0.68)], 3.0, Color32::WHITE);
+            line(pa, vec![p(r, 0.68, 0.32), p(r, 0.32, 0.68)], 3.0, Color32::WHITE);
+        }
+        Icon::Plus => {
+            let g = Color32::from_rgb(60, 170, 80);
+            line(pa, vec![p(r, 0.5, 0.12), p(r, 0.5, 0.88)], 6.0, g);
+            line(pa, vec![p(r, 0.12, 0.5), p(r, 0.88, 0.5)], 6.0, g);
+        }
+        Icon::Minus => {
+            line(pa, vec![p(r, 0.14, 0.5), p(r, 0.86, 0.5)], 6.0, Color32::from_rgb(230, 50, 80));
+        }
+        Icon::Calc => {
+            pa.rect_filled(Rect::from_min_max(p(r, 0.18, 0.06), p(r, 0.82, 0.94)), 3.0, Color32::from_rgb(105, 118, 135));
+            pa.rect_filled(Rect::from_min_max(p(r, 0.26, 0.14), p(r, 0.74, 0.34)), 1.5, Color32::from_rgb(190, 225, 200));
+            for rw in 0..3 {
+                for cl in 0..3 {
+                    pa.rect_filled(Rect::from_center_size(p(r, 0.32 + 0.18 * cl as f32, 0.46 + 0.16 * rw as f32), Vec2::splat(r.width() * 0.11)), 1.0, Color32::from_gray(225));
+                }
+            }
+        }
+        Icon::Eraser => {
+            let o = Color32::from_rgb(240, 160, 40);
+            pa.rect_filled(Rect::from_min_max(p(r, 0.08, 0.3), p(r, 0.92, 0.8)), 6.0, o);
+            pa.rect_stroke(Rect::from_min_max(p(r, 0.08, 0.3), p(r, 0.92, 0.8)), 6.0, Stroke::new(1.2, Color32::from_rgb(160, 90, 20)), egui::StrokeKind::Inside);
+            for k in 0..5 {
+                pa.circle_filled(p(r, 0.2 + 0.15 * k as f32, 0.45 + 0.08 * ((k % 2) as f32)), 1.6, Color32::from_rgb(150, 85, 20));
+            }
+        }
+        Icon::Camera => {
+            pa.rect_filled(Rect::from_min_max(p(r, 0.06, 0.28), p(r, 0.94, 0.86)), 4.0, Color32::from_rgb(50, 60, 75));
+            pa.rect_filled(Rect::from_min_max(p(r, 0.3, 0.16), p(r, 0.62, 0.3)), 2.0, Color32::from_rgb(50, 60, 75));
+            pa.circle_filled(p(r, 0.5, 0.57), r.width() * 0.2, Color32::from_rgb(90, 160, 235));
+            pa.circle_stroke(p(r, 0.5, 0.57), r.width() * 0.2, Stroke::new(2.0, Color32::from_gray(225)));
+        }
+        Icon::Pair => {
+            pa.circle_stroke(p(r, 0.36, 0.5), r.width() * 0.26, Stroke::new(3.0, Color32::from_rgb(100, 120, 170)));
+            pa.circle_stroke(p(r, 0.64, 0.5), r.width() * 0.26, Stroke::new(3.0, Color32::from_rgb(220, 150, 60)));
+        }
+        Icon::Dup => {
+            for (x, c) in [(0.3, Color32::from_rgb(230, 70, 110)), (0.62, Color32::from_rgb(230, 70, 110))] {
+                pa.rect_filled(Rect::from_min_max(p(r, x, 0.18), p(r, x + 0.2, 0.84)), 5.0, c);
+            }
+        }
+        Icon::AddRow | Icon::DelRow => {
+            let (c, glyph) = if icon == Icon::AddRow { (Color32::from_rgb(60, 170, 80), true) } else { (Color32::from_rgb(220, 60, 60), false) };
+            pa.rect_filled(Rect::from_min_max(p(r, 0.06, 0.2), p(r, 0.94, 0.8)), 2.0, Color32::from_gray(245));
+            pa.rect_stroke(Rect::from_min_max(p(r, 0.06, 0.2), p(r, 0.94, 0.8)), 2.0, Stroke::new(1.2, Color32::from_rgb(70, 110, 190)), egui::StrokeKind::Inside);
+            line(pa, vec![p(r, 0.06, 0.5), p(r, 0.94, 0.5)], 1.0, Color32::from_rgb(70, 110, 190));
+            pa.circle_filled(p(r, 0.72, 0.72), r.width() * 0.22, c);
+            line(pa, vec![p(r, 0.62, 0.72), p(r, 0.82, 0.72)], 2.0, Color32::WHITE);
+            if glyph {
+                line(pa, vec![p(r, 0.72, 0.62), p(r, 0.72, 0.82)], 2.0, Color32::WHITE);
+            }
         }
         Icon::Back | Icon::Up => {
             let pts = if icon == Icon::Back {
