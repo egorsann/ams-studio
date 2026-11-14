@@ -466,6 +466,7 @@ impl App {
         let c = Modifiers::CTRL;
         let table: Vec<(Modifiers, Key, Action)> = vec![
             (Modifiers::SHIFT | Modifiers::CTRL, Key::F12, Action::ClearSel),
+            (Modifiers::NONE, Key::Escape, Action::ClearSel),
             (c, Key::F1, Action::SetClasses),
             (c, Key::O, Action::Open),
             (c, Key::P, Action::Prev),
