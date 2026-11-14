@@ -91,6 +91,11 @@ pub struct App {
     bins: usize,
     export: [bool; 4],
     log_km: bool,
+    browser_w: f32,
+    spec_w: f32,
+    win_size: Option<[f32; 2]>,
+    win_max: bool,
+    layout_changed: Option<f64>,
     scroll_to: Option<usize>,
     list_off: f32,
     list_h: f32,
@@ -125,6 +130,21 @@ pub struct App {
     last_title: String,
 }
 
+/// Window size and maximised flag saved by the previous run (read before the window is created).
+pub fn saved_window() -> (Option<[f32; 2]>, bool) {
+    let Ok(s) = std::fs::read_to_string(state_path()) else { return (None, false) };
+    let (mut w, mut h, mut max) = (None, None, false);
+    for l in s.lines() {
+        match l.split_once('=') {
+            Some(("win_w", v)) => w = v.parse::<f32>().ok(),
+            Some(("win_h", v)) => h = v.parse::<f32>().ok(),
+            Some(("maximized", v)) => max = v == "1",
+            _ => {}
+        }
+    }
+    (w.zip(h).map(|(w, h)| [w.clamp(760.0, 8000.0), h.clamp(480.0, 8000.0)]), max)
+}
+
 fn state_path() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -154,6 +174,11 @@ impl App {
             bins: 12,
             export: [true; 4],
             log_km: false,
+            browser_w: 230.0,
+            spec_w: 170.0,
+            win_size: None,
+            win_max: false,
+            layout_changed: None,
             scroll_to: None,
             list_off: 0.0,
             list_h: 0.0,
@@ -202,6 +227,14 @@ impl App {
                 "last_dir" if Path::new(v).is_dir() => self.browser_dir = PathBuf::from(v),
                 "dark" => self.dark = v == "1",
                 "logkm" => self.log_km = v == "1",
+                "browser_w" => self.browser_w = v.parse().unwrap_or(230.0f32).clamp(150.0, 520.0),
+                "spec_w" => self.spec_w = v.parse().unwrap_or(170.0f32).clamp(110.0, 420.0),
+                "win_w" | "win_h" => {
+                    let x: f32 = v.parse().unwrap_or(0.0);
+                    let cur = self.win_size.get_or_insert([1280.0, 820.0]);
+                    cur[usize::from(k == "win_h")] = x.clamp(760.0, 8000.0);
+                }
+                "maximized" => self.win_max = v == "1",
                 "browser" => self.browser_open = v != "0",
                 "hfrac" => self.hfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
                 "vfrac" => self.vfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
@@ -218,13 +251,18 @@ impl App {
         let _ = std::fs::write(
             p,
             format!(
-                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nlogkm={}\n",
+                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nlogkm={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\n",
                 self.browser_dir.display(),
                 self.dark as u8,
                 self.browser_open as u8,
                 self.hfrac,
                 self.vfrac,
-                self.log_km as u8
+                self.log_km as u8,
+                self.browser_w,
+                self.spec_w,
+                self.win_size.map_or(1280.0, |s| s[0]),
+                self.win_size.map_or(820.0, |s| s[1]),
+                self.win_max as u8
             ),
         );
     }
@@ -631,6 +669,7 @@ fn item(ui: &mut Ui, label: &str, sc: &str, enabled: bool) -> bool {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.track_layout(&ctx);
         self.refresh();
         let mut actions = self.shortcuts(&ctx);
         self.handle_screenshot(&ctx);
@@ -781,9 +820,14 @@ impl eframe::App for App {
 
         // ---------------------------------------------------------- file browser
         if self.browser_open {
-            egui::Panel::left("browser").resizable(true).default_size(230.0).min_size(150.0).max_size(520.0).show(ui, |ui| {
+            let r = egui::Panel::left("browser").resizable(true).default_size(self.browser_w).min_size(150.0).max_size(520.0).show(ui, |ui| {
                 self.browser_ui(ui, &mut actions);
             });
+            let w = r.response.rect.width();
+            if (w - self.browser_w).abs() > 0.5 {
+                self.browser_w = w;
+                self.layout_changed = Some(ui.input(|i| i.time));
+            }
         } else {
             egui::Panel::left("browser_strip").resizable(false).exact_size(30.0).show(ui, |ui| {
                 if small_icon(ui, Icon::Sidebar(false), "Show file browser  Ctrl+B", true, self.dark) {
@@ -795,9 +839,14 @@ impl eframe::App for App {
         }
 
         // ------------------------------------------------------------ specimens
-        egui::Panel::left("specimens").resizable(true).default_size(170.0).min_size(110.0).max_size(420.0).show(ui, |ui| {
+        let r = egui::Panel::left("specimens").resizable(true).default_size(self.spec_w).min_size(110.0).max_size(420.0).show(ui, |ui| {
             self.specimens_ui(ui);
         });
+        let w = r.response.rect.width();
+        if (w - self.spec_w).abs() > 0.5 {
+            self.spec_w = w;
+            self.layout_changed = Some(ui.input(|i| i.time));
+        }
 
         // ---------------------------------------------------------------- plots
         egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(6.0)).show(ui, |ui| {
@@ -1045,8 +1094,9 @@ impl App {
                 self.vfrac = ((p.y - full.min.y) / full.height()).clamp(0.2, 0.8);
             }
         }
-        if (rv.drag_stopped() || rh.drag_stopped()) && before != (self.hfrac, self.vfrac) {
-            self.save_state();
+        if before != (self.hfrac, self.vfrac) {
+            // saved shortly after the drag ends (see track_layout)
+            self.layout_changed = Some(ui.input(|i| i.time));
         }
         for (r, resp) in [(v, &rv), (hbar, &rh)] {
             if resp.hovered() || resp.dragged() {
@@ -1297,6 +1347,31 @@ impl App {
             *slot.lock().unwrap() = Some(img);
             c2.request_repaint();
         });
+    }
+
+    /// Remember the window size and write the layout to disk shortly after it stopped changing.
+    fn track_layout(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        let (rect, maxd) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().maximized.unwrap_or(false)));
+        if maxd != self.win_max {
+            self.win_max = maxd;
+            self.layout_changed = Some(now);
+        }
+        if let (Some(r), false) = (rect, maxd) {
+            let sz = [r.width().round(), r.height().round()];
+            if self.win_size.map_or(true, |o| (o[0] - sz[0]).abs() > 1.0 || (o[1] - sz[1]).abs() > 1.0) {
+                self.win_size = Some(sz);
+                self.layout_changed = Some(now);
+            }
+        }
+        if let Some(t) = self.layout_changed {
+            if now - t > 0.5 && !ctx.input(|i| i.pointer.any_down()) {
+                self.save_state();
+                self.layout_changed = None;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            }
+        }
     }
 
     fn open_win(&mut self, k: usize) {
