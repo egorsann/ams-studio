@@ -73,6 +73,14 @@ impl App {
         self.open_win(W_SET);
     }
 
+    /// Reads the folders of the open set again (after files were moved or written) with the same identifier.
+    pub(super) fn refresh_set(&mut self) {
+        if let Some(s) = &mut self.set {
+            s.folders = specset::scan(&s.root);
+            s.picks = specset::matches(&s.folders, &s.ident);
+        }
+    }
+
     /// Re-opens the dialog on the folders of the current set, to try another string.
     pub(super) fn change_set_string(&mut self) {
         let Some(s) = &self.set else { return };
@@ -293,30 +301,54 @@ impl App {
         ui.label(RichText::new(format!("{sentence}  \u{b7}  {matched} of {}", set.folders.len())).small().weak());
         ui.separator();
         let open_all = set.folders.len() <= 40;
+        // the current file changed (Shift+Q / Shift+E, a click): open its folder and scroll to it once
+        let moved = self.tree_cur != cur;
+        let gray = ui.visuals().weak_text_color();
+        let accent = if self.dark { Color32::from_rgb(106, 160, 255) } else { Color32::from_rgb(59, 130, 246) };
+        let dim = ui.visuals().text_color().gamma_multiply(0.55);
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
             for (fi, (f, p)) in set.folders.iter().zip(&set.picks).enumerate() {
                 let main = p.file();
                 let has_cur = cur.as_ref().map_or(false, |c| f.files.iter().any(|n| f.dir.join(n) == *c));
+                // like TX Studio: a folder icon, and the folder name in gray so the files stand out
                 let title = match p {
-                    Pick::Only(_) | Pick::Match(_) => RichText::new(&f.name).strong(),
-                    Pick::None => RichText::new(format!("\u{26a0} {}", f.name)).strong().color(Color32::from_rgb(214, 90, 90)),
-                    Pick::Several(_) => RichText::new(format!("\u{26a0} {}", f.name)).strong().color(Color32::from_rgb(214, 150, 40)),
+                    Pick::Only(_) | Pick::Match(_) => RichText::new(format!("\u{1F4C1}  {}", f.name)).color(gray),
+                    Pick::None => RichText::new(format!("\u{26a0} \u{1F4C1}  {}", f.name)).color(Color32::from_rgb(214, 90, 90)),
+                    Pick::Several(_) => RichText::new(format!("\u{26a0} \u{1F4C1}  {}", f.name)).color(Color32::from_rgb(214, 150, 40)),
                 };
                 let id = ui.make_persistent_id(("set-folder", fi, &set.root));
-                egui::CollapsingHeader::new(title).id_salt(id).default_open(open_all || has_cur).show(ui, |ui| {
+                let force = moved && has_cur;
+                let mut ch = egui::CollapsingHeader::new(title).id_salt(id).default_open(open_all || has_cur);
+                if force {
+                    ch = ch.open(Some(true));
+                }
+                ch.show(ui, |ui| {
                     // the file the identifier picked comes first; the others follow in a darker shade
                     let mut order: Vec<usize> = (0..f.files.len()).collect();
                     if let Some(m) = main {
                         order.retain(|k| *k != m);
                         order.insert(0, m);
                     }
-                    let dim = ui.visuals().text_color().gamma_multiply(0.55);
                     for k in order {
                         let n = &f.files[k];
                         let path = f.dir.join(n);
                         let is_main = main == Some(k);
-                        let text = if is_main { RichText::new(format!("\u{25cf} {n}")).strong() } else { RichText::new(format!("   {n}")).color(dim) };
-                        let resp = ui.add(egui::Button::selectable(cur.as_ref() == Some(&path), text).frame_when_inactive(false).sense(Sense::click()));
+                        let is_cur = cur.as_ref() == Some(&path);
+                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(120.0), 22.0), Sense::click());
+                        if is_cur {
+                            // the active file: a clear background so it can be found at a glance
+                            ui.painter().rect_filled(rect, 4.0, accent.gamma_multiply(if self.dark { 0.38 } else { 0.28 }));
+                            ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, Vec2::new(3.0, rect.height())), 2.0, accent);
+                        } else if resp.hovered() {
+                            ui.painter().rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill.gamma_multiply(0.6));
+                        }
+                        let color = if is_main || is_cur { ui.visuals().strong_text_color() } else { dim };
+                        let text = if is_main { RichText::new(n).strong().color(color) } else { RichText::new(n).color(color) };
+                        let galley = egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Truncate), rect.width() - 12.0, egui::TextStyle::Body);
+                        ui.painter().galley(egui::Pos2::new(rect.min.x + 8.0, rect.center().y - galley.size().y / 2.0), galley, color);
+                        if is_cur && moved {
+                            resp.scroll_to_me(None);
+                        }
                         if resp.clicked() {
                             open = Some(path);
                         }
@@ -330,6 +362,7 @@ impl App {
                 });
             }
         });
+        self.tree_cur = cur.clone();
         if change {
             self.change_set_string();
         }

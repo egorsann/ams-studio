@@ -11,7 +11,7 @@ Fixed **640-byte records, no file header**; record count = file size / 640. All 
 | 40 | 4 | frequency (Hz) |
 | 44 | 8 | instrument text (e.g. `KLY5`) |
 | 52 | 8 | program text (e.g. `Safyr7`; `SimulDat` for Fabric Overprint output) |
-| 68 | 4 | reference volume, 10.0 cm3 in every record seen |
+| 68 | 4 | sample volume in cm3 (the Volume column of Anisoft's Edit Data); 10.0, the reference volume of the Kappabridge, in every record seen. AMS Studio's Volume Correction writes the real sample volume here; the shape (cubic / cylindrical) has no place in a record and goes to `<file>.volume.json` next to the file |
 | 82, 84, 86, 88 | 2 each | int16 orientation parameters OP1..OP4 (default 6, 0, 6, 0) |
 | 90 | 2 | int16 `-1` when the record carries GED orientation data |
 | 92, 96 | 4 each | sampling azimuth alpha and plunge phi (float32) |
@@ -78,3 +78,11 @@ This program's export (`File > Export Data File` and `Export Selection`, also `c
 ## Demo files
 
 `examples/demo_60_specimens.ams` and `examples/demo_12_specimens.ams` are **made up** by `cargo run -p ams-core --example make_demo -- out.ams N` (fixed seed, two sites, realistic normalised tensors). The 12-specimen file with its Group Statistics result printed by the original is used as a regression test in `stats.rs`.
+
+## `<file>.volume.json` (written by AMS Studio)
+
+Next to an `.ams` file whose volume was entered with Edit > Volume Correction: `{"file": "...", "volume_cm3": 3.375, "shape": "cubic" | "cylindrical", "applied": "YYYY-MM-DD", "records": n}`.
+
+## csv columns of AMS Studio's export
+
+`Specimen,Field,Freq`, then the same columns for the in-phase (`ip_`) and the out-of-phase (`op_`) data, then `opKm_over_ipKm_percent`. After the columns of the original's csv (`Km`, `K1`..., `Tyy,Txx,Tzz`) come the M3ORE lab sheet's: `Km_vol` (Km x 10 / volume), `K1_un K2_un K3_un` (unnormalised), `L_Khan F_Khan H_Owens`, `Lin_Plunge Fol_Dip Fol_DipDir`, and the lab sheet's errors: `K1_frac K2_frac K3_frac` (SD / K), `Km_frac`, `K1_un_frac ...`, and the fractional (`_frac`) and absolute (`_abs`) errors of L, L_Khan, F, F_Khan, P, H, Pj, T, U, computed with the sheet's rules (`ams_core::lab`). The standard deviations stored in the file are used as the absolute errors of the normalised K; the percent error of Km is 0 (the sheet's optional input).

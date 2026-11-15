@@ -91,6 +91,15 @@ impl Doc {
         self.modified = true;
     }
 
+    /// Writes the specimen volume (cm3) into every record (the field Anisoft's Edit Data shows as Volume).
+    pub fn set_volume(&mut self, v: f64) {
+        for i in 0..self.specs.len() {
+            self.raw[i * RECORD_LEN + ams_core::ams::OFF_VOLUME..i * RECORD_LEN + ams_core::ams::OFF_VOLUME + 4].copy_from_slice(&(v as f32).to_le_bytes());
+            self.specs[i].volume_cm3 = v as f32 as f64;
+        }
+        self.modified = true;
+    }
+
     /// Applies the Edit Data table: names and the orientation of every record (`None` clears it).
     pub fn apply_edit(&mut self, rows: Vec<(String, Option<ams_core::orient::RecOrient>)>) {
         for (i, (name, o)) in rows.into_iter().enumerate().take(self.specs.len()) {
@@ -113,6 +122,64 @@ impl Doc {
         self.specs[i].name = name.trim().to_string();
         self.modified = true;
     }
+}
+
+/// Sample volume information kept next to an `.ams` file (the volume itself is also in the records; the shape has
+/// no place in a record).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VolInfo {
+    pub volume_cm3: f64,
+    /// "cubic" or "cylindrical"
+    pub shape: String,
+    /// Date the correction was entered, `YYYY-MM-DD`.
+    pub applied: String,
+}
+
+/// `<folder>/<file name without .ams>.volume.json`
+pub fn volume_json_path(ams: &Path) -> PathBuf {
+    let stem = ams.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    ams.with_file_name(format!("{stem}.volume.json"))
+}
+
+/// Today's date as `YYYY-MM-DD` (UTC).
+pub fn today() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let z = secs.div_euclid(86400) + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    format!("{:04}-{:02}-{:02}", if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+pub fn write_volume_json(ams: &Path, info: &VolInfo, n_records: usize) -> std::io::Result<PathBuf> {
+    let p = volume_json_path(ams);
+    let file = ams.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let text = format!(
+        "{{\n  \"file\": \"{}\",\n  \"volume_cm3\": {},\n  \"shape\": \"{}\",\n  \"applied\": \"{}\",\n  \"records\": {}\n}}\n",
+        esc(&file), info.volume_cm3, esc(&info.shape), esc(&info.applied), n_records
+    );
+    std::fs::write(&p, text)?;
+    Ok(p)
+}
+
+pub fn read_volume_json(ams: &Path) -> Option<VolInfo> {
+    let text = std::fs::read_to_string(volume_json_path(ams)).ok()?;
+    let after = |key: &str| -> Option<String> {
+        let i = text.find(&format!("\"{key}\""))?;
+        let rest = text[i + key.len() + 2..].trim_start().strip_prefix(':')?.trim_start();
+        if let Some(r) = rest.strip_prefix('"') {
+            Some(r[..r.find('"')?].to_string())
+        } else {
+            Some(rest.chars().take_while(|c| !matches!(c, ',' | '}' | '\n')).collect::<String>().trim().to_string())
+        }
+    };
+    Some(VolInfo { volume_cm3: after("volume_cm3")?.parse().ok()?, shape: after("shape").unwrap_or_default(), applied: after("applied").unwrap_or_default() })
 }
 
 pub fn is_ams(p: &Path) -> bool {
@@ -204,6 +271,28 @@ mod tests {
         let s = doc.derive(false, CoordSys::Specimen, &Orientation::default());
         assert!((d[0].axes.dec_inc[0].0 - s[0].axes.dec_inc[0].0).abs() > 1.0);
         assert!((d[1].axes.dec_inc[0].0 - s[1].axes.dec_inc[0].0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn volume_goes_into_the_records_and_the_json() {
+        let (d, p) = tmp_doc();
+        let mut doc = Doc::open(&p).unwrap();
+        assert_eq!(doc.specs[0].volume_cm3, 10.0);
+        doc.set_volume(3.375);
+        let again = ams::parse(&doc.raw).unwrap();
+        assert!(again.iter().all(|s| (s.volume_cm3 - 3.375).abs() < 1e-6));
+        let info = VolInfo { volume_cm3: 3.375, shape: "cubic".into(), applied: "2026-11-15".into() };
+        let jp = write_volume_json(&p, &info, 2).unwrap();
+        assert!(jp.ends_with("ZZ01.volume.json"));
+        assert_eq!(read_volume_json(&p), Some(info));
+        assert!(read_volume_json(&d.0.join("nothing.ams")).is_none());
+    }
+
+    #[test]
+    fn dates() {
+        let t = today();
+        assert_eq!(t.len(), 10);
+        assert!(t.starts_with("20"));
     }
 
     #[test]

@@ -1,11 +1,13 @@
 use crate::doc::{self, Derived, Doc};
 use crate::icons::{self, Icon};
 use crate::plots::{self, AxisCfg, ColorCfg, NetView, Pt, ScatterSpec, StereoOpts, Theme};
-use ams_core::params::{param_class, param_sd, param_values, N_PARAMS, PARAM_LABELS};
+use ams_core::params::{param_class, param_sd, param_values_vol, N_PARAMS, PARAM_LABELS};
 mod analysis_ui;
 mod dialogs_ui;
 mod owens_file_ui;
+mod recombine_ui;
 mod specset_ui;
+mod volume_ui;
 mod tools_ui;
 use ams_core::coords::{CoordSys, Orientation};
 use ams_core::export;
@@ -15,6 +17,8 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Action {
     Open,
+    Recombine,
+    Volume,
     OpenSet,
     Prev,
     Next,
@@ -97,11 +101,11 @@ fn class_color(class: u8, dark: bool) -> Option<Color32> {
 
 /// Parameters grouped by type, one column per group, in the order of the original's list.
 const PARAM_GROUPS: [(&str, &[usize]); 7] = [
-    ("Magnitude", &[0]),
-    ("Shape", &[1, 2, 3, 4, 5, 6, 7, 8]),
-    ("K1 (max)", &[9, 12, 13]),
-    ("K2 (int)", &[10, 14, 15]),
-    ("K3 (min)", &[11, 16, 17]),
+    ("Magnitude", &[0, 24]),
+    ("Shape", &[1, 2, 3, 4, 5, 6, 7, 8, 25, 26, 27]),
+    ("K1 (max)", &[9, 12, 13, 28, 31]),
+    ("K2 (int)", &[10, 14, 15, 29]),
+    ("K3 (min)", &[11, 16, 17, 30, 32, 33]),
     ("F-tests", &[18, 19, 20]),
     ("Confidence", &[21, 22, 23]),
 ];
@@ -131,6 +135,8 @@ fn param_combo(ui: &mut Ui, id: &str, v: &mut usize, dark: bool) -> bool {
                 ui.add_space(6.0);
             }
         });
+        ui.separator();
+        ui.label(RichText::new("* belongs to the M3ORE lab sheet (not in Anisoft). Corrected for the sample volume where it applies: Edit > Volume Correction.").small().weak());
     });
     changed
 }
@@ -197,6 +203,8 @@ const W_EDIT: usize = 7;
 const W_OWENS: usize = 13;
 const W_CLASSES: usize = 14;
 const W_SET: usize = 15;
+const W_VOL: usize = 16;
+const W_RECOMB: usize = 17;
 
 struct ShotJob {
     copy: bool,
@@ -325,6 +333,12 @@ pub struct App {
     win_factors: bool,
     win_about: bool,
     win_edit: bool,
+    /// The file the browser tree last showed as current (to scroll to it when it changes).
+    tree_cur: Option<PathBuf>,
+    win_recomb: bool,
+    rc: recombine_ui::RecState,
+    win_vol: bool,
+    vol: volume_ui::VolState,
     win_set: bool,
     /// The parent-folder dialog, the confirmed set shown in the browser, and the identifier used last.
     sd: specset_ui::SetDialog,
@@ -355,7 +369,7 @@ pub struct App {
     info: Option<String>,
     hover: [String; 4],
     last_anchor: Option<usize>,
-    win_serial: [u64; 16],
+    win_serial: [u64; 24],
     list_drag: Option<ListDrag>,
     tools: tools_ui::ToolsState,
     tool_copy: Option<Rect>,
@@ -460,6 +474,11 @@ impl App {
             win_factors: false,
             win_about: false,
             win_edit: false,
+            tree_cur: None,
+            win_recomb: false,
+            rc: Default::default(),
+            win_vol: false,
+            vol: Default::default(),
             win_set: false,
             sd: Default::default(),
             set: None,
@@ -482,7 +501,7 @@ impl App {
             info: None,
             hover: Default::default(),
             last_anchor: None,
-            win_serial: [0; 16],
+            win_serial: [0; 24],
             list_drag: None,
             tools: Default::default(),
             tool_copy: None,
@@ -569,6 +588,7 @@ impl App {
                 self.doc = Some(d);
                 self.classes.clear();
                 self.class_of.clear();
+                self.load_volume_info();
                 self.dirty = true;
                 // recompute now: the rest of this frame (plots, table) indexes `derived` per specimen
                 self.refresh();
@@ -607,7 +627,8 @@ impl App {
             .map(|i| {
                 let d = &self.derived[i];
                 let ph = if self.out_phase { &doc.specs[i].outphase } else { &doc.specs[i].inphase };
-                let vals = param_values(d.km, &d.axes, ph);
+                let vol = if doc.specs[i].volume_cm3 > 0.0 { doc.specs[i].volume_cm3 } else { ams_core::params::REF_VOLUME };
+                let vals = param_values_vol(d.km, &d.axes, ph, vol);
                 Pt {
                     idx: i,
                     name: doc.specs[i].name.clone(),
@@ -652,6 +673,8 @@ impl App {
                 }
             }
             Action::OpenSet => self.open_folder_of_specimens(ctx),
+            Action::Volume => self.open_volume(),
+            Action::Recombine => self.open_recombine(),
             Action::Prev | Action::Next => {
                 if let Some(d) = self.doc.as_ref().filter(|d| !d.synthetic) {
                     let (prev, next, _, _) = self.neighbours_of(&d.path);
@@ -1062,6 +1085,17 @@ impl eframe::App for App {
                     if item(ui, "Set Data Classes", "Ctrl+F1", has) { actions.push(Action::SetClasses) }
                     ui.separator();
                     if item(ui, "Spec to Geo (Owens)", "", has) { actions.push(Action::Owens) }
+                    {
+                        // hovering shows the volume that is already applied to this file
+                        let hint = if has { self.volume_summary() } else { String::new() };
+                        let r = ui.add_enabled(has, egui::Button::new("Volume Correction ..."));
+                        let r = if hint.is_empty() { r } else { r.on_hover_text(hint) };
+                        if r.clicked() {
+                            actions.push(Action::Volume);
+                            ui.close();
+                        }
+                    }
+                    if item(ui, "Recombine Split AMS Files ...", "", true) { actions.push(Action::Recombine) }
                     ui.separator();
                     if item(ui, "Invert Selection", "Shift+Ins", has) { actions.push(Action::InvertSel) }
                     if item(ui, "Disregard Selected Record(s)", "Shift+Del", has) { actions.push(Action::Disregard) }
@@ -1801,6 +1835,7 @@ impl App {
         self.doc = Some(d);
         self.classes.clear();
         self.class_of.clear();
+        self.load_volume_info();
         self.dirty = true;
         self.refresh();
         self.last_anchor = None;
@@ -1854,6 +1889,8 @@ impl App {
             W_OWENS => self.win_owens = true,
             W_CLASSES => self.win_classes = true,
             W_SET => self.win_set = true,
+            W_VOL => self.win_vol = true,
+            W_RECOMB => self.win_recomb = true,
             _ => {}
         }
     }
@@ -1961,6 +1998,8 @@ impl App {
         self.specset_window(ctx);
         self.edit_data_window(ctx);
         self.classes_window(ctx);
+        self.recombine_window(ctx);
+        self.volume_window(ctx);
         self.owens_window(ctx);
         self.table_window(ctx);
         self.group_window(ctx);

@@ -8,8 +8,12 @@
 //! * field dip: `FD`, `Field dip`, `Dip`
 //! * drilling table: `DS`, `Drill table strike`, `DD`, `Drill table dip`
 //!
-//! Strikes are used as right-hand-rule strikes: a left-hand-rule strike gets 180 degrees added and a dip direction
-//! has 90 degrees taken off. The convention of the field strike column is also applied to the drill table strike.
+//! The strike convention of the lab (to be confirmed by the lab): the index finger along the strike, the thumb
+//! towards the dip direction, so a strike of 0 deg (north) dips towards 90 deg. That is the same as the numbers the
+//! Owens rotation uses (dip direction = strike + 90), so a column headed `LHR` is used as it stands, and a dip
+//! direction has 90 degrees taken off. The convention of the field strike column is also applied to the drill table
+//! strike. (A textbook left-hand-rule strike would be 180 degrees away; change [`StrikeKind::to_rhr`] if the lab
+//! does mean that.)
 
 /// The role of a column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +52,8 @@ impl StrikeKind {
     pub fn to_rhr(self, v: f64) -> f64 {
         let x = match self {
             StrikeKind::RightHand => v,
-            StrikeKind::LeftHand => v + 180.0,
+            // the lab's left-hand rule as described (thumb to the dip direction): the same numbers
+            StrikeKind::LeftHand => v,
             StrikeKind::DipDirection => v - 90.0,
         };
         x.rem_euclid(360.0)
@@ -242,8 +247,8 @@ mod tests {
         .unwrap();
         assert_eq!(t.header_row, 2);
         assert_eq!(t.strike_kind, StrikeKind::LeftHand);
-        // a left-hand-rule strike is 180 degrees from the right-hand-rule strike
-        assert_eq!(t.rows[0].vals, [190.0, 40.0, 170.0, 30.0]);
+        // the lab's left-hand rule (thumb to the dip direction) gives the numbers the rotation uses
+        assert_eq!(t.rows[0].vals, [10.0, 40.0, 350.0, 30.0]);
         assert_eq!(t.rows[0].raw, [10.0, 40.0, 350.0, 30.0]);
     }
 

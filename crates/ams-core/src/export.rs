@@ -25,10 +25,16 @@ pub fn csv(specimens: &[&Specimen], out_of_phase: bool) -> String {
 }
 
 /// Per-phase columns, in this order (the `ip_` / `op_` prefix is added in the header).
-pub const PHASE_COLUMNS: [&str; 30] = [
+pub const PHASE_COLUMNS: [&str; 65] = [
     "Km", "K1", "K1_SD", "K2", "K2_SD", "K3", "K3_SD", "K1_Dec", "K1_Inc", "K2_Dec", "K2_Inc", "K3_Dec", "K3_Inc",
     "L", "F", "P", "Pj", "T", "U", "Q", "E", "FTest_F", "FTest_F12", "FTest_F23", "E12", "E23", "E13",
     "Tyy", "Txx", "Tzz",
+    // M3ORE lab sheet: volume-corrected values, Khan / Owens parameters, foliation and lineation
+    "Km_vol", "K1_un", "K2_un", "K3_un", "L_Khan", "F_Khan", "H_Owens", "Lin_Plunge", "Fol_Dip", "Fol_DipDir",
+    // and the lab sheet's errors: fractional (and absolute) errors of the values above
+    "K1_frac", "K2_frac", "K3_frac", "Km_frac", "K1_un_frac", "K2_un_frac", "K3_un_frac",
+    "L_frac", "L_abs", "L_Khan_frac", "L_Khan_abs", "F_frac", "F_abs", "F_Khan_frac", "F_Khan_abs",
+    "P_frac", "P_abs", "H_frac", "H_abs", "Pj_frac", "Pj_abs", "T_frac", "T_abs", "U_frac", "U_abs",
 ];
 
 /// Header of [`csv_both`]: `Specimen,Field,Freq,ip_*...,op_*...,opKm_over_ipKm_percent`.
@@ -45,9 +51,9 @@ pub fn header_both() -> String {
     h
 }
 
-fn phase_fields(ph: &Phase) -> Vec<String> {
+fn phase_fields(ph: &Phase, vol_cm3: f64) -> Vec<String> {
     let ax = ph.axes();
-    let v = crate::params::param_values(ph.km, &ax, ph);
+    let v = crate::params::param_values_vol(ph.km, &ax, ph, vol_cm3);
     let g = |x: f64, d: usize| if x.is_finite() { format!("{x:.d$e}") } else { String::new() };
     let f = |x: f64| if x.is_finite() { format!("{x}") } else { String::new() };
     let mut o = vec![g(ph.km, 6)];
@@ -69,6 +75,24 @@ fn phase_fields(ph: &Phase) -> Vec<String> {
     o.push(g(ph.tensor[1][1], 7));
     o.push(g(ph.tensor[0][0], 7));
     o.push(g(ph.tensor[2][2], 7));
+    // lab sheet
+    let l = crate::lab::lab(ph.km, ax.k_norm, ph.sd, vol_cm3, 0.0);
+    for x in [l.km_vol, l.k_un[0], l.k_un[1], l.k_un[2]] {
+        o.push(g(x, 6));
+    }
+    for i in [25, 26, 27] {
+        o.push(g(v[i], 7));
+    }
+    o.push(format!("{:.4}", v[31]));
+    o.push(format!("{:.4}", v[32]));
+    o.push(format!("{:.4}", v[33]));
+    for x in l.k_frac.iter().chain([&l.km_frac]).chain(l.k_un_frac.iter()) {
+        o.push(g(*x, 6));
+    }
+    for val in [l.l, l.l_khan, l.f, l.f_khan, l.p, l.h_owens, l.pj, l.t, l.u] {
+        o.push(g(val.frac, 6));
+        o.push(g(val.abs, 6));
+    }
     o
 }
 
@@ -80,8 +104,8 @@ pub fn csv_both(specimens: &[&Specimen]) -> String {
     s.push('\n');
     for sp in specimens {
         let mut row = vec![sp.name.clone(), format!("{}", sp.field_am), format!("{}", sp.freq_hz)];
-        row.extend(phase_fields(&sp.inphase));
-        row.extend(phase_fields(&sp.outphase));
+        row.extend(phase_fields(&sp.inphase, sp.volume_cm3));
+        row.extend(phase_fields(&sp.outphase, sp.volume_cm3));
         row.push(if sp.inphase.km != 0.0 { format!("{:.5}", 100.0 * sp.outphase.km / sp.inphase.km) } else { String::new() });
         s += &row.join(",");
         s.push('\n');
@@ -129,6 +153,24 @@ mod tests {
         assert!((p_ip - 1.5).abs() < 1e-5 && (p_op - p_ip).abs() > 1e-6);
         let ratio: f64 = row[col("opKm_over_ipKm_percent")].parse().unwrap();
         assert!((ratio - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn lab_sheet_columns_and_errors_are_exported() {
+        let ip = Phase { km: 2e-3, sd: [0.012, 0.01, 0.008], tensor: sym(1.2, 1.0, 0.8, 0.0, 0.0, 0.0), ftest: [5.0, 1.0, 1.0] };
+        let sp = parse(&build_record("ZZ01-A1", &ip, &ip, 400.0, 1220.0)).unwrap();
+        let out = csv_both(&[&sp[0]]);
+        let lines: Vec<&str> = out.lines().collect();
+        let head: Vec<&str> = lines[0].split(',').collect();
+        let row: Vec<&str> = lines[1].split(',').collect();
+        assert_eq!(head.len(), row.len());
+        let get = |n: &str| -> f64 { row[head.iter().position(|h| *h == n).unwrap()].parse().unwrap() };
+        // 1 % error on every K: L = K1/K2 has 2 %, Khan's L is (K1 - K2) / Km = 0.2
+        assert!((get("ip_L_frac") - 0.02).abs() < 1e-6 && (get("ip_L_abs") - 0.02 * 1.2 / 1.0).abs() < 1e-5);
+        assert!((get("ip_L_Khan") - 0.2).abs() < 1e-6 && (get("ip_H_Owens") - 0.4).abs() < 1e-6);
+        assert!((get("ip_Km_vol") - 2e-3).abs() < 1e-9, "the build_record volume is 10 cm3");
+        assert!((get("ip_Fol_Dip") - 90.0 + get("ip_K3_Inc")).abs() < 1e-3);
+        assert!(get("op_Pj_abs") > 0.0 && get("op_T_frac") > 0.0 && get("op_U_frac") > 0.0);
     }
 
     #[test]
