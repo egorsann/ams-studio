@@ -49,7 +49,7 @@ Then one line per specimen: name (12), sampling dec (4), inc (4), `fol1-code` an
 
 Columns: `Site,Specimen,Field,Freq,Km,K1,K1_SD,K2,K2_SD,K3,K3_SD,K1_Dec,K1_Inc,K2_Dec,K2_Inc,K3_Dec,K3_Inc,L,L_SD,F,F_SD,P,P_SD,Pj,Pj_SD,T,T_SD,U,U_SD,Q,Q_SD,E,E_SD,FTest_F,FTest_F12,FTest_F23,E12,E23,E13`. The out-of-phase csv repeats the in-phase Km and SDs, so it is wrong for those columns; the `.ams` is the authority.
 
-This program's export (`File > Export Data File` and `Export Selection`) writes `Specimen,Field,Freq,Km,K1,K1_SD,...,E,FTest_F,FTest_F12,FTest_F23` for the phase shown.
+This program's export (`File > Export Data File` and `Export Selection`, also `cargo run -p ams-core --example export_csv -- file.ams`) writes **one row per specimen with both phases**: `Specimen,Field,Freq`, then `ip_` + (`Km,K1,K1_SD,K2,K2_SD,K3,K3_SD,K1_Dec,K1_Inc,K2_Dec,K2_Inc,K3_Dec,K3_Inc,L,F,P,Pj,T,U,Q,E,FTest_F,FTest_F12,FTest_F23,E12,E23,E13,Tyy,Txx,Tzz`), the same 30 columns with the `op_` prefix, and finally `opKm_over_ipKm_percent` (64 columns). Specimen coordinates, Km as stored, undefined parameters empty, K1-K3 normalised to mean 1, `Tyy/Txx/Tzz` the stored diagonal tensor components, E12/E23/E13 approximate.
 
 ## Preferences file
 

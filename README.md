@@ -19,7 +19,7 @@
 | **Keyboard** | Function keys | Function keys as before, plus **Q / E** previous / next specimen (the list follows), **W** switches in-phase / out-of-phase, **Esc** clears the selection |
 | **Axes** | Linear or log per axis | **Log Km** checkbox on the P-vs-Kmean plot; log10 option for every axis and colour scale |
 | **Popups** | Tool windows open in a different place every time | About **twice as large**, always open **centred at the same size** |
-| **Exports** | Export all active records | Adds **Export Selection (CSV)** (Ctrl+Shift+E) for just the specimens you selected |
+| **Exports** | CSV of one phase | **One CSV with in-phase and out-of-phase together**: one row per specimen, columns `ip_*` and `op_*` (Km, K1-K3 with SD, directions, L F P Pj T U Q E, F-tests, E12/E23/E13, the raw tensor) plus `opKm_over_ipKm_percent`. **Export Selection (CSV)** (Ctrl+Shift+E) does the same for just the selected specimens |
 | **Install** | Windows only; installer that brings the Visual Basic 6 runtime and OCX controls | **One executable**, nothing to install, runs on **Windows and Linux** |
 | **Trust** | Closed source | **Open source**, 42 automated tests, results checked against the original on its own output files (see below) |
 
@@ -41,7 +41,7 @@ Everything below is in the program today.
 - **Group Statistics** (F9) with the original's colour-coded tables and a stereonet with data points, mean-tensor axes, **Jelinek confidence ellipses**, optional great-circle planes and a **bootstrap cloud**; display toggles for everything.
 - **Contour Plot** (F12) for K1, K2, K3: continuous or discrete levels in the axis colour, adjustable smoothing, contour lines, data points, eigenvectors with their eigenvalue table, colour scale.
 - **Tools menu**, all five windows: **GED Editor** (read/write `.ged` files), **Tensor Addition / Subtraction** (pair two files by specimen name, add or subtract tensors, save), **Fabric Overprint** (mix two fabrics, simulate the series), **Intersection Toolbox** (two lineations to a plane, two foliations to a lineation, with the net drawn), **Deform AMS** (grain-population model with seven strain types, step by step).
-- **Edit** (rename specimens, invert / disregard / restore / clear selection), **Save Active Records As**, **Append Selected Records Into** (records are copied byte for byte), **Export CSV**, **Export Selection (CSV)**.
+- **Edit** (rename specimens, invert / disregard / restore / clear selection), **Save Active Records As**, **Append Selected Records Into** (records are copied byte for byte), **Export CSV** (in- and out-of-phase in one file), **Export Selection (CSV)**.
 - **Graphics**: copy to the clipboard or save PNGs of the plots you tick under *Export graphics*.
 
 ### Screenshots

@@ -547,11 +547,10 @@ impl App {
             }
             Action::ExportCsv => {
                 if let Some(d) = &self.doc {
-                    let suffix = if self.out_phase { "oop" } else { "ip" };
-                    let name = d.path.file_stem().map(|s| format!("{}_{suffix}.csv", s.to_string_lossy())).unwrap_or("export.csv".into());
+                    let name = d.path.file_stem().map(|s| format!("{}_ip_op.csv", s.to_string_lossy())).unwrap_or("export.csv".into());
                     if let Some(p) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(name).save_file() {
                         let rows: Vec<&_> = (0..d.specs.len()).filter(|&i| d.active[i]).map(|i| &d.specs[i]).collect();
-                        if let Err(e) = std::fs::write(&p, export::csv(&rows, self.out_phase)) {
+                        if let Err(e) = std::fs::write(&p, export::csv_both(&rows)) {
                             self.info = Some(format!("Could not export: {e}"));
                         }
                     }
@@ -563,10 +562,9 @@ impl App {
                     if rows.is_empty() {
                         self.info = Some("Nothing is selected. Select specimens first (click, drag, or a rubber band in a plot).".into());
                     } else {
-                        let suffix = if self.out_phase { "oop" } else { "ip" };
-                        let name = d.path.file_stem().map(|s| format!("{}_selection_{suffix}.csv", s.to_string_lossy())).unwrap_or("selection.csv".into());
+                        let name = d.path.file_stem().map(|s| format!("{}_selection_ip_op.csv", s.to_string_lossy())).unwrap_or("selection.csv".into());
                         if let Some(p) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(name).save_file() {
-                            if let Err(e) = std::fs::write(&p, export::csv(&rows, self.out_phase)) {
+                            if let Err(e) = std::fs::write(&p, export::csv_both(&rows)) {
                                 self.info = Some(format!("Could not export: {e}"));
                             }
                         }
@@ -860,8 +858,8 @@ impl eframe::App for App {
                     ui.separator();
                     if item(ui, "Save Active Records As", "Ctrl+S", has) { actions.push(Action::SaveActive) }
                     if item(ui, "Append Selected Records Into", "Ctrl+A", has) { actions.push(Action::AppendSel) }
-                    if item(ui, "Export Data File (CSV)", "Ctrl+E", has) { actions.push(Action::ExportCsv) }
-                    if item(ui, "Export Selection (CSV)", "Ctrl+Shift+E", has) { actions.push(Action::ExportSelection) }
+                    if item(ui, "Export Data File (CSV, in- and out-of-phase)", "Ctrl+E", has) { actions.push(Action::ExportCsv) }
+                    if item(ui, "Export Selection (CSV, in- and out-of-phase)", "Ctrl+Shift+E", has) { actions.push(Action::ExportSelection) }
                     ui.separator();
                     if item(ui, "Close Current Data File(s)", "Ctrl+Q", has) { actions.push(Action::Close) }
                     if item(ui, "Exit Program", "Ctrl+X", true) { actions.push(Action::Exit) }
