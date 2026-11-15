@@ -118,6 +118,12 @@ The program never uses the network.
 
 Mouse: click a row or marker to select, **drag over rows** or **drag a rubber band** in a plot to select several; with **Ctrl / Alt / Shift** held the band only picks K1 / K2 / K3 markers. Drag the dividers between plots and the panel edges to resize. **Stereonet:** **Ctrl + scroll** (or a pinch) zooms about the pointer, scroll or middle-drag pans a zoomed net, **Esc** returns to the default zoom; **holding Alt over a marker** shows its sub-specimen ID and axis at once.
 
+
+### Opening files and folders
+*Open Data File(s)* (toolbar / Ctrl+O) opens **.ams files** (several can be chosen with Ctrl / Shift; the first is opened and all stay selected in the file tree). A **folder of specimens** is *File > Open Folder of Specimens* (Ctrl+Shift+O, or the button above the file tree); the two are separate dialogs because Windows file dialogs cannot choose a file and a folder in one. A file or a folder can also be **dropped on the window**.
+
+### Speed on a computer without a graphics card
+The program itself is light (idle it uses no CPU, about 0.3 ms per frame to build the interface, 200-260 MB of memory), but the window is redrawn completely on every mouse move. With a graphics card that is nothing; without one (a virtual machine without 3D acceleration) Windows or Mesa draws it in software, which uses the processor on every frame. *About* shows what is drawing ("Graphics: ..."); when it is software rendering the frame rate is held to 30 per second. Switches (for a shortcut's command line): `--max-fps N` (0 = no limit), `--backend dx12|vulkan|gl` (which graphics backend wgpu uses). `AMS_STUDIO_FRAME_STATS=1` prints frames per second and the program's own time per frame to the console.
 ## For developers and other LLMs
 
 Everything needed to follow or redo the work is in the repository:

@@ -438,6 +438,10 @@ pub struct App {
     win_colors: bool,
     win_factors: bool,
     win_about: bool,
+    /// What draws the window, whether that is software rendering, and when the last frame began (for the frame limit).
+    gpu_info: String,
+    software_render: bool,
+    last_frame_start: Option<std::time::Instant>,
     win_edit: bool,
     /// Files that were edited and left again without saving: kept so that nothing is lost while browsing.
     stash: std::collections::HashMap<PathBuf, Doc>,
@@ -625,6 +629,9 @@ impl App {
             win_colors: false,
             win_factors: false,
             win_about: false,
+            gpu_info: String::new(),
+            software_render: false,
+            last_frame_start: None,
             win_edit: false,
             stash: Default::default(),
             vol_pending: Default::default(),
@@ -1089,12 +1096,20 @@ impl App {
         let has = self.doc.is_some();
         match a {
             Action::Open => {
-                let mut dlg = rfd::FileDialog::new().add_filter("AMS files", &["ams"]).set_title("Open Data File(s)");
+                // several files can be chosen (Ctrl / Shift); a whole folder of specimens is File > Open Folder of Specimens
+                let mut dlg = rfd::FileDialog::new().add_filter("AMS files", &["ams"]).set_title("Open Data File(s)  (for a whole folder of specimens: File > Open Folder of Specimens, Ctrl+Shift+O)");
                 if self.browser_dir.is_dir() {
                     dlg = dlg.set_directory(&self.browser_dir);
                 }
-                if let Some(p) = dlg.pick_file() {
-                    self.open_path(p);
+                if let Some(mut files) = dlg.pick_files().filter(|f| !f.is_empty()) {
+                    files.sort();
+                    let first = files[0].clone();
+                    if files.len() > 1 {
+                        // the others stay selected in the file tree, ready for the tools that work on several files
+                        self.tree_sel = files.clone();
+                        self.tree_anchor = Some(first.clone());
+                    }
+                    self.open_path(first);
                 }
             }
             Action::OpenSet => self.open_folder_of_specimens(ctx),
@@ -1613,8 +1628,76 @@ fn item(ui: &mut Ui, label: &str, sc: &str, enabled: bool) -> bool {
     r
 }
 
+static MAX_FPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+
+/// `--max-fps N` on the command line (0 = no limit); without it a software renderer is held to 30 frames per second.
+pub fn set_max_fps(n: u32) {
+    MAX_FPS.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What draws the window: the adapter name and backend when wgpu is used, and whether it is a software rasteriser
+/// (no graphics card: a virtual machine without GPU, Windows' basic render driver, llvmpipe ...).
+fn gpu_summary(frame: &eframe::Frame) -> (String, bool) {
+    match frame.wgpu_render_state() {
+        Some(rs) => {
+            let info = rs.adapter.get_info();
+            let n = info.name.to_lowercase();
+            let soft = info.device_type == eframe::wgpu::DeviceType::Cpu || ["llvmpipe", "warp", "basic render", "swiftshader", "software", "lavapipe"].iter().any(|k| n.contains(k));
+            (format!("{} ({:?}, {:?})", info.name, info.backend, info.device_type), soft)
+        }
+        None => ("OpenGL (glow renderer)".to_string(), false),
+    }
+}
+
+/// `AMS_STUDIO_FRAME_STATS=1` prints, once a second, how many frames were drawn and how long the program's own part of
+/// a frame (building the interface and its shapes, not the GPU or software rasteriser) took on average.
+struct FrameTimer(std::time::Instant);
+
+impl FrameTimer {
+    fn start() -> Option<FrameTimer> {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        ON.get_or_init(|| std::env::var_os("AMS_STUDIO_FRAME_STATS").is_some()).then(|| FrameTimer(std::time::Instant::now()))
+    }
+}
+
+impl Drop for FrameTimer {
+    fn drop(&mut self) {
+        static STATS: std::sync::Mutex<Option<(u32, f64, std::time::Instant)>> = std::sync::Mutex::new(None);
+        let ms = self.0.elapsed().as_secs_f64() * 1000.0;
+        if let Ok(mut s) = STATS.lock() {
+            let e = s.get_or_insert((0, 0.0, std::time::Instant::now()));
+            e.0 += 1;
+            e.1 += ms;
+            if e.2.elapsed().as_secs_f64() >= 1.0 {
+                eprintln!("frames {}  own time per frame {:.2} ms", e.0, e.1 / e.0 as f64);
+                *e = (0, 0.0, std::time::Instant::now());
+            }
+        }
+    }
+}
+
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        // what draws the window; software rendering is held to 30 frames per second so a computer without a graphics
+        // card (or a virtual machine) stays usable while something is dragged
+        if self.gpu_info.is_empty() {
+            let (s, soft) = gpu_summary(frame);
+            self.gpu_info = s;
+            self.software_render = soft;
+        }
+        let cap = match MAX_FPS.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            u32::MAX => self.software_render.then_some(30),
+            n => Some(n),
+        };
+        if let (Some(fps), Some(last)) = (cap, self.last_frame_start) {
+            let min = std::time::Duration::from_secs_f64(1.0 / fps as f64);
+            if last.elapsed() < min {
+                std::thread::sleep(min - last.elapsed());
+            }
+        }
+        self.last_frame_start = Some(std::time::Instant::now());
+        let _frame_timer = FrameTimer::start();
         let ctx = ui.ctx().clone();
         // tooltips (the (i) explanations) appear the moment the pointer is over their target, also while it still moves
         if ctx.global_style().interaction.tooltip_delay != 0.0 || ctx.global_style().interaction.show_tooltips_only_when_still {
@@ -1629,6 +1712,23 @@ impl eframe::App for App {
             ctx.all_styles_mut(|st| st.spacing.combo_height = combo_h);
         }
         self.track_layout(&ctx);
+        // files or a folder dropped on the window: a folder is a folder of specimens, .ams files are opened
+        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        if !dropped.is_empty() {
+            if let Some(dir) = dropped.iter().find(|p| p.is_dir()) {
+                self.begin_scan(&ctx, dir.clone());
+            } else {
+                let mut files: Vec<PathBuf> = dropped.into_iter().filter(|p| doc::is_ams(p)).collect();
+                files.sort();
+                if let Some(first) = files.first().cloned() {
+                    if files.len() > 1 {
+                        self.tree_sel = files.clone();
+                        self.tree_anchor = Some(first.clone());
+                    }
+                    self.open_path(first);
+                }
+            }
+        }
         self.cv_poll(&ctx);
         self.planes_poll(&ctx);
         if self.reset_snap.is_some() && self.reset_undo_left().is_none() {
@@ -1661,8 +1761,8 @@ impl eframe::App for App {
         egui::Panel::top("menubar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if item(ui, "Open Data File(s)", "Ctrl+O", true) { actions.push(Action::Open) }
-                    if item(ui, "Open Folder of Specimens", "Ctrl+Shift+O", true) { actions.push(Action::OpenSet) }
+                    if item(ui, "Open Data File(s) ...", "Ctrl+O", true) { actions.push(Action::Open) }
+                    if item(ui, "Open Folder of Specimens ...", "Ctrl+Shift+O", true) { actions.push(Action::OpenSet) }
                     if item(ui, "Open Previous Data File", "Ctrl+P", has) { actions.push(Action::Prev) }
                     if item(ui, "Open Next Data File", "Ctrl+N", has) { actions.push(Action::Next) }
                     if item(ui, "Reload Current Data File(s)", "Ctrl+R", has) { actions.push(Action::Reload) }
@@ -1799,7 +1899,7 @@ impl eframe::App for App {
             let (prev, next) = self.doc.as_ref().filter(|dc| !dc.synthetic).map(|dc| { let n = self.neighbours_of(&dc.path); (n.0.is_some(), n.1.is_some()) }).unwrap_or((false, false));
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if tool(ui, Icon::Open, "Open Data File(s)  Ctrl+O", true, false, d) { actions.push(Action::Open) }
+                if tool(ui, Icon::Open, "Open Data File(s)  Ctrl+O (choose .ams files; a whole folder of specimens: File > Open Folder of Specimens, or drop it on the window)", true, false, d) { actions.push(Action::Open) }
                 if tool(ui, Icon::Prev, "Open Previous Data File  Ctrl+P", prev, false, d) { actions.push(Action::Prev) }
                 if tool(ui, Icon::Next, "Open Next Data File  Ctrl+N", next, false, d) { actions.push(Action::Next) }
                 if tool(ui, Icon::Reload, "Reload Current Data File(s)  Ctrl+R", has, false, d) { actions.push(Action::Reload) }
@@ -2856,12 +2956,17 @@ impl App {
         }
 
         let mut open = self.win_about;
-        self.base_window(ctx, "About AMS Studio", W_ABOUT, Vec2::new(760.0, 220.0)).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+        self.base_window(ctx, "About AMS Studio", W_ABOUT, Vec2::new(760.0, 300.0)).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
             tools_ui::pop_style(ui, 1.4);
             ui.heading("AMS Studio");
             ui.label("An independent reimplementation of AGICO's Anisoft 6, written in Rust with egui.");
             ui.label("Reads Safyr7 .ams files; anisotropy results were checked against csv exports of the original program.");
             ui.label(RichText::new("Anisoft is a program of AGICO, Brno. This project is not affiliated with AGICO.").weak());
+            ui.separator();
+            ui.label(format!("Graphics: {}", self.gpu_info));
+            if self.software_render {
+                ui.label(RichText::new("This is software rendering (no graphics card): drawing is limited to 30 frames per second so the computer stays responsive. Try: ams-studio.exe --backend dx12 (or vulkan, gl), or --max-fps 20.").color(Color32::from_rgb(214, 150, 40)).small());
+            }
         });
         self.win_about = open;
 

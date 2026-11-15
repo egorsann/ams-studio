@@ -21,7 +21,35 @@ fn main() -> eframe::Result {
             return Ok(());
         }
     }
-    let open = std::env::args().nth(1).map(std::path::PathBuf::from).filter(|p| p.exists());
+    // switches for a computer without a graphics card (see About): --backend dx12|vulkan|gl (wgpu's backend),
+    // --max-fps N (0 = no limit); anything else is the file or folder to open
+    let mut positional: Vec<String> = vec![];
+    let mut it = std::env::args().skip(1);
+    while let Some(a) = it.next() {
+        let take = |name: &str, a: &str, it: &mut dyn Iterator<Item = String>| -> Option<String> {
+            if let Some(v) = a.strip_prefix(&format!("{name}=")) {
+                Some(v.to_string())
+            } else if a == name {
+                it.next()
+            } else {
+                None
+            }
+        };
+        if let Some(v) = take("--backend", &a, &mut it) {
+            let b = match v.to_lowercase().as_str() {
+                "gl" | "opengl" => "opengl".to_string(),
+                other => other.to_string(),
+            };
+            std::env::set_var("WGPU_BACKEND", b);
+        } else if let Some(v) = take("--max-fps", &a, &mut it) {
+            if let Ok(n) = v.parse::<u32>() {
+                app::set_max_fps(n);
+            }
+        } else {
+            positional.push(a);
+        }
+    }
+    let open = positional.first().map(std::path::PathBuf::from).filter(|p| p.exists());
     let (size, maximized) = app::saved_window();
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
