@@ -1,6 +1,6 @@
 //! The open document: specimens, which of them are active/selected, and folder navigation.
 
-use ams_core::ams::{self, put_phase, Axes, Specimen, NAME_LEN, OFF_KIM, OFF_KRE, OFF_NAME, RECORD_LEN};
+use ams_core::ams::{self, Axes, Specimen, NAME_LEN, OFF_NAME, RECORD_LEN};
 use ams_core::coords::{CoordSys, Orientation};
 use ams_core::tensor::{rotate_tensor, Mat3};
 use std::path::{Path, PathBuf};
@@ -59,9 +59,11 @@ impl Doc {
             .iter()
             .map(|s| {
                 let ph = if out_of_phase { &s.outphase } else { &s.inphase };
-                // geographic coordinates come from the orientation stored in the record when it has one
-                let r = match (cs, &s.orient) {
-                    (CoordSys::Geographic, Some(ro)) => ams_core::orient::geo_rotation(ro),
+                // geographic coordinates come from the reorientation stored in the record (AMS Studio's block, exact),
+                // else from the orientation Anisoft stores (Edit Data), else from the global parameters
+                let r = match (cs, &s.georot, &s.orient) {
+                    (CoordSys::Geographic, Some(g), _) => g.matrix(),
+                    (CoordSys::Geographic, None, Some(ro)) => ams_core::orient::geo_rotation(ro),
                     _ => r,
                 };
                 let tensor = rotate_tensor(&ph.tensor, &r);
@@ -79,16 +81,35 @@ impl Doc {
         out
     }
 
-    /// Rotates the tensors of specimen `i` (both phases) by `r`, in the records too, so a saved file carries them.
-    /// Km, the standard deviations and the F-tests are unchanged by a rotation.
-    pub fn rotate_specimen(&mut self, i: usize, r: &Mat3) {
-        let rec = &mut self.raw[i * RECORD_LEN..(i + 1) * RECORD_LEN];
-        let s = &mut self.specs[i];
-        for (ph, base) in [(&mut s.inphase, OFF_KRE), (&mut s.outphase, OFF_KIM)] {
-            ph.tensor = rotate_tensor(&ph.tensor, r);
-            put_phase(rec, base, ph.km, &ph.tensor);
+    /// Stores the reorientation of record `i` (or clears it): the specimen coordinates stay exactly as measured, the
+    /// geographic view is computed from the stored values. `modified` is set unless `quiet` (a reorientation that was
+    /// only found in the `_geo` partner file is not an edit).
+    pub fn set_georot(&mut self, i: usize, g: Option<ams_core::georot::GeoRot>, quiet: bool) {
+        if i >= self.specs.len() {
+            return;
         }
-        self.modified = true;
+        ams_core::georot::write(&mut self.raw[i * RECORD_LEN..(i + 1) * RECORD_LEN], g.as_ref());
+        self.specs[i].georot = g;
+        if !quiet {
+            self.modified = true;
+        }
+    }
+
+    /// Takes the stored reorientations of the `_geo` partner file over (records are matched by name, in order; a
+    /// record that has its own keeps it). Not an edit: the file is not marked modified. Returns how many were taken.
+    pub fn apply_partner(&mut self, partner: &[u8]) -> usize {
+        let Ok(theirs) = ams::parse(partner) else { return 0 };
+        let mut used = vec![false; self.specs.len()];
+        let mut n = 0;
+        for t in &theirs {
+            let Some(i) = (0..self.specs.len()).find(|&i| !used[i] && self.specs[i].name == t.name) else { continue };
+            used[i] = true;
+            if let (Some(g), None) = (t.georot, self.specs[i].georot) {
+                self.set_georot(i, Some(g), true);
+                n += 1;
+            }
+        }
+        n
     }
 
     /// Writes the specimen volume (cm3) into the records `rows` (the field Anisoft's Edit Data shows as Volume).
@@ -199,7 +220,8 @@ pub fn read_volume_json(ams: &Path) -> Option<VolInfo> {
     Some(VolInfo { volume_cm3: after("volume_cm3")?.parse().ok()?, shape: after("shape").unwrap_or_default(), applied: after("applied").unwrap_or_default(), rec_shapes })
 }
 
-/// `<folder>/<file name without .ams>.owens.json`: which records of a file were already Owens-rotated.
+/// `<folder>/<file name without .ams>.owens.json`: written by an earlier version (which rotated the tensors itself) to
+/// say which records were Owens-rotated; still read so that such files are not rotated twice.
 pub fn owens_json_path(ams: &Path) -> PathBuf {
     let stem = ams.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     ams.with_file_name(format!("{stem}.owens.json"))
@@ -212,18 +234,6 @@ pub fn read_owens_marks(ams: &Path) -> Vec<bool> {
     let r = &text[i..];
     let (Some(a), Some(b)) = (r.find('['), r.find(']')) else { return vec![] };
     r[a + 1..b].split(',').filter_map(|t| match t.trim() { "1" => Some(true), "0" => Some(false), _ => None }).collect()
-}
-
-/// Writes the marks next to the file (`rotated[i]` = record i was Owens-rotated). With no mark set the file is removed.
-pub fn write_owens_marks(ams: &Path, rotated: &[bool]) -> std::io::Result<()> {
-    let p = owens_json_path(ams);
-    if !rotated.iter().any(|r| *r) {
-        let _ = std::fs::remove_file(&p);
-        return Ok(());
-    }
-    let file = ams.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default().replace('\\', "\\\\").replace('"', "\\\"");
-    let list: Vec<&str> = rotated.iter().map(|r| if *r { "1" } else { "0" }).collect();
-    std::fs::write(&p, format!("{{\n  \"file\": \"{file}\",\n  \"applied\": \"{}\",\n  \"records\": {},\n  \"rotated\": [{}]\n}}\n", today(), rotated.len(), list.join(", ")))
 }
 
 pub fn is_ams(p: &Path) -> bool {
@@ -353,15 +363,12 @@ mod tests {
     }
 
     #[test]
-    fn owens_marks_round_trip() {
+    fn legacy_owens_marks_are_still_read() {
         let (_d, p) = tmp_doc();
         assert!(read_owens_marks(&p).is_empty());
-        write_owens_marks(&p, &[true, false]).unwrap();
+        std::fs::write(owens_json_path(&p), "{\n  \"rotated\": [1, 0]\n}\n").unwrap();
         assert_eq!(read_owens_marks(&p), vec![true, false]);
         assert!(owens_json_path(&p).ends_with("ZZ01.owens.json"));
-        // nothing marked: the file goes away
-        write_owens_marks(&p, &[false, false]).unwrap();
-        assert!(!owens_json_path(&p).exists());
     }
 
     #[test]
@@ -372,23 +379,50 @@ mod tests {
     }
 
     #[test]
-    fn rotation_reaches_the_records() {
+    fn the_reorientation_is_stored_and_the_specimen_coordinates_stay() {
         let (_d, p) = tmp_doc();
         let mut doc = Doc::open(&p).unwrap();
-        let r = ams_core::coords::owens_rotation(30.0, 20.0, 10.0, 15.0);
-        doc.rotate_specimen(1, &r);
+        let before = doc.raw.clone();
+        let g = ams_core::georot::GeoRot::Owens { fs: 30.0, fd: 20.0, ds: 10.0, dd: 15.0 };
+        doc.set_georot(1, Some(g), false);
         assert!(doc.modified);
+        // only the trailing block of record 1 changed: tensors, Km and everything else are as measured
+        let (a, b) = (&before, &doc.raw);
+        assert_eq!(&a[..640 + ams_core::georot::OFF_GEOROT], &b[..640 + ams_core::georot::OFF_GEOROT]);
+        assert_eq!(&a[..640], &b[..640]);
         let again = ams::parse(&doc.raw).unwrap();
-        let (a, b) = (again[1].inphase.axes(), doc.specs[1].inphase.axes());
-        for k in 0..3 {
-            assert!((a.k_norm[k] - b.k_norm[k]).abs() < 1e-5);
-        }
-        assert!((a.dec_inc[0].0 - b.dec_inc[0].0).abs() < 0.05);
-        // the first specimen and Km are untouched; the eigenvalues survive the rotation
-        let first = ams::parse(&doc.raw).unwrap();
-        assert!((first[0].inphase.tensor[0][0] - 1.2e-3).abs() < 1e-8);
-        assert!((first[1].inphase.km - 1e-3).abs() < 1e-9);
-        assert!((first[1].inphase.axes().k_raw[0] - 1.2e-3).abs() < 1e-7);
+        assert!(again[0].georot.is_none() && again[1].georot == Some(g));
+        // the specimen view is untouched; the geographic view is rotated for record 1 only
+        let s = doc.derive(false, CoordSys::Specimen, &Orientation::default());
+        let ge = doc.derive(false, CoordSys::Geographic, &Orientation::default());
+        assert!((s[0].axes.dec_inc[0].0 - ge[0].axes.dec_inc[0].0).abs() < 1e-9);
+        assert!((s[1].axes.dec_inc[0].0 - ge[1].axes.dec_inc[0].0).abs() > 1.0);
+        // eigenvalues survive a rotation
+        assert!((s[1].axes.k_raw[0] - ge[1].axes.k_raw[0]).abs() < 1e-9);
+        // clearing it restores the bytes
+        doc.set_georot(1, None, false);
+        assert_eq!(doc.raw, before);
+    }
+
+    #[test]
+    fn the_geo_partner_gives_the_view_without_making_an_edit() {
+        let (_d, p) = tmp_doc();
+        let mut src = Doc::open(&p).unwrap();
+        let g = ams_core::georot::GeoRot::Core(ams_core::core::CoreSetup { dip_dir: 305.0, plunge: 69.0, offset: 45.0, ..Default::default() });
+        // the partner is a copy of the source with the block in record 1 only (names are matched, as when records were disregarded)
+        src.set_georot(1, Some(g), false);
+        let partner = src.raw.clone();
+        let mut fresh = Doc::open(&p).unwrap();
+        assert!(fresh.specs.iter().all(|s| s.georot.is_none()));
+        assert_eq!(fresh.apply_partner(&partner), 1);
+        assert!(!fresh.modified, "taking the partner over is not an edit");
+        assert_eq!(fresh.specs[1].georot, Some(g));
+        // the specimen coordinates of the opened file are still its own; only the geographic view changed
+        let s = fresh.derive(false, CoordSys::Specimen, &Orientation::default());
+        let ge = fresh.derive(false, CoordSys::Geographic, &Orientation::default());
+        assert!((s[1].axes.dec_inc[0].0 - ge[1].axes.dec_inc[0].0).abs() > 1.0);
+        // a second take-over changes nothing (the record already has its reorientation)
+        assert_eq!(fresh.apply_partner(&partner), 0);
     }
 
     #[test]

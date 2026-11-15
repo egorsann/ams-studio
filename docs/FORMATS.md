@@ -23,6 +23,7 @@ Fixed **640-byte records, no file header**; record count = file size / 640. All 
 | 164, 168 | 4 each | plunge of lineation #1, #2 (float32) |
 | 180 | 144 | **in-phase block** |
 | 324 | 144 | **out-of-phase block** (identical layout) |
+| 616 | 24 | AMS Studio's **reorientation block** (zero in all 1432 records of the project's own files, so the padding is free): the text `AMSG` (616), version 1 (620), method (621: 1 drill core, 2 Owens), face and arrow indices (622, 623; drill core only), then four float32 at 624: drill core `dip direction, plunge, offset, 0`, Owens `FS, FD, DS, DD`. The program computes the geographic view from it (`ams_core::georot`); the tensors are never rotated. Other software ignores it (Anisoft was not tested with such a file) |
 
 Block layout (offsets relative to the block start):
 

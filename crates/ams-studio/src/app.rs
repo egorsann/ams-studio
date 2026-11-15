@@ -1,5 +1,6 @@
 use crate::doc::{self, Derived, Doc};
 use crate::icons::{self, Icon};
+use ams_core::georot::GeoRot;
 use pane_cfg::PaneCfg;
 use crate::plots::{self, AxisCfg, ColorCfg, NetView, Pt, ScatterSpec, StereoOpts, Theme, XyKind, ZoomView};
 use crate::plots::GroupBy;
@@ -342,8 +343,7 @@ fn info_icon(ui: &mut Ui, text: &str) {
 pub(super) struct OwensUndo {
     raw: Vec<u8>,
     specs: Vec<ams_core::ams::Specimen>,
-    pending: std::collections::HashMap<PathBuf, Vec<Option<ams_core::tensor::Mat3>>>,
-    done: std::collections::HashMap<PathBuf, Vec<bool>>,
+    pending: std::collections::HashMap<PathBuf, Vec<Option<GeoRot>>>,
 }
 
 pub struct App {
@@ -467,14 +467,12 @@ pub struct App {
     /// Short notice next to the Owens toggle: (text, time it appeared).
     owens_toast: Option<(String, f64)>,
     owens_undo: Option<OwensUndo>,
-    /// Records that were Owens-rotated in memory (per file); the ones rotated before are in the file's `.owens.json`.
-    owens_done: std::collections::HashMap<PathBuf, Vec<bool>>,
     /// The rectangle of the file browser (the Owens window keeps clear of it and points at it).
     tree_rect: Rect,
     /// The pointer was over "the files selected in the file tree" last frame: the rest of the window is dimmed.
     tree_hint: bool,
     /// Rotations of files that are not saved yet, per file and record (applied when the file is opened, used by Export as .ams).
-    pending: std::collections::HashMap<PathBuf, Vec<Option<ams_core::tensor::Mat3>>>,
+    pending: std::collections::HashMap<PathBuf, Vec<Option<GeoRot>>>,
     ana: analysis_ui::AnaState,
     info: Option<String>,
     hover: [String; 4],
@@ -628,7 +626,6 @@ impl App {
             owens_old: true,
             owens_toast: None,
             owens_undo: None,
-            owens_done: Default::default(),
             tree_rect: Rect::NOTHING,
             tree_hint: false,
             pending: Default::default(),
@@ -815,38 +812,48 @@ impl App {
         }
     }
 
-    /// Rotates records of the open file now and remembers the rotation for the file: it is applied again when the
-    /// file is opened later and used by Export as .ams. Nothing is written.
-    pub(super) fn rotate_doc(&mut self, jobs: &[(usize, ams_core::tensor::Mat3)]) -> Result<(), String> {
+    /// Stores the reorientation of records of the open file (kept in memory with the file, like every edit): the
+    /// specimen coordinates stay as measured and the geographic view (F6) is computed from the stored values. Nothing
+    /// is written; Save as .ams writes the file with the reorientation inside it.
+    pub(super) fn rotate_doc(&mut self, jobs: &[(usize, GeoRot)]) -> Result<(), String> {
         let Some(d) = &self.doc else { return Ok(()) };
-        // a sample that is already Owens-rotated is not rotated again
+        // a record that already holds a reorientation keeps it
         if !d.synthetic {
             let names: Vec<String> = d.specs.iter().map(|s| s.name.clone()).collect();
             self.owens_check(&d.path.clone(), jobs.iter().map(|j| j.0), Some(&names))?;
         }
         let Some(d) = &mut self.doc else { return Ok(()) };
-        self.owens_undo = Some(OwensUndo { raw: d.raw.clone(), specs: d.specs.clone(), pending: self.pending.clone(), done: self.owens_done.clone() });
-        for (i, r) in jobs {
-            d.rotate_specimen(*i, r);
+        self.owens_undo = Some(OwensUndo { raw: d.raw.clone(), specs: d.specs.clone(), pending: self.pending.clone() });
+        for (i, g) in jobs {
+            d.set_georot(*i, Some(*g), false);
         }
-        let (path, n, synthetic) = (d.path.clone(), d.specs.len(), d.synthetic);
-        if !synthetic {
-            self.add_pending(&path, n, jobs);
-        }
+        // the view that shows the result
+        self.coord = CoordSys::Geographic;
         self.dirty = true;
         Ok(())
     }
 
-    /// Error text when any of the records `idx` of `path` is already Owens-rotated (the correction is not applied then).
+    /// Error text when any of the records `idx` of `path` already holds a reorientation (Owens, drill core, or the
+    /// marks of an earlier version): it is not stored again.
     pub(super) fn owens_check(&self, path: &Path, idx: impl Iterator<Item = usize>, names: Option<&[String]>) -> Result<(), String> {
-        let marks = doc::read_owens_marks(path);
-        let bad: Vec<usize> = idx.filter(|&i| self.owens_done.get(path).and_then(|v| v.get(i)).copied().unwrap_or(false) || marks.get(i).copied().unwrap_or(false)).collect();
+        let open = self.doc.as_ref().filter(|d| !d.synthetic && d.path == path).or_else(|| self.stash.get(path));
+        let disk: Vec<u8> = if open.is_some() { vec![] } else { std::fs::read(path).unwrap_or_default() };
+        let legacy = doc::read_owens_marks(path);
+        let has = |i: usize| -> bool {
+            if let Some(d) = open {
+                return d.specs.get(i).map_or(false, |s| s.georot.is_some()) || legacy.get(i).copied().unwrap_or(false);
+            }
+            self.pending.get(path).and_then(|v| v.get(i)).map_or(false, |g| g.is_some())
+                || disk.get(i * ams_core::ams::RECORD_LEN..(i + 1) * ams_core::ams::RECORD_LEN).map_or(false, |rec| ams_core::georot::read(rec).is_some())
+                || legacy.get(i).copied().unwrap_or(false)
+        };
+        let bad: Vec<usize> = idx.filter(|&i| has(i)).collect();
         if bad.is_empty() {
             return Ok(());
         }
         let list: Vec<String> = bad.iter().take(6).map(|&i| names.and_then(|n| n.get(i)).cloned().unwrap_or_else(|| format!("record {}", i + 1))).collect();
         Err(format!(
-            "Not rotated: {} record(s) of {} are already rotated to geographic coordinates (Owens or drill core) ({}{}). Rotating them again would turn the data twice.\nUse Undo to take the earlier rotation back, or open the original, unrotated file.",
+            "Not reoriented: {} record(s) of {} already hold a reorientation to geographic coordinates (Owens or drill core) ({}{}).\nA record is reoriented once: use Undo to take the earlier one back, or open the original file without it.",
             bad.len(),
             path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
             list.join(", "),
@@ -859,37 +866,23 @@ impl App {
             d.raw = u.raw;
             d.specs = u.specs;
             self.pending = u.pending;
-            self.owens_done = u.done;
             self.dirty = true;
         }
     }
 
-    /// Adds rotations to the pending ones of a file (a later one acts after an earlier one).
-    pub(super) fn add_pending(&mut self, path: &Path, n: usize, jobs: &[(usize, ams_core::tensor::Mat3)]) {
-        // these records now count as Owens-rotated
-        let done = self.owens_done.entry(path.to_path_buf()).or_insert_with(|| vec![false; n]);
-        done.resize(n, false);
-        for (i, _) in jobs {
-            if let Some(m) = done.get_mut(*i) {
-                *m = true;
-            }
-        }
+    /// Holds reorientations for a file that is not open (kept with its other edits, written by Save as .ams).
+    pub(super) fn add_pending(&mut self, path: &Path, n: usize, jobs: &[(usize, GeoRot)]) {
         if let Some(d) = self.stash.get_mut(path) {
-            for (i, r) in jobs {
-                if *i < d.specs.len() {
-                    d.rotate_specimen(*i, r);
-                }
+            for (i, g) in jobs {
+                d.set_georot(*i, Some(*g), false);
             }
             return;
         }
         let v = self.pending.entry(path.to_path_buf()).or_insert_with(|| vec![None; n]);
         v.resize(n, None);
-        for (i, r) in jobs {
+        for (i, g) in jobs {
             if let Some(slot) = v.get_mut(*i) {
-                *slot = Some(match slot {
-                    Some(old) => ams_core::tensor::mat_mul(r, old),
-                    None => *r,
-                });
+                *slot = Some(*g);
             }
         }
     }
@@ -912,10 +905,17 @@ impl App {
                 let apply_pending = d.raw.len() > 0 && !d.modified;
                 let _ = fresh;
                 if let (true, Some(v)) = (apply_pending, self.pending.get(&p)) {
-                    for (i, r) in v.iter().enumerate() {
-                        if let (Some(r), true) = (r, i < d.specs.len()) {
-                            d.rotate_specimen(i, r);
+                    for (i, g) in v.iter().enumerate() {
+                        if let (Some(g), true) = (g, i < d.specs.len()) {
+                            d.set_georot(i, Some(*g), false);
                         }
+                    }
+                }
+                // the reorientation comes from the _geo file next to it when there is one (the specimen coordinates of
+                // this file stay as they are; opening the file is not an edit)
+                if apply_pending && !d.synthetic {
+                    if let Ok(bytes) = std::fs::read(export_ui::geo_path(&p)) {
+                        d.apply_partner(&bytes);
                     }
                 }
                 if let Some(parent) = p.parent() {
@@ -1050,7 +1050,6 @@ impl App {
                     let p = d.path.clone();
                     self.stash.remove(&p);
                     self.pending.remove(&p);
-                    self.owens_done.remove(&p);
                     self.vol_pending.remove(&p);
                     self.doc.as_mut().unwrap().modified = false;
                     self.open_path(p);
@@ -2906,7 +2905,7 @@ impl App {
         if rotate {
             if self.doc.is_some() {
                 if !jobs.is_empty() {
-                    let mats: Vec<(usize, ams_core::tensor::Mat3)> = jobs.iter().map(|(i, r)| (*i, ams_core::coords::owens_rotation(r[0], r[1], r[2], r[3]))).collect();
+                    let mats: Vec<(usize, GeoRot)> = jobs.iter().map(|(i, r)| (*i, GeoRot::Owens { fs: r[0], fd: r[1], ds: r[2], dd: r[3] })).collect();
                     match self.rotate_doc(&mats) {
                         Ok(()) => self.of.last = None,
                         Err(e) => self.info = Some(e),

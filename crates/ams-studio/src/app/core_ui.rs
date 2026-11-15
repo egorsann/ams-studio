@@ -3,7 +3,8 @@
 //! above the choice; the explanations are in the (i) pop-ups.
 
 use super::{info_icon, tools_ui, App, W_CORE};
-use ams_core::core::{core_rotation, offset_for, slice_of, top_surface_lhr, Arrow, CoreSetup, Face};
+use ams_core::core::{offset_for, slice_of, top_surface_lhr, Arrow, CoreSetup, Face};
+use ams_core::georot::GeoRot;
 use egui::{Align, Color32, Layout, RichText, Vec2};
 
 pub(super) struct CoreState {
@@ -174,7 +175,7 @@ impl App {
             let names: Vec<String> = self.doc.as_ref().map(|d| d.specs.iter().map(|s| s.name.clone()).collect()).unwrap_or_default();
             let jobs = core_jobs(&st.setup, st.intervals_on.then_some((st.by_slice, st.intervals.as_slice())), &names, st.first - 1..st.last);
             match self.rotate_doc(&jobs) {
-                Ok(()) => st.msg = format!("Rotated {} record(s) to geographic coordinates. Nothing is saved yet: File > Save as .ams writes it.", jobs.len()),
+                Ok(()) => st.msg = format!("The reorientation of {} record(s) is stored; the geographic view (F6) shows it and the specimen coordinates stay as measured. Nothing is saved yet: File > Save as .ams writes it into the file.", jobs.len()),
                 Err(e) => self.info = Some(e),
             }
         }
@@ -187,9 +188,9 @@ impl App {
     }
 }
 
-/// The rotation of every record of `rows` (0-based): each record gets the offset of the interval that holds its slice
-/// number (or row number), the single offset of `setup` outside the intervals and for names without a slice.
-pub(super) fn core_jobs(setup: &CoreSetup, intervals: Option<(bool, &[(u32, u32, f64)])>, names: &[String], rows: std::ops::Range<usize>) -> Vec<(usize, ams_core::tensor::Mat3)> {
+/// The reorientation of every record of `rows` (0-based): each record gets the offset of the interval that holds its
+/// slice number (or row number), the single offset of `setup` outside the intervals and for names without a slice.
+pub(super) fn core_jobs(setup: &CoreSetup, intervals: Option<(bool, &[(u32, u32, f64)])>, names: &[String], rows: std::ops::Range<usize>) -> Vec<(usize, GeoRot)> {
     rows.map(|i| {
         let offset = match intervals {
             Some((by_slice, iv)) => {
@@ -198,7 +199,7 @@ pub(super) fn core_jobs(setup: &CoreSetup, intervals: Option<(bool, &[(u32, u32,
             }
             None => setup.offset,
         };
-        (i, core_rotation(&CoreSetup { offset, ..*setup }))
+        (i, GeoRot::Core(CoreSetup { offset, ..*setup }))
     })
     .collect()
 }
@@ -206,6 +207,7 @@ pub(super) fn core_jobs(setup: &CoreSetup, intervals: Option<(bool, &[(u32, u32,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ams_core::core::core_rotation;
 
     #[test]
     fn intervals_give_every_record_the_offset_of_its_slice() {
@@ -213,7 +215,8 @@ mod tests {
         let names: Vec<String> = ["C1", "B13", "A14", "B42", "D!8", "A50"].iter().map(|s| s.to_string()).collect();
         let iv = [(0, 13, 356.0), (14, 42, 352.0)];
         let jobs = core_jobs(&setup, Some((true, &iv)), &names, 0..names.len());
-        let same = |a: &ams_core::tensor::Mat3, off: f64| {
+        let same = |g: &GeoRot, off: f64| {
+            let a = g.matrix();
             let b = core_rotation(&CoreSetup { offset: off, ..setup });
             (0..3).all(|i| (0..3).all(|j| (a[i][j] - b[i][j]).abs() < 1e-12))
         };

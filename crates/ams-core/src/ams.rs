@@ -61,6 +61,8 @@ pub struct Specimen {
     pub volume_cm3: f64,
     /// Orientation stored in the record (written by Edit Data), if any.
     pub orient: Option<crate::orient::RecOrient>,
+    /// Reorientation stored by AMS Studio (see `georot.rs`), if any: the geographic view is computed from it.
+    pub georot: Option<crate::georot::GeoRot>,
     pub inphase: Phase,
     pub outphase: Phase,
 }
@@ -163,6 +165,7 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Specimen>, AmsError> {
             instrument: text_at(rec, OFF_INSTRUMENT, 8),
             volume_cm3: f32_at(rec, OFF_VOLUME),
             orient: crate::orient::read(rec),
+            georot: crate::georot::read(rec),
             inphase: parse_phase(rec, OFF_KRE),
             outphase: parse_phase(rec, OFF_KIM),
         })

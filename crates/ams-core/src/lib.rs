@@ -4,6 +4,7 @@ pub mod coords;
 pub mod core;
 pub mod density;
 pub mod export;
+pub mod georot;
 pub mod ged;
 pub mod import;
 pub mod lab;

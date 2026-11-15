@@ -195,7 +195,6 @@ impl App {
             }
         }
         let dark = self.dark;
-        let accent = if dark { Color32::from_rgb(106, 160, 255) } else { Color32::from_rgb(47, 111, 222) };
         let warn = Color32::from_rgb(214, 150, 40);
         let bad = Color32::from_rgb(214, 90, 90);
         let ok = Color32::from_rgb(70, 170, 90);
@@ -241,10 +240,10 @@ impl App {
                     ui.label(RichText::new("No identifier was found that the main files share.").strong().color(warn));
                     ui.label("The .ams files in the specimen folders are named differently from folder to folder, so the program cannot tell which one is the main file of each specimen. Please rename the main file of every specimen so that they share one string (for example SPECIMEN_use.ams) before using AMS Studio, or tell the program which string to look for.");
                 } else if sd.typed {
-                    ui.label(RichText::new(format!("You asked for \u{201c}{}\u{201d}: it picks one file in {} of {} specimens.", sd.ident.trim(), matched, sd.folders.len())).strong().color(if matched == sd.folders.len() { ok } else { warn }));
+                    ui.label(RichText::new(format!("You asked for \u{201c}{}\u{201d}: it picks one file in {} of {} specimens.", sd.ident.trim(), matched, sd.folders.len())).strong());
                 } else {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(format!("\u{201c}{}\u{201d}", sd.ident)).strong().color(accent).size(18.0));
+                        ui.label(RichText::new(format!("\u{201c}{}\u{201d}", sd.ident)).strong().size(18.0));
                         ui.label(RichText::new("is the identifier of the main .ams file in each specimen folder.").strong());
                     });
                 }
@@ -267,7 +266,8 @@ impl App {
             // ---- the files
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Files that would be opened").strong().size(17.0));
-                ui.label(RichText::new(format!("(n={matched} of {} matched)", sd.folders.len())).color(if matched == sd.folders.len() { ok } else { warn }));
+                // the one coloured figure of the window: green when every specimen has its main file, orange otherwise
+                ui.label(RichText::new(format!("(n={matched} of {} matched)", sd.folders.len())).strong().color(if matched == sd.folders.len() { ok } else { warn }));
             });
             let h = (ui.available_height() - 76.0).max(140.0);
             egui::ScrollArea::both().max_height(h).auto_shrink([false, false]).show(ui, |ui| {
@@ -279,22 +279,23 @@ impl App {
                     for (i, (f, p)) in sd.folders.iter().zip(&sd.picks).enumerate() {
                         ui.label(RichText::new((i + 1).to_string()).weak());
                         ui.label(&f.name);
+                        let what = sd.ident.trim();
                         match p {
                             Pick::Only(k) => {
                                 ui.label(&f.files[*k]);
-                                ui.label(RichText::new("only .ams file").weak().small());
+                                ui.label(RichText::new("the only .ams file in this folder").weak().small());
                             }
                             Pick::Match(k) => {
-                                ui.label(RichText::new(&f.files[*k]).color(ok));
-                                ui.label(RichText::new(format!("files in the folder (n={})", f.files.len())).weak().small());
+                                ui.label(&f.files[*k]);
+                                ui.label(RichText::new(format!("the one of {} .ams files whose name contains \u{201c}{what}\u{201d}", f.files.len())).weak().small());
                             }
                             Pick::None => {
-                                ui.label(RichText::new("no match").color(bad));
-                                ui.label(RichText::new(format!("none of {}", file_list(f, &(0..f.files.len()).collect::<Vec<_>>()))).weak().small());
+                                ui.label(RichText::new("no main file").color(bad));
+                                ui.label(RichText::new(format!("no name contains \u{201c}{what}\u{201d} (files here: {})", file_list(f, &(0..f.files.len()).collect::<Vec<_>>()))).weak().small());
                             }
                             Pick::Several(ix) => {
-                                ui.label(RichText::new("several match").color(warn));
-                                ui.label(RichText::new(file_list(f, ix)).weak().small());
+                                ui.label(RichText::new("several candidates").color(warn));
+                                ui.label(RichText::new(format!("{} names contain \u{201c}{what}\u{201d}: {} (use a more specific string)", ix.len(), file_list(f, ix))).weak().small());
                             }
                         }
                         ui.end_row();

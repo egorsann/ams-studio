@@ -179,27 +179,15 @@ impl App {
             return Some(d.records((0..d.specs.len()).filter(|&i| all || d.active[i])));
         }
         let mut bytes = std::fs::read(src).ok()?;
+        // a file that is not open: its held reorientations go into the records (everything else is as on disk)
         if let Some(v) = self.pending.get(src) {
-            for (i, r) in v.iter().enumerate() {
-                if let (Some(r), Some(rec)) = (r, bytes.get_mut(i * RECORD_LEN..(i + 1) * RECORD_LEN)) {
-                    ams::rotate_record(rec, r);
+            for (i, g) in v.iter().enumerate() {
+                if let (Some(g), Some(rec)) = (g, bytes.get_mut(i * RECORD_LEN..(i + 1) * RECORD_LEN)) {
+                    ams_core::georot::write(rec, Some(g));
                 }
             }
         }
         Some(bytes)
-    }
-
-    /// The Owens-rotated flags of the records that are written for `src` (the active ones only unless `all`).
-    fn marks_for(&self, src: &Path, all: bool) -> Vec<bool> {
-        let n = std::fs::metadata(src).map(|m| m.len() as usize / RECORD_LEN).unwrap_or(0);
-        let doc = self.doc.as_ref().filter(|d| !d.synthetic && d.path == src).or_else(|| self.stash.get(src));
-        let n = doc.map_or(n, |d| d.specs.len());
-        let prior = doc::read_owens_marks(src);
-        let flags: Vec<bool> = (0..n).map(|i| prior.get(i).copied().unwrap_or(false) || self.owens_done.get(src).and_then(|v| v.get(i)).copied().unwrap_or(false)).collect();
-        match doc {
-            Some(d) if !all => (0..n).filter(|&i| d.active[i]).map(|i| flags[i]).collect(),
-            _ => flags,
-        }
     }
 
     fn do_export(&mut self) {
@@ -229,23 +217,14 @@ impl App {
                 }
             }
             let backup = if out.exists() { std::fs::read(&out).ok() } else { None };
-            let flags = self.marks_for(&src, native);
-            let marks_prev = std::fs::read(doc::owens_json_path(&out)).ok();
             match std::fs::write(&out, &bytes) {
                 Ok(()) => {
-                    // which records are Owens-rotated travels with the file
-                    let marks = if flags.iter().any(|f| *f) || marks_prev.is_some() {
-                        let _ = doc::write_owens_marks(&out, &flags);
-                        Some(doc::owens_json_path(&out))
-                    } else {
-                        None
-                    };
                     // the volume information that was entered for the file is stored next to the saved file
                     let json = self.vol_pending.get(&src).and_then(|info| {
                         let vols: Vec<f64> = ams::parse(&bytes).map(|v| v.iter().map(|s| s.volume_cm3).collect()).unwrap_or_default();
                         doc::write_volume_json(&out, info, &vols).ok()
                     });
-                    ops.push(ExOp { src, out, len: bytes.len() as u64, backup, new_dir, json, marks, marks_prev });
+                    ops.push(ExOp { src, out, len: bytes.len() as u64, backup, new_dir, json, marks: None, marks_prev: None });
                 }
                 Err(e) => failed.push(format!("{}: {e}", out.display())),
             }
@@ -258,7 +237,6 @@ impl App {
                 self.pending.remove(&p);
                 self.stash.remove(&p);
                 self.vol_pending.remove(&p);
-                self.owens_done.remove(&p);
                 self.exported.remove(&p);
                 if self.doc.as_ref().map_or(false, |d| !d.synthetic && d.path == p) {
                     if let Some(d) = self.doc.as_mut() {
@@ -401,7 +379,7 @@ impl App {
             // the last question: where the changes go (the prompt first, the choices under it)
             ui.label(RichText::new("How should the changes be saved?").strong());
             rebuild |= ui.radio_value(&mut ex.native, false, "Export as new .ams files (into <specimen folder>_geo folders, the originals stay)").changed();
-            rebuild |= ui.radio_value(&mut ex.native, true, "Save into the .ams files themselves (natively, replaces them)").on_hover_text("The original files are overwritten with the rotated / edited records. Every record stays in the file, also the disregarded ones. The replaced version is kept in the settings folder, so Undo last save brings it back, also after a restart. Which records were Owens-rotated is written next to the file (.owens.json).").changed();
+            rebuild |= ui.radio_value(&mut ex.native, true, "Save into the .ams files themselves (natively, replaces them)").on_hover_text("The original files are overwritten with the rotated / edited records. Every record stays in the file, also the disregarded ones. The replaced version is kept in the settings folder, so Undo last save brings it back, also after a restart. The reorientation (Owens or drill core) is stored inside the records, the tensors are never rotated.").changed();
             if ex.native {
                 ui.label(RichText::new("The originals are replaced. Undo last save puts them back.").small().color(bad));
             }

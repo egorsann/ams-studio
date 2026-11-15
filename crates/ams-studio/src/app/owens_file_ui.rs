@@ -7,7 +7,6 @@
 
 use super::{owens_head, App, W_OWENS};
 use ams_core::ams;
-use ams_core::coords::owens_rotation;
 use ams_core::owens_table::{self, Table, TableError, Via, ROLES};
 use ams_core::specset::{self, Pick};
 use egui::{Align, Color32, Layout, Pos2, RichText, Stroke, Vec2};
@@ -69,9 +68,7 @@ pub(super) struct OwensFile {
     /// What the last correction from a file was, so that *Undo last correction* can name it.
     pub last: Option<Scope>,
     /// The rotations that were pending before the last multiple correction (for Undo).
-    pub undo_pending: Option<std::collections::HashMap<PathBuf, Vec<Option<ams_core::tensor::Mat3>>>>,
-    /// The Owens-rotated marks before the last multiple correction (for Undo).
-    pub undo_done: Option<std::collections::HashMap<PathBuf, Vec<bool>>>,
+    pub undo_pending: Option<std::collections::HashMap<PathBuf, Vec<Option<ams_core::georot::GeoRot>>>>,
     /// The edited files that were kept aside, as they were before the last multiple correction.
     pub undo_stash: Vec<(PathBuf, Vec<u8>, Vec<ams::Specimen>)>,
     /// The open file was one of the targets of the last multiple correction.
@@ -285,8 +282,9 @@ impl App {
     fn of_apply(&mut self) -> bool {
         let Some(table) = self.of.table.clone() else { return false };
         let Some(scope) = self.of.scope else { return false };
-        let mats = |t: &Target| -> Vec<(usize, ams_core::tensor::Mat3)> {
-            t.records.iter().enumerate().filter_map(|(i, r)| r.1.map(|(ri, _)| (i, { let v = table.rows[ri].vals; owens_rotation(v[0], v[1], v[2], v[3]) }))).collect()
+        // the values of the row of the file are what is stored in the record (the rotation is computed from them)
+        let mats = |t: &Target| -> Vec<(usize, ams_core::georot::GeoRot)> {
+            t.records.iter().enumerate().filter_map(|(i, r)| r.1.map(|(ri, _)| (i, { let v = table.rows[ri].vals; ams_core::georot::GeoRot::Owens { fs: v[0], fd: v[1], ds: v[2], dd: v[3] } }))).collect()
         };
         match scope {
             Scope::Single => {
@@ -300,7 +298,7 @@ impl App {
                     return false;
                 }
                 self.of.last = Some(Scope::Single);
-                self.of.msg = format!("Rotated {} record(s) of this file. Nothing is saved yet: File > Export as .ams (or Save Active Records As) writes it.", jobs.len());
+                self.of.msg = format!("The reorientation of {} record(s) is stored; the geographic view (F6) shows it. The specimen coordinates stay as measured. Nothing is saved yet: File > Save as .ams writes it into the file.", jobs.len());
             }
             Scope::Multiple => {
                 // the whole correction is refused when any target holds a sample that is already Owens-rotated
@@ -319,13 +317,12 @@ impl App {
                     self.info = Some(format!("{}{}\nNothing was rotated.", problems.iter().take(6).cloned().collect::<Vec<_>>().join("\n"), more));
                     return false;
                 }
-                self.of.undo_done = Some(self.owens_done.clone());
                 self.of.undo_pending = Some(self.pending.clone());
                 self.of.undo_stash = self.stash.iter().map(|(p, d)| (p.clone(), d.raw.clone(), d.specs.clone())).collect();
                 self.of.open_rotated = false;
                 let open_path = self.doc.as_ref().filter(|d| !d.synthetic).map(|d| d.path.clone());
                 let (mut files, mut recs) = (0, 0);
-                let targets: Vec<(PathBuf, usize, Vec<(usize, ams_core::tensor::Mat3)>)> = self.of.plan.iter().filter_map(|t| t.path.clone().map(|p| (p, t.records.len(), mats(t)))).filter(|(_, _, j)| !j.is_empty()).collect();
+                let targets: Vec<(PathBuf, usize, Vec<(usize, ams_core::georot::GeoRot)>)> = self.of.plan.iter().filter_map(|t| t.path.clone().map(|p| (p, t.records.len(), mats(t)))).filter(|(_, _, j)| !j.is_empty()).collect();
                 for (path, n, jobs) in targets {
                     recs += jobs.len();
                     files += 1;
@@ -337,7 +334,7 @@ impl App {
                     }
                 }
                 self.of.last = Some(Scope::Multiple);
-                self.of.msg = format!("Rotated {recs} record(s) of {files} file(s) in memory. Nothing is saved yet: select the files in the browser and use File > Export as .ams.");
+                self.of.msg = format!("The reorientation of {recs} record(s) of {files} file(s) is held in memory (F6 shows it). The specimen coordinates stay as measured. Nothing is saved yet: select the files in the browser and use File > Save as .ams.");
             }
         }
         true
@@ -357,9 +354,6 @@ impl App {
                 }
                 if let Some(p) = self.of.undo_pending.take() {
                     self.pending = p;
-                }
-                if let Some(d) = self.of.undo_done.take() {
-                    self.owens_done = d;
                 }
                 for (path, raw, specs) in std::mem::take(&mut self.of.undo_stash) {
                     if let Some(d) = self.stash.get_mut(&path) {
