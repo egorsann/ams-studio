@@ -188,6 +188,16 @@ struct ShotJob {
     rects: Vec<(&'static str, Rect)>,
 }
 
+/// A small "i" in a circle that explains something when hovered.
+fn info_icon(ui: &mut Ui, text: &str) {
+    let s = ui.spacing().interact_size.y * 0.75;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(s), Sense::hover());
+    let col = if resp.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
+    ui.painter().circle_stroke(rect.center(), s * 0.46, Stroke::new(1.3, col));
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, "i", FontId::proportional(s * 0.62), col);
+    resp.on_hover_text(text);
+}
+
 pub struct App {
     doc: Option<Doc>,
     derived: Vec<Derived>,
@@ -241,6 +251,11 @@ pub struct App {
     win_owens: bool,
     /// Owens rows (FS, FD, DS, DD per specimen) and the file as it was before the last rotation.
     owens: Vec<[f64; 4]>,
+    /// New-style Owens input: one set of FS / FD / DS / DD and a 1-based first/last row.
+    owens_one: [f64; 4],
+    owens_range: (usize, usize),
+    /// Old style = the per-row table of Anisoft 4.2.
+    owens_old: bool,
     owens_undo: Option<(Vec<u8>, Vec<ams_core::ams::Specimen>)>,
     ana: analysis_ui::AnaState,
     edit_name: String,
@@ -353,6 +368,9 @@ impl App {
             win_edit: false,
             win_owens: false,
             owens: vec![],
+            owens_one: [0.0; 4],
+            owens_range: (1, 1),
+            owens_old: false,
             owens_undo: None,
             ana: Default::default(),
             edit_name: String::new(),
@@ -392,6 +410,7 @@ impl App {
                     cur[usize::from(k == "win_h")] = x.clamp(760.0, 8000.0);
                 }
                 "maximized" => self.win_max = v == "1",
+                "owens_old" => self.owens_old = v == "1",
                 "browser" => self.browser_open = v != "0",
                 "hfrac" => self.hfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
                 "vfrac" => self.vfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
@@ -408,7 +427,7 @@ impl App {
         let _ = std::fs::write(
             p,
             format!(
-                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nlogkm={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\n",
+                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nlogkm={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_old={}\n",
                 self.browser_dir.display(),
                 self.dark as u8,
                 self.browser_open as u8,
@@ -420,7 +439,8 @@ impl App {
                 self.spec_w,
                 self.win_size.map_or(1280.0, |s| s[0]),
                 self.win_size.map_or(820.0, |s| s[1]),
-                self.win_max as u8
+                self.win_max as u8,
+                self.owens_old as u8
             ),
         );
     }
@@ -602,6 +622,7 @@ impl App {
                         self.owens = vec![[0.0; 4]; d.specs.len()];
                         self.owens_undo = None;
                     }
+                    self.owens_range = (1, d.specs.len().max(1));
                     self.open_win(W_OWENS);
                 }
             }
@@ -1770,8 +1791,9 @@ impl App {
         self.tool_windows(ctx);
     }
 
-    /// Edit > Spec to Geo (Owens): per specimen, strike/dip of a plane in the field and of the same plane
-    /// on the drilling table; rotates the data of the open file (cumulatively, like the original).
+    /// Edit > Spec to Geo (Owens): strike/dip of a plane in the field and of the same plane on the drilling
+    /// table. New style: one set of four values for a range of rows (first..last, the whole file by default).
+    /// Old style: the per-row table of Anisoft 4.2. Rotates the data of the open file (cumulatively, like the original).
     fn owens_window(&mut self, ctx: &egui::Context) {
         if !self.win_owens {
             return;
@@ -1780,58 +1802,152 @@ impl App {
             self.win_owens = false;
             return;
         };
-        if self.owens.len() != doc.specs.len() {
-            self.owens = vec![[0.0; 4]; doc.specs.len()];
+        let n = doc.specs.len();
+        if self.owens.len() != n {
+            self.owens = vec![[0.0; 4]; n];
         }
-        let names: Vec<String> = doc.specs.iter().map(|s| s.name.clone()).collect();
+        let out_phase = self.out_phase;
+        let preview: Vec<(String, f64, [(f64, f64); 3])> = doc
+            .specs
+            .iter()
+            .map(|s| {
+                let ph = if out_phase { &s.outphase } else { &s.inphase };
+                (s.name.clone(), ph.km, ph.axes().dec_inc)
+            })
+            .collect();
         let mut rows = std::mem::take(&mut self.owens);
+        let mut one = self.owens_one;
+        let (mut first, mut last) = self.owens_range;
+        first = first.clamp(1, n.max(1));
+        last = last.clamp(first, n.max(1));
+        let mut old = self.owens_old;
         let can_undo = self.owens_undo.is_some();
         let (mut open, mut copy, mut rotate, mut undo, mut cancel) = (true, false, false, false, false);
-        self.base_window(ctx, "Specimen to Geographic Rotation (Owens' method)", W_OWENS, Vec2::new(620.0, 700.0)).open(&mut open).resizable(true).show(ctx, |ui| {
+        const TIPS: [&str; 4] = [
+            "FS - field strike.\nCompass direction (0-360 deg) of the strike line of a reference plane (bedding, a vein, a foliation) measured in the field. Right-hand rule: the plane dips to the right when you look along the strike.",
+            "FD - field dip.\nDip angle of that same plane in the field, measured down from the horizontal (0-90 deg).",
+            "DS - strike on the drilling table.\nStrike of the same plane on the hand specimen while it lies on the drilling table, before the core was drilled out. Same right-hand rule.",
+            "DD - dip on the drilling table.\nDip angle of that same plane on the hand specimen as it lies on the drilling table (0-90 deg).",
+        ];
+        self.base_window(ctx, "Specimen to Geographic Rotation (Owens' method)", W_OWENS, Vec2::new(660.0, 760.0)).open(&mut open).resizable(true).show(ctx, |ui| {
             tools_ui::pop_style(ui, 1.3);
-            ui.label("FS / FD: strike and dip of a plane in the field.  DS / DD: strike and dip of the same plane on the drilling table.");
-            ui.label(RichText::new("Strikes by the right-hand rule. The rotation is applied to the data of the open file (both phases) and is cumulative.").weak());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Input").strong());
+                ui.selectable_value(&mut old, false, "New: one set of values");
+                ui.selectable_value(&mut old, true, "Old: table per row (Anisoft 4.2)");
+                info_icon(ui, "New: enter FS, FD, DS and DD once and choose the rows they apply to (the whole file by default).\nOld: the table of Anisoft 4.2, one set of values per row with 'Copy 1st row to all'. Both give the same rotation.");
+            });
             ui.add_space(4.0);
-            egui::ScrollArea::vertical().max_height(ui.available_height() - 70.0).show(ui, |ui| {
-                egui::Grid::new("owens-grid").striped(true).show(ui, |ui| {
-                    for h in ["Name", "FS", "FD", "DS", "DD"] {
-                        ui.label(RichText::new(h).strong());
+            let preview_h = 210.0;
+            if !old {
+                ui.horizontal(|ui| {
+                    for (k, name) in ["FS", "FD", "DS", "DD"].iter().enumerate() {
+                        ui.label(RichText::new(*name).strong());
+                        let r = if k % 2 == 0 { 0.0..=360.0 } else { 0.0..=180.0 };
+                        ui.add(egui::DragValue::new(&mut one[k]).range(r).speed(0.5).max_decimals(1).suffix(" \u{b0}"));
+                        info_icon(ui, TIPS[k]);
+                        ui.add_space(8.0);
+                    }
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("First row").strong());
+                    ui.add(egui::DragValue::new(&mut first).range(1..=n.max(1)).speed(0.2));
+                    ui.label(RichText::new(format!("(first of {n})")).weak());
+                    info_icon(ui, "First row: the first row the rotation is applied to (row numbers as in the list below). Preset to row 1, the first row of the file.");
+                    ui.add_space(12.0);
+                    ui.label(RichText::new("Last row").strong());
+                    ui.add(egui::DragValue::new(&mut last).range(first..=n.max(1)).speed(0.2));
+                    ui.label(RichText::new(format!("(last = {n})")).weak());
+                    info_icon(ui, "Last row: the last row the rotation is applied to. Preset to the last row of the file, so the whole file is rotated (all of its sub-specimens). Narrow the range to rotate only part of it.");
+                });
+                ui.label(RichText::new(format!("{} of {n} rows will be rotated.", last - first + 1)).weak());
+            } else {
+                ui.label(RichText::new("FS / FD: strike and dip of a plane in the field.  DS / DD: strike and dip of the same plane on the drilling table.").weak());
+                let h = (ui.available_height() - preview_h - 70.0).max(100.0);
+                egui::ScrollArea::vertical().id_salt("owens-table").max_height(h).show(ui, |ui| {
+                    egui::Grid::new("owens-grid").striped(true).show(ui, |ui| {
+                        ui.label(RichText::new("#").strong());
+                        ui.label(RichText::new("Name").strong());
+                        for (k, hd) in ["FS", "FD", "DS", "DD"].iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(*hd).strong());
+                                info_icon(ui, TIPS[k]);
+                            });
+                        }
+                        ui.end_row();
+                        for (i, row) in rows.iter_mut().enumerate() {
+                            ui.label(RichText::new((i + 1).to_string()).weak());
+                            ui.label(&preview[i].0);
+                            for (k, v) in row.iter_mut().enumerate() {
+                                let r = if k % 2 == 0 { 0.0..=360.0 } else { 0.0..=180.0 };
+                                ui.add(egui::DragValue::new(v).range(r).speed(0.5).max_decimals(1).suffix(" \u{b0}"));
+                            }
+                            ui.end_row();
+                        }
+                    });
+                });
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if old {
+                    copy = ui.button("Copy 1st row to all").clicked();
+                }
+                rotate = ui.button("Rotate").clicked();
+                ui.add_enabled_ui(can_undo, |ui| undo = ui.button("Undo last rotation").clicked());
+                cancel = ui.button("Cancel").clicked();
+            });
+            ui.label(RichText::new("The rotation is applied to the data of the open file (both phases) and is cumulative.").weak().small());
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Data of this file").strong());
+                ui.label(RichText::new(if out_phase { "(out-of-phase, specimen coordinates)" } else { "(in-phase, specimen coordinates)" }).weak().small());
+            });
+            egui::ScrollArea::vertical().id_salt("owens-preview").auto_shrink([false, false]).show(ui, |ui| {
+                egui::Grid::new("owens-preview-grid").striped(true).show(ui, |ui| {
+                    for hd in ["#", "Name", "Km", "K1 Dec / Inc", "K2 Dec / Inc", "K3 Dec / Inc"] {
+                        ui.label(RichText::new(hd).strong());
                     }
                     ui.end_row();
-                    for (n, row) in names.iter().zip(rows.iter_mut()) {
-                        ui.label(n);
-                        for (k, v) in row.iter_mut().enumerate() {
-                            let r = if k % 2 == 0 { 0.0..=360.0 } else { 0.0..=180.0 };
-                            ui.add(egui::DragValue::new(v).range(r).speed(0.5).max_decimals(1).suffix(" \u{b0}"));
+                    for (i, (name, km, di)) in preview.iter().enumerate() {
+                        let on = old || (i + 1 >= first && i + 1 <= last);
+                        let t = |s: String| if on { RichText::new(s) } else { RichText::new(s).weak() };
+                        ui.label(t((i + 1).to_string()));
+                        ui.label(t(name.clone()));
+                        ui.label(t(format!("{:.3e}", km)));
+                        for (d, inc) in di {
+                            ui.label(t(format!("{d:.1} / {inc:.1}")));
                         }
                         ui.end_row();
                     }
                 });
             });
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                copy = ui.button("Copy 1st row to all").clicked();
-                rotate = ui.button("Rotate").clicked();
-                ui.add_enabled_ui(can_undo, |ui| undo = ui.button("Undo last rotation").clicked());
-                cancel = ui.button("Cancel").clicked();
-            });
         });
         if copy {
-            if let Some(first) = rows.first().copied() {
-                rows.iter_mut().for_each(|r| *r = first);
+            if let Some(first_row) = rows.first().copied() {
+                rows.iter_mut().for_each(|r| *r = first_row);
             }
         }
+        // what to rotate: (row, values)
+        let jobs: Vec<(usize, [f64; 4])> = if old {
+            rows.iter().copied().enumerate().filter(|(_, r)| *r != [0.0; 4]).collect()
+        } else if one != [0.0; 4] {
+            (first - 1..last).map(|i| (i, one)).collect()
+        } else {
+            vec![]
+        };
         let mut store = None;
         if rotate {
             if let Some(d) = &mut self.doc {
-                if rows.iter().any(|r| *r != [0.0; 4]) {
+                if !jobs.is_empty() {
                     store = Some((d.raw.clone(), d.specs.clone()));
                 }
-                for (i, r) in rows.iter().enumerate().filter(|(_, r)| **r != [0.0; 4]) {
+                for (i, r) in &jobs {
                     let rot = ams_core::coords::owens_rotation(r[0], r[1], r[2], r[3]);
-                    d.rotate_specimen(i, &rot);
+                    d.rotate_specimen(*i, &rot);
                 }
                 rows.iter_mut().for_each(|r| *r = [0.0; 4]);
+                one = [0.0; 4];
                 self.dirty = true;
             }
         }
@@ -1845,7 +1961,13 @@ impl App {
         if store.is_some() {
             self.owens_undo = store;
         }
+        if old != self.owens_old {
+            self.owens_old = old;
+            self.save_state();
+        }
         self.owens = rows;
+        self.owens_one = one;
+        self.owens_range = (first, last);
         self.win_owens = open && !cancel && !rotate;
     }
 
