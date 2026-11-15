@@ -347,11 +347,17 @@ impl App {
         let Some(set) = &self.set else { return };
         let cur = self.doc.as_ref().map(|d| d.path.clone());
         let mut open: Option<PathBuf> = None;
-        let (mut change, mut close) = (false, false);
+        let (mut change, mut close, mut export) = (false, false, false);
         ui.strong("Specimens");
         ui.horizontal(|ui| {
             change = ui.small_button("Change string ...").on_hover_text("Search for another identifier of the main file").clicked();
             close = ui.small_button("Close set").on_hover_text("Back to the plain folder browser").clicked();
+        });
+        ui.horizontal(|ui| {
+            export = ui.small_button("Export as .ams ...").on_hover_text("Write the selected files (or the open file) with their rotations into _geo folders").clicked();
+            let n_sel = self.tree_sel.len();
+            let n_rot = self.pending.len();
+            ui.label(RichText::new(format!("{n_sel} selected{}", if n_rot > 0 { format!(" \u{b7} {n_rot} rotated") } else { String::new() })).small().weak());
         });
         ui.label(RichText::new(set.root.display().to_string()).small().weak());
         let matched = set.picks.iter().filter(|p| p.file().is_some()).count();
@@ -364,6 +370,23 @@ impl App {
         let gray = ui.visuals().weak_text_color();
         let accent = if self.dark { Color32::from_rgb(106, 160, 255) } else { Color32::from_rgb(59, 130, 246) };
         let dim = ui.visuals().text_color().gamma_multiply(0.55);
+        // the files in the order they are listed, for a range selection with Shift
+        let flat: Vec<PathBuf> = set
+            .folders
+            .iter()
+            .zip(&set.picks)
+            .flat_map(|(f, p)| {
+                let mut order: Vec<usize> = (0..f.files.len()).collect();
+                if let Some(m) = p.file() {
+                    order.retain(|k| *k != m);
+                    order.insert(0, m);
+                }
+                order.into_iter().map(|k| f.dir.join(&f.files[k])).collect::<Vec<_>>()
+            })
+            .collect();
+        let mut sel = self.tree_sel.clone();
+        let mut anchor = self.tree_anchor.clone();
+        let mods = ui.input(|i| i.modifiers);
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
             for (fi, (f, p)) in set.folders.iter().zip(&set.picks).enumerate() {
                 let main = p.file();
@@ -397,8 +420,15 @@ impl App {
                             // the active file: a clear background so it can be found at a glance
                             ui.painter().rect_filled(rect, 4.0, accent.gamma_multiply(if self.dark { 0.38 } else { 0.28 }));
                             ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, Vec2::new(3.0, rect.height())), 2.0, accent);
+                        } else if sel.contains(&path) {
+                            ui.painter().rect_filled(rect, 4.0, accent.gamma_multiply(if self.dark { 0.20 } else { 0.14 }));
                         } else if resp.hovered() {
                             ui.painter().rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill.gamma_multiply(0.6));
+                        }
+                        // rotated but not saved (\u{21bb}) / exported with its rotation (\u{2713})
+                        let mark = if self.exported.contains(&path) && self.pending.contains_key(&path) { Some(("\u{2713}", Color32::from_rgb(70, 170, 90), "Rotated and exported to _geo")) } else if self.pending.contains_key(&path) { Some(("\u{21bb}", Color32::from_rgb(214, 150, 40), "Rotated in memory, not saved: select it and use Export as .ams")) } else { None };
+                        if let Some((sym, col, _)) = mark {
+                            ui.painter().text(egui::Pos2::new(rect.max.x - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, sym, egui::FontId::proportional(14.0), col);
                         }
                         let color = if is_main || is_cur { ui.visuals().strong_text_color() } else { dim };
                         let text = if is_main { RichText::new(n).strong().color(color) } else { RichText::new(n).color(color) };
@@ -408,10 +438,43 @@ impl App {
                             resp.scroll_to_me(None);
                         }
                         if resp.clicked() {
-                            open = Some(path);
+                            if mods.shift {
+                                // a range from the anchor to this file
+                                let a_ix = anchor.as_ref().and_then(|x| flat.iter().position(|y| y == x)).unwrap_or(0);
+                                let b_ix = flat.iter().position(|y| *y == path).unwrap_or(0);
+                                let (lo, hi) = (a_ix.min(b_ix), a_ix.max(b_ix));
+                                let range: Vec<PathBuf> = flat[lo..=hi].to_vec();
+                                if mods.ctrl || mods.command {
+                                    for r in range {
+                                        if !sel.contains(&r) {
+                                            sel.push(r);
+                                        }
+                                    }
+                                } else {
+                                    sel = range;
+                                }
+                            } else if mods.ctrl || mods.command {
+                                // a single file in or out of the selection
+                                if let Some(pos) = sel.iter().position(|y| *y == path) {
+                                    sel.remove(pos);
+                                } else {
+                                    sel.push(path.clone());
+                                }
+                                anchor = Some(path.clone());
+                            } else {
+                                sel = vec![path.clone()];
+                                anchor = Some(path.clone());
+                                open = Some(path.clone());
+                            }
                         }
-                        if is_main {
-                            resp.on_hover_text("Main file of this specimen");
+                        let tip = match (is_main, mark) {
+                            (true, Some((_, _, t))) => format!("Main file of this specimen. {t}"),
+                            (true, None) => "Main file of this specimen".to_string(),
+                            (false, Some((_, _, t))) => t.to_string(),
+                            (false, None) => String::new(),
+                        };
+                        if !tip.is_empty() {
+                            resp.on_hover_text(tip);
                         }
                     }
                     if matches!(p, Pick::None | Pick::Several(_)) {
@@ -421,6 +484,11 @@ impl App {
             }
         });
         self.tree_cur = cur.clone();
+        self.tree_sel = sel;
+        self.tree_anchor = anchor;
+        if export {
+            self.open_export();
+        }
         if change {
             self.change_set_string();
         }
