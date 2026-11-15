@@ -38,7 +38,7 @@ pub fn axis_mask(m: Modifiers) -> [bool; 3] {
 }
 
 /// Rubber-band state for a drag on `resp`: (rect while dragging, rect when released).
-fn band(ui: &mut Ui, resp: &Response, key: &str) -> (Option<Rect>, Option<Rect>) {
+pub(crate) fn band(ui: &mut Ui, resp: &Response, key: &str) -> (Option<Rect>, Option<Rect>) {
     let id = resp.id.with(key);
     if resp.drag_started() {
         // where the button went down (the pointer has already moved on by the time a drag is detected)
@@ -60,7 +60,7 @@ fn band(ui: &mut Ui, resp: &Response, key: &str) -> (Option<Rect>, Option<Rect>)
     (live, done)
 }
 
-fn paint_band(ui: &Ui, clip: Rect, r: Rect, th: &Theme) {
+pub(crate) fn paint_band(ui: &Ui, clip: Rect, r: Rect, th: &Theme) {
     let pa = ui.painter_at(clip);
     pa.rect_filled(r, 0.0, th.accent.gamma_multiply(0.18));
     pa.rect_stroke(r, 0.0, Stroke::new(1.2, th.accent), egui::StrokeKind::Inside);
@@ -349,7 +349,7 @@ fn handle_zoom(ui: &Ui, resp: &Response, plot: Rect, view: &mut ZoomView) {
 }
 
 /// A small label box next to a marker (Alt + hover), kept inside `bounds`.
-fn label_box(pa: &egui::Painter, bounds: Rect, at: Pos2, text: String, th: &Theme) {
+pub(crate) fn label_box(pa: &egui::Painter, bounds: Rect, at: Pos2, text: String, th: &Theme) {
     let galley = pa.layout_no_wrap(text, FontId::proportional(12.5), th.ink());
     let size = galley.size() + Vec2::new(12.0, 6.0);
     let mut pos = at + Vec2::new(11.0, -size.y - 6.0);

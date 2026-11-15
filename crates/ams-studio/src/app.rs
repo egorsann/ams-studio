@@ -7,6 +7,7 @@ use crate::plots::GroupBy;
 use ams_core::params::{param_class, param_sd, param_values_vol, N_PARAMS, PARAM_LABELS};
 mod analysis_ui;
 mod dialogs_ui;
+mod core_pane;
 mod core_ui;
 mod export_ui;
 mod pane_cfg;
@@ -58,6 +59,7 @@ pub enum Action {
     Colors,
     About,
     ToggleBrowser,
+    ToggleCoreViewer,
     ToggleTheme,
     StepSpecimen(i32),
     TogglePhase,
@@ -255,6 +257,7 @@ const W_VOL: usize = 16;
 const W_RECOMB: usize = 17;
 const W_EXPORT: usize = 18;
 const W_CORE: usize = 19;
+const W_COREVIEW: usize = 20;
 
 struct ShotJob {
     copy: bool,
@@ -439,6 +442,8 @@ pub struct App {
     rc: recombine_ui::RecState,
     win_vol: bool,
     win_core: bool,
+    /// The core viewer pane (View > Enable core viewer).
+    cv: core_pane::CoreViewState,
     core: core_ui::CoreState,
     vol: volume_ui::VolState,
     win_set: bool,
@@ -606,6 +611,7 @@ impl App {
             rc: Default::default(),
             win_vol: false,
             win_core: false,
+            cv: Default::default(),
             core: Default::default(),
             vol: Default::default(),
             win_set: false,
@@ -697,6 +703,10 @@ impl App {
                 "set_root" if Path::new(v).is_dir() => self.restore_root = Some(PathBuf::from(v)),
                 "last_file" if Path::new(v).is_file() => self.restore_file = Some(PathBuf::from(v)),
                 "browser" => self.browser_open = v != "0",
+                "core_on" => self.cv.on = v == "1",
+                "core_root" if Path::new(v).is_dir() => self.cv.root = Some(PathBuf::from(v)),
+                "core_needle" if !v.trim().is_empty() => self.cv.needle = v.to_string(),
+                "core_frac" => self.cv.frac = v.parse().unwrap_or(0.28f32).clamp(0.12, 0.6),
                 "hfrac" => self.hfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
                 "vfrac" => self.vfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
                 _ => {}
@@ -712,7 +722,7 @@ impl App {
         let _ = std::fs::write(
             p,
             format!(
-                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nuse_p={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\n",
+                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nuse_p={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\ncore_on={}\ncore_root={}\ncore_needle={}\ncore_frac={}\n",
                 self.browser_dir.display(),
                 self.dark as u8,
                 self.browser_open as u8,
@@ -728,7 +738,11 @@ impl App {
                 (!self.owens_old) as u8,
                 self.last_ident.replace(['\n', '\r'], ""),
                 self.set.as_ref().map(|s| s.root.display().to_string()).unwrap_or_default(),
-                self.doc.as_ref().filter(|d| !d.synthetic).map(|d| d.path.display().to_string()).unwrap_or_default()
+                self.doc.as_ref().filter(|d| !d.synthetic).map(|d| d.path.display().to_string()).unwrap_or_default(),
+                self.cv.on as u8,
+                self.cv.root.as_ref().map(|r| r.display().to_string()).unwrap_or_default(),
+                self.cv.needle.replace(['\n', '\r'], ""),
+                self.cv.frac
             ),
         );
     }
@@ -1268,6 +1282,7 @@ impl App {
             Action::OrientParams => self.open_win(W_ORIENT),
             Action::Colors => self.open_win(W_COLORS),
             Action::About => self.open_win(W_ABOUT),
+            Action::ToggleCoreViewer => self.cv_toggle(),
             Action::ToggleBrowser => {
                 self.browser_open = !self.browser_open;
                 self.save_state();
@@ -1284,7 +1299,7 @@ impl App {
     /// A dialog, pop-out or message is open (the egui drop-down menus are asked separately).
     fn any_dialog_open(&self) -> bool {
         self.win_table || self.win_group || self.win_contour || self.win_orient || self.win_colors || self.win_factors || self.win_about || self.win_edit
-            || self.win_export || self.win_recomb || self.win_vol || self.win_core || self.win_set || self.win_classes || self.win_owens
+            || self.win_export || self.win_recomb || self.win_vol || self.win_core || self.cv.win || self.win_set || self.win_classes || self.win_owens
             || self.tools.open.iter().any(|o| *o) || self.info.is_some() || self.quit_prompt || self.pane_settings.iter().any(|o| *o)
     }
 
@@ -1302,6 +1317,12 @@ impl App {
         self.win_recomb = false;
         self.win_vol = false;
         self.win_core = false;
+        if self.cv.win {
+            self.cv.win = false;
+            if self.cv.dir.is_none() {
+                self.cv.on = false;
+            }
+        }
         self.win_set = false;
         self.win_classes = false;
         self.close_owens();
@@ -1393,9 +1414,10 @@ impl App {
                 return out;
             }
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-                if self.st_view.is_zoomed() || self.views.iter().any(|v| v.is_zoomed()) {
+                if self.st_view.is_zoomed() || self.views.iter().any(|v| v.is_zoomed()) || self.cv.view.is_zoomed() {
                     self.st_view.reset();
                     self.views.iter_mut().for_each(|v| v.reset());
+                    self.cv.view.reset();
                 } else {
                     self.esc_clear_selection();
                 }
@@ -1531,6 +1553,7 @@ impl eframe::App for App {
             ctx.all_styles_mut(|st| st.spacing.combo_height = combo_h);
         }
         self.track_layout(&ctx);
+        self.cv_poll(&ctx);
         if self.reset_snap.is_some() && self.reset_undo_left().is_none() {
             self.reset_snap = None; // the ten minutes are over
         }
@@ -1610,6 +1633,9 @@ impl eframe::App for App {
                     let cfg = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
                     let (_, sub) = egui::containers::menu::SubMenuButton::new("Export graphics: panes").config(cfg).ui(ui, |ui| {
                         ui.label(RichText::new("Panes that Copy / Save Graphics take").weak().small());
+                        if self.cv.on {
+                            ui.checkbox(&mut self.cv.export, "Core viewer");
+                        }
                         for i in 0..4 {
                             ui.checkbox(&mut self.export[i], names[i].as_str());
                         }
@@ -1636,6 +1662,11 @@ impl eframe::App for App {
                     if item(ui, "Paleo-Vertical", "", false) {}
                     ui.separator();
                     if item(ui, "File Browser", "Ctrl+B", true) { actions.push(Action::ToggleBrowser) }
+                    // a pane above the plots with the photos of the cubes on the core
+                    if ui.add_enabled(has, egui::Button::new(if self.cv.on { "\u{2713}  Enable core viewer" } else { "      Enable core viewer" })).on_hover_text("Shows the cube photos on the core above the plots; clicking or selecting cubes selects their records and the other way round. Asks for the folder with the photos.").clicked() {
+                        actions.push(Action::ToggleCoreViewer);
+                        ui.close();
+                    }
                     if item(ui, if self.dark { "Light Theme" } else { "Dark Theme" }, "", true) { actions.push(Action::ToggleTheme) }
                     ui.separator();
                     // the four panes back to the Anisoft 6 settings; the undo sits in the same row while it is offered
@@ -2026,8 +2057,29 @@ impl App {
     }
 
     fn plots_ui(&mut self, ui: &mut Ui, th: &Theme) {
-        let full = ui.available_rect_before_wrap();
+        let all = ui.available_rect_before_wrap();
         let gap = 8.0;
+        // the core viewer, when it is on, takes a strip across the top; the four plots share what is left
+        let mut core_rect: Option<Rect> = None;
+        let full = if self.cv.on {
+            let h = (all.height() * self.cv.frac).clamp(90.0, (all.height() - 260.0).max(90.0));
+            core_rect = Some(Rect::from_min_max(all.min, Pos2::new(all.max.x, all.min.y + h - gap / 2.0)));
+            let bar = Rect::from_min_max(Pos2::new(all.min.x, all.min.y + h - gap / 2.0), Pos2::new(all.max.x, all.min.y + h + gap / 2.0));
+            let rc = ui.interact(bar, ui.scope_id().with("split_core"), Sense::drag());
+            if rc.hovered() || rc.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                ui.painter().rect_filled(bar.shrink2(Vec2::new(0.0, 2.0)), 2.0, th.accent.gamma_multiply(0.5));
+            }
+            if rc.dragged() {
+                if let Some(p) = rc.interact_pointer_pos() {
+                    self.cv.frac = ((p.y - all.min.y) / all.height()).clamp(0.12, 0.6);
+                    self.layout_changed = Some(ui.input(|i| i.time));
+                }
+            }
+            Rect::from_min_max(Pos2::new(all.min.x, all.min.y + h + gap / 2.0), all.max)
+        } else {
+            all
+        };
         let sx = full.min.x + full.width() * self.hfrac;
         let sy = full.min.y + full.height() * self.vfrac;
         let tl = Rect::from_min_max(full.min, Pos2::new(sx - gap / 2.0, sy - gap / 2.0));
@@ -2134,6 +2186,16 @@ impl App {
                 band = out.band;
             }
         }
+        // the core viewer: a click or a drag over cubes selects their records like a marker does
+        if let Some(cr) = core_rect {
+            let out = self.cv_pane(ui, cr, th);
+            if out.click.is_some() {
+                click = out.click;
+            }
+            if out.band.is_some() {
+                band = out.band;
+            }
+        }
         if band.is_some() {
             self.last_band = true;
         } else if click.is_some() {
@@ -2157,10 +2219,16 @@ impl App {
             if job.rects.is_empty() {
                 let tag = |n: &str| -> &'static str { Box::leak(n.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect::<String>().into_boxed_str()) };
                 job.rects = names.iter().zip(rects).enumerate().filter(|(i, _)| self.export[*i]).map(|(_, (n, r))| (tag(n), r)).collect();
+                if let (Some(cr), true) = (core_rect, self.cv.export) {
+                    job.rects.insert(0, ("core_viewer", cr));
+                }
             }
         }
         // while Graphics > Export graphics is open, the panes that would be exported are outlined
         if self.export_menu_open {
+            if let (Some(cr), true) = (core_rect, self.cv.export) {
+                ui.painter().rect(cr, 8.0, th.accent.gamma_multiply(0.13), Stroke::new(3.0, th.accent), StrokeKind::Inside);
+            }
             for i in 0..4 {
                 if self.export[i] {
                     ui.painter().rect(rects[i], 8.0, th.accent.gamma_multiply(0.13), Stroke::new(3.0, th.accent), StrokeKind::Inside);
@@ -2591,6 +2659,7 @@ impl App {
             W_SET => self.win_set = true,
             W_VOL => self.win_vol = true,
             W_CORE => self.win_core = true,
+            W_COREVIEW => self.cv.win = true,
             W_RECOMB => self.win_recomb = true,
             W_EXPORT => self.win_export = true,
             _ => {}
@@ -2703,6 +2772,7 @@ impl App {
         self.poll_restore(ctx);
         self.export_window(ctx);
         self.core_window(ctx);
+        self.cv_window(ctx);
         self.recombine_window(ctx);
         self.volume_window(ctx);
         self.owens_window(ctx);
