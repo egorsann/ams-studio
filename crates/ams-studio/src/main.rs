@@ -20,7 +20,7 @@ fn main() -> eframe::Result {
             return Ok(());
         }
     }
-    let open = std::env::args().nth(1).map(std::path::PathBuf::from).filter(|p| p.is_file());
+    let open = std::env::args().nth(1).map(std::path::PathBuf::from).filter(|p| p.exists());
     let (size, maximized) = app::saved_window();
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

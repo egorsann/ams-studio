@@ -7,6 +7,7 @@ pub mod ged;
 pub mod import;
 pub mod orient;
 pub mod params;
+pub mod specset;
 pub mod stats;
 pub mod tensor;
 pub mod tools;

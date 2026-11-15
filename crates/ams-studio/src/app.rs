@@ -4,6 +4,7 @@ use crate::plots::{self, AxisCfg, ColorCfg, NetView, Pt, ScatterSpec, StereoOpts
 use ams_core::params::{param_class, param_sd, param_values, N_PARAMS, PARAM_LABELS};
 mod analysis_ui;
 mod dialogs_ui;
+mod specset_ui;
 mod tools_ui;
 use ams_core::coords::{CoordSys, Orientation};
 use ams_core::export;
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Action {
     Open,
+    OpenSet,
     Prev,
     Next,
     Reload,
@@ -193,6 +195,7 @@ const W_ABOUT: usize = 6;
 const W_EDIT: usize = 7;
 const W_OWENS: usize = 13;
 const W_CLASSES: usize = 14;
+const W_SET: usize = 15;
 
 struct ShotJob {
     copy: bool,
@@ -293,6 +296,11 @@ pub struct App {
     win_factors: bool,
     win_about: bool,
     win_edit: bool,
+    win_set: bool,
+    /// The parent-folder dialog, the confirmed set shown in the browser, and the identifier used last.
+    sd: specset_ui::SetDialog,
+    set: Option<specset_ui::SpecSet>,
+    last_ident: String,
     /// Zoom and pan of the stereonet.
     st_view: NetView,
     win_classes: bool,
@@ -421,6 +429,10 @@ impl App {
             win_factors: false,
             win_about: false,
             win_edit: false,
+            win_set: false,
+            sd: Default::default(),
+            set: None,
+            last_ident: String::new(),
             st_view: NetView::default(),
             win_classes: false,
             edit: Default::default(),
@@ -452,7 +464,12 @@ impl App {
         }
         apply_style(&cc.egui_ctx, app.dark);
         if let Some(p) = open {
-            app.open_path(p);
+            if p.is_dir() {
+                // a folder on the command line is treated as the parent of the specimen folders
+                app.begin_scan(&cc.egui_ctx, p);
+            } else {
+                app.open_path(p);
+            }
         }
         app
     }
@@ -475,6 +492,7 @@ impl App {
                 }
                 "maximized" => self.win_max = v == "1",
                 "owens_new" => self.owens_old = v != "1",
+                "set_ident" => self.last_ident = v.to_string(),
                 "browser" => self.browser_open = v != "0",
                 "hfrac" => self.hfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
                 "vfrac" => self.vfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
@@ -491,7 +509,7 @@ impl App {
         let _ = std::fs::write(
             p,
             format!(
-                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nlogkm={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\n",
+                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nlogkm={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\n",
                 self.browser_dir.display(),
                 self.dark as u8,
                 self.browser_open as u8,
@@ -504,7 +522,8 @@ impl App {
                 self.win_size.map_or(1280.0, |s| s[0]),
                 self.win_size.map_or(820.0, |s| s[1]),
                 self.win_max as u8,
-                (!self.owens_old) as u8
+                (!self.owens_old) as u8,
+                self.last_ident.replace(['\n', '\r'], "")
             ),
         );
     }
@@ -600,9 +619,10 @@ impl App {
                     self.open_path(p);
                 }
             }
+            Action::OpenSet => self.open_folder_of_specimens(ctx),
             Action::Prev | Action::Next => {
                 if let Some(d) = self.doc.as_ref().filter(|d| !d.synthetic) {
-                    let (prev, next, _, _) = doc::neighbours(&d.path);
+                    let (prev, next, _, _) = self.neighbours_of(&d.path);
                     if let Some(p) = if a == Action::Prev { prev } else { next } {
                         self.open_path(p);
                     }
@@ -802,6 +822,7 @@ impl App {
             (Modifiers::SHIFT | Modifiers::CTRL, Key::F12, Action::ClearSel),
             (Modifiers::NONE, Key::Escape, Action::ClearSel),
             (c, Key::F1, Action::SetClasses),
+            (Modifiers::SHIFT | Modifiers::CTRL, Key::O, Action::OpenSet),
             (c, Key::O, Action::Open),
             (c, Key::P, Action::Prev),
             (c, Key::N, Action::Next),
@@ -971,7 +992,7 @@ impl eframe::App for App {
         let title = match &self.doc {
             Some(d) if d.synthetic => format!("AMS Studio - [{}]", d.path.display()),
             Some(d) => {
-                let (_, _, pos, total) = doc::neighbours(&d.path);
+                let (_, _, pos, total) = self.neighbours_of(&d.path);
                 format!("AMS Studio - [{}  ({pos} / {total})]{}", d.path.display(), if d.modified { " *" } else { "" })
             }
             None => "AMS Studio".to_string(),
@@ -986,6 +1007,7 @@ impl eframe::App for App {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if item(ui, "Open Data File(s)", "Ctrl+O", true) { actions.push(Action::Open) }
+                    if item(ui, "Open Folder of Specimens", "Ctrl+Shift+O", true) { actions.push(Action::OpenSet) }
                     if item(ui, "Open Previous Data File", "Ctrl+P", has) { actions.push(Action::Prev) }
                     if item(ui, "Open Next Data File", "Ctrl+N", has) { actions.push(Action::Next) }
                     if item(ui, "Reload Current Data File(s)", "Ctrl+R", has) { actions.push(Action::Reload) }
@@ -1058,7 +1080,7 @@ impl eframe::App for App {
         // ------------------------------------------------------------- toolbar
         egui::Panel::top("toolbar").show(ui, |ui| {
             let d = self.dark;
-            let (prev, next) = self.doc.as_ref().filter(|dc| !dc.synthetic).map(|dc| { let n = doc::neighbours(&dc.path); (n.0.is_some(), n.1.is_some()) }).unwrap_or((false, false));
+            let (prev, next) = self.doc.as_ref().filter(|dc| !dc.synthetic).map(|dc| { let n = self.neighbours_of(&dc.path); (n.0.is_some(), n.1.is_some()) }).unwrap_or((false, false));
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if tool(ui, Icon::Open, "Open Data File(s)  Ctrl+O", true, false, d) { actions.push(Action::Open) }
@@ -1168,7 +1190,7 @@ impl App {
         let (prev, cur, next) = match &self.doc {
             Some(d) if d.synthetic => ("NO PREVIOUS FILE".to_string(), d.path.display().to_string(), "NO NEXT FILE".to_string()),
             Some(d) => {
-                let (p, n, _, _) = doc::neighbours(&d.path);
+                let (p, n, _, _) = self.neighbours_of(&d.path);
                 let nm = |p: Option<PathBuf>, e: &str| p.and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string())).unwrap_or(e.to_string());
                 (nm(p, "NO PREVIOUS FILE"), d.path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), nm(n, "NO NEXT FILE"))
             }
@@ -1223,7 +1245,22 @@ impl App {
                 }
             });
         });
+        if self.set.is_some() {
+            self.set_browser_ui(ui);
+            if back {
+                if let Some(p) = self.browser_back.pop() {
+                    self.browser_dir = p;
+                }
+            } else if let Some(p) = go {
+                self.set = None;
+                self.browser_dir = p;
+            }
+            return;
+        }
         ui.strong("Files");
+        if ui.add_sized([ui.available_width(), 22.0], egui::Button::new(RichText::new("Open folder of specimens ...").small())).on_hover_text("Choose a parent folder with one sub-folder per specimen (Ctrl+Shift+O)").clicked() {
+            actions.push(Action::OpenSet);
+        }
         ui.label(RichText::new(self.browser_dir.display().to_string()).small().weak());
         ui.separator();
         let cur = self.doc.as_ref().map(|d| d.path.clone());
@@ -1781,6 +1818,7 @@ impl App {
             W_EDIT => self.win_edit = true,
             W_OWENS => self.win_owens = true,
             W_CLASSES => self.win_classes = true,
+            W_SET => self.win_set = true,
             _ => {}
         }
     }
@@ -1882,6 +1920,7 @@ impl App {
         self.k_colors = kc;
         self.win_colors = open;
 
+        self.specset_window(ctx);
         self.edit_data_window(ctx);
         self.classes_window(ctx);
         self.owens_window(ctx);
