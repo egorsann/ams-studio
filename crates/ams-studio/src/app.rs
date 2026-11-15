@@ -839,6 +839,7 @@ impl App {
         let open = self.doc.as_ref().filter(|d| !d.synthetic && d.path == path).or_else(|| self.stash.get(path));
         let disk: Vec<u8> = if open.is_some() { vec![] } else { std::fs::read(path).unwrap_or_default() };
         let legacy = doc::read_owens_marks(path);
+        let dep = ams_core::depjson::read(path);
         let has = |i: usize| -> bool {
             if let Some(d) = open {
                 return d.specs.get(i).map_or(false, |s| s.georot.is_some()) || legacy.get(i).copied().unwrap_or(false);
@@ -846,6 +847,7 @@ impl App {
             self.pending.get(path).and_then(|v| v.get(i)).map_or(false, |g| g.is_some())
                 || disk.get(i * ams_core::ams::RECORD_LEN..(i + 1) * ams_core::ams::RECORD_LEN).map_or(false, |rec| ams_core::georot::read(rec).is_some())
                 || legacy.get(i).copied().unwrap_or(false)
+                || dep.get(i).map_or(false, |c| c.is_some())
         };
         let bad: Vec<usize> = idx.filter(|&i| has(i)).collect();
         if bad.is_empty() {
@@ -914,8 +916,12 @@ impl App {
                 // the reorientation comes from the _geo file next to it when there is one (the specimen coordinates of
                 // this file stay as they are; opening the file is not an edit)
                 if apply_pending && !d.synthetic {
-                    if let Ok(bytes) = std::fs::read(export_ui::geo_path(&p)) {
-                        d.apply_partner(&bytes);
+                    let partner = export_ui::geo_path(&p);
+                    if let Ok(bytes) = std::fs::read(&partner) {
+                        if let Ok(mut theirs) = ams_core::ams::parse(&bytes) {
+                            doc::load_dependency(&mut theirs, &partner);
+                            d.apply_partner(&theirs);
+                        }
                     }
                 }
                 if let Some(parent) = p.parent() {

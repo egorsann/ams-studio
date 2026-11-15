@@ -27,7 +27,9 @@ pub struct Derived {
 impl Doc {
     pub fn open(path: &Path) -> Result<Doc, String> {
         let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let specs = ams::parse(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut specs = ams::parse(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+        // the drill core reorientation of a _geo file lives in the dependency file of its folder
+        load_dependency(&mut specs, path);
         let n = specs.len();
         Ok(Doc { path: path.to_path_buf(), raw, specs, active: vec![true; n], selected: vec![false; n], modified: false, synthetic: false })
     }
@@ -88,7 +90,13 @@ impl Doc {
         if i >= self.specs.len() {
             return;
         }
-        ams_core::georot::write(&mut self.raw[i * RECORD_LEN..(i + 1) * RECORD_LEN], g.as_ref());
+        // Owens is stored in the record; a drill core reorientation is too wide for it and goes into the dependency
+        // file of the _geo folder when saved (the record stays as it is)
+        let in_record = match &g {
+            Some(ams_core::georot::GeoRot::Owens { .. }) => g,
+            _ => None,
+        };
+        ams_core::georot::write(&mut self.raw[i * RECORD_LEN..(i + 1) * RECORD_LEN], in_record.as_ref());
         self.specs[i].georot = g;
         if !quiet {
             self.modified = true;
@@ -97,11 +105,10 @@ impl Doc {
 
     /// Takes the stored reorientations of the `_geo` partner file over (records are matched by name, in order; a
     /// record that has its own keeps it). Not an edit: the file is not marked modified. Returns how many were taken.
-    pub fn apply_partner(&mut self, partner: &[u8]) -> usize {
-        let Ok(theirs) = ams::parse(partner) else { return 0 };
+    pub fn apply_partner(&mut self, theirs: &[Specimen]) -> usize {
         let mut used = vec![false; self.specs.len()];
         let mut n = 0;
-        for t in &theirs {
+        for t in theirs {
             let Some(i) = (0..self.specs.len()).find(|&i| !used[i] && self.specs[i].name == t.name) else { continue };
             used[i] = true;
             if let (Some(g), None) = (t.georot, self.specs[i].georot) {
@@ -143,6 +150,16 @@ impl Doc {
         rec[..name.len()].copy_from_slice(name.as_bytes());
         self.specs[i].name = name.trim().to_string();
         self.modified = true;
+    }
+}
+
+/// Puts the drill core reorientation of the dependency file of `path`'s folder into the records (aligned by index;
+/// a record that holds a reorientation already keeps it). Nothing is written.
+pub fn load_dependency(specs: &mut [Specimen], path: &Path) {
+    for (s, c) in specs.iter_mut().zip(ams_core::depjson::read(path)) {
+        if let (None, Some(c)) = (s.georot, c) {
+            s.georot = Some(ams_core::georot::GeoRot::Core(c));
+        }
     }
 }
 
@@ -411,7 +428,9 @@ mod tests {
         let g = ams_core::georot::GeoRot::Core(ams_core::core::CoreSetup { dip_dir: 305.0, plunge: 69.0, offset: 45.0, ..Default::default() });
         // the partner is a copy of the source with the block in record 1 only (names are matched, as when records were disregarded)
         src.set_georot(1, Some(g), false);
-        let partner = src.raw.clone();
+        // (a drill core reorientation is not in the record: the partner's specimens carry it from the dependency file)
+        let mut partner = ams::parse(&src.raw).unwrap();
+        partner[1].georot = Some(g);
         let mut fresh = Doc::open(&p).unwrap();
         assert!(fresh.specs.iter().all(|s| s.georot.is_none()));
         assert_eq!(fresh.apply_partner(&partner), 1);
@@ -423,6 +442,8 @@ mod tests {
         assert!((s[1].axes.dec_inc[0].0 - ge[1].axes.dec_inc[0].0).abs() > 1.0);
         // a second take-over changes nothing (the record already has its reorientation)
         assert_eq!(fresh.apply_partner(&partner), 0);
+        // and the record bytes of the opened file were not touched by it
+        assert_eq!(&fresh.raw[..], &std::fs::read(&p).unwrap()[..]);
     }
 
     #[test]

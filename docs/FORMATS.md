@@ -23,7 +23,7 @@ Fixed **640-byte records, no file header**; record count = file size / 640. All 
 | 164, 168 | 4 each | plunge of lineation #1, #2 (float32) |
 | 180 | 144 | **in-phase block** |
 | 324 | 144 | **out-of-phase block** (identical layout) |
-| 616 | 24 | AMS Studio's **reorientation block** (zero in all 1432 records of the project's own files, so the padding is free): the text `AMSG` (616), version 1 (620), method (621: 1 drill core, 2 Owens), face and arrow indices (622, 623; drill core only), then four float32 at 624: drill core `dip direction, plunge, offset, 0`, Owens `FS, FD, DS, DD`. The program computes the geographic view from it (`ams_core::georot`); the tensors are never rotated. Other software ignores it (Anisoft was not tested with such a file) |
+| 616 | 24 | AMS Studio's **Owens reorientation block** (zero in all 1432 records of the project's own files, so the padding is free): the text `AMSG` (616), version 1 (620), method (621: 2 Owens; 1 drill core is read but the program keeps drill core reorientations in the dependency file instead), face and arrow indices (622, 623), then four float32 at 624: Owens `FS, FD, DS, DD`. The program computes the geographic view from it (`ams_core::georot`); the tensors are never rotated. Other software ignores it (Anisoft was not tested with such a file) |
 
 Block layout (offsets relative to the block start):
 
@@ -87,3 +87,7 @@ Next to an `.ams` file whose volume was entered with Edit > Volume Correction: `
 ## csv columns of AMS Studio's export
 
 `Specimen,Field,Freq`, then the same columns for the in-phase (`ip_`) and the out-of-phase (`op_`) data, then `opKm_over_ipKm_percent`. After the columns of the original's csv (`Km`, `K1`..., `Tyy,Txx,Tzz`) come the M3ORE lab sheet's: `Km_vol` (Km x 10 / volume), `K1_un K2_un K3_un` (unnormalised), `L_Khan F_Khan H_Owens`, `Lin_Plunge Fol_Dip Fol_DipDir`, and the lab sheet's errors: `K1_frac K2_frac K3_frac` (SD / K), `Km_frac`, `K1_un_frac ...`, and the fractional (`_frac`) and absolute (`_abs`) errors of L, L_Khan, F, F_Khan, P, H, Pj, T, U, computed with the sheet's rules (`ams_core::lab`). The standard deviations stored in the file are used as the absolute errors of the normalised K; the percent error of Km is 0 (the sheet's optional input).
+
+## `<specimen folder>_geo_dependancy.json` (drill core reorientation)
+
+Written by *Save as .ams* into a `_geo` folder, named after that folder: `DC26AB002_AMS_geo/DC26AB002_AMS_geo_dependancy.json`. One entry per `.ams` file of the folder, with one object per record (`null` for a record without a drill core reorientation): `index`, `name`, `dip_direction`, `plunge`, `offset` (the BOH_ROTA of the record's interval), `face` and `arrow`. The `_geo` `.ams` files are exact copies of their sources; the geographic view is computed from this file (`ams_core::depjson`), so it has to stay in the folder with them.

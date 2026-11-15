@@ -17,12 +17,16 @@ pub(super) enum Status {
     Unchanged,
     /// Saved into the file itself.
     Native,
+    /// A drill core reorientation cannot go into the .ams file itself.
+    NeedsGeo,
 }
 
 pub(super) struct ExRow {
     pub src: PathBuf,
     pub out: PathBuf,
     pub status: Status,
+    /// The records that would be written hold a drill core reorientation (it goes into the dependency file of the `_geo` folder).
+    pub core: bool,
 }
 
 /// One written file, for Undo (a replaced file is kept in memory).
@@ -34,7 +38,7 @@ pub(super) struct ExOp {
     pub new_dir: Option<PathBuf>,
     /// The volume json written next to the file, if any.
     pub json: Option<PathBuf>,
-    /// The `.owens.json` written for the file, and what it held before (None: it did not exist).
+    /// The dependency file written for the file (drill core reorientation), and what it held before (None: it did not exist).
     pub marks: Option<PathBuf>,
     pub marks_prev: Option<Vec<u8>>,
 }
@@ -46,6 +50,8 @@ pub(super) struct ExportState {
     pub unchanged_too: bool,
     /// Save into the .ams files themselves instead of new files in the `_geo` folders.
     pub native: bool,
+    /// The prompt about the dependency file was shown and the button pressed once.
+    pub confirm_dep: bool,
     /// 0: the selected files (the open one by default), 1: every edited file
     pub scope: usize,
     pub ops: Vec<ExOp>,
@@ -155,8 +161,11 @@ impl App {
             .map(|src| {
                 let out = if self.ex.native { src.clone() } else { geo_path(&src) };
                 let changed = self.pending.contains_key(&src) || self.stash.contains_key(&src) || open_path.as_ref().map_or(false, |(p, m)| *p == src && *m);
+                let core = changed && self.core_records(&src, self.ex.native).iter().any(|(_, c)| c.is_some());
                 let status = if !changed {
                     Status::Unchanged
+                } else if self.ex.native && core {
+                    Status::NeedsGeo
                 } else if self.ex.native {
                     Status::Native
                 } else if out.exists() {
@@ -164,9 +173,28 @@ impl App {
                 } else {
                     Status::New
                 };
-                ExRow { src, out, status }
+                ExRow { src, out, status, core }
             })
             .collect();
+    }
+
+    /// The names of the records that would be written for `src` and their drill core reorientation (the part that goes
+    /// into the dependency file); a record without one is `None`.
+    fn core_records(&self, src: &Path, all: bool) -> Vec<(String, Option<ams_core::core::CoreSetup>)> {
+        use ams_core::georot::GeoRot;
+        let core = |g: Option<GeoRot>| match g {
+            Some(GeoRot::Core(c)) => Some(c),
+            _ => None,
+        };
+        let open = self.doc.as_ref().filter(|d| !d.synthetic && d.path == src).or_else(|| self.stash.get(src));
+        if let Some(d) = open {
+            return (0..d.specs.len()).filter(|&i| all || d.active[i]).map(|i| (d.specs[i].name.clone(), core(d.specs[i].georot))).collect();
+        }
+        if let Some(v) = self.pending.get(src) {
+            let names: Vec<String> = std::fs::read(src).ok().and_then(|b| ams::parse(&b).ok()).map(|s| s.into_iter().map(|x| x.name).collect()).unwrap_or_default();
+            return names.into_iter().enumerate().map(|(i, n)| (n, core(v.get(i).copied().flatten()))).collect();
+        }
+        vec![]
     }
 
     /// Bytes to write for a source file: the open or an edited file as it is now (active records), any other with its rotations.
@@ -182,7 +210,8 @@ impl App {
         // a file that is not open: its held reorientations go into the records (everything else is as on disk)
         if let Some(v) = self.pending.get(src) {
             for (i, g) in v.iter().enumerate() {
-                if let (Some(g), Some(rec)) = (g, bytes.get_mut(i * RECORD_LEN..(i + 1) * RECORD_LEN)) {
+                // Owens goes into the record; a drill core reorientation goes into the dependency file
+                if let (Some(g @ ams_core::georot::GeoRot::Owens { .. }), Some(rec)) = (g, bytes.get_mut(i * RECORD_LEN..(i + 1) * RECORD_LEN)) {
                     ams_core::georot::write(rec, Some(g));
                 }
             }
@@ -199,6 +228,10 @@ impl App {
                 Status::Unchanged => !unchanged_too,
                 Status::Exists(_) => !overwrite,
                 Status::New | Status::Native => false,
+                Status::NeedsGeo => {
+                    failed.push(format!("{} (a drill core reorientation is kept in the dependency file of a _geo folder: export as new .ams files)", src.display()));
+                    true
+                }
             };
             if skip {
                 skipped += 1;
@@ -219,12 +252,23 @@ impl App {
             let backup = if out.exists() { std::fs::read(&out).ok() } else { None };
             match std::fs::write(&out, &bytes) {
                 Ok(()) => {
+                    // the drill core reorientation goes into the dependency file of the destination folder
+                    let recs = self.core_records(&src, native);
+                    let dep = ams_core::depjson::path_for(&out);
+                    let (mut marks, mut marks_prev) = (None, None);
+                    if !native && (recs.iter().any(|(_, c)| c.is_some()) || !ams_core::depjson::read(&out).is_empty()) {
+                        let prev = std::fs::read(&dep).ok();
+                        if ams_core::depjson::write(&out, &recs).is_ok() {
+                            marks = Some(dep);
+                            marks_prev = prev;
+                        }
+                    }
                     // the volume information that was entered for the file is stored next to the saved file
                     let json = self.vol_pending.get(&src).and_then(|info| {
                         let vols: Vec<f64> = ams::parse(&bytes).map(|v| v.iter().map(|s| s.volume_cm3).collect()).unwrap_or_default();
                         doc::write_volume_json(&out, info, &vols).ok()
                     });
-                    ops.push(ExOp { src, out, len: bytes.len() as u64, backup, new_dir, json, marks: None, marks_prev: None });
+                    ops.push(ExOp { src, out, len: bytes.len() as u64, backup, new_dir, json, marks, marks_prev });
                 }
                 Err(e) => failed.push(format!("{}: {e}", out.display())),
             }
@@ -364,6 +408,7 @@ impl App {
                                 Status::Exists(t) => ui.label(RichText::new(format!("exists, created {t}")).color(if ex.overwrite { bad } else { warn })),
                                 Status::Unchanged => ui.label(RichText::new("no rotation held").weak()),
                                 Status::Native => ui.label(RichText::new("replaces the file itself").color(bad)),
+                                Status::NeedsGeo => ui.label(RichText::new("drill core: export as new .ams instead").color(bad)),
                             };
                             ui.end_row();
                         }
@@ -383,9 +428,29 @@ impl App {
             if ex.native {
                 ui.label(RichText::new("The originals are replaced. Undo last save puts them back.").small().color(bad));
             }
+            // a drill core reorientation does not fit into the .ams record: say where it goes before anything is written
+            let n_core = ex.rows.iter().filter(|r| r.core && !ex.native && r.status != Status::Unchanged).count();
+            if n_core > 0 {
+                let first = ex.rows.iter().find(|r| r.core).map(|r| ams_core::depjson::path_for(&r.out)).map(|p| rel(&p)).unwrap_or_default();
+                egui::Frame::group(ui.style()).stroke(egui::Stroke::new(1.5, warn)).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(format!("Drill core reorientation (n={n_core})")).strong().color(warn));
+                    ui.label(format!("The dip direction, plunge, orientation-line offsets, face and arrow do not fit into an .ams record. Saving creates the file  {first}  (named after the destination folder + _dependancy.json) in the destination folder. It holds this information, and the geographic view of the _geo file is computed from it: keep it next to the _geo file."));
+                    if ex.confirm_dep {
+                        ui.label(RichText::new("Press the button again to create it and save.").strong());
+                    }
+                });
+            }
             ui.horizontal(|ui| {
-                let b = egui::Button::new(RichText::new(format!("Save {n_go} file(s)")).strong().color(Color32::WHITE)).fill(if ex.native { Color32::from_rgb(190, 70, 70) } else if dark { Color32::from_rgb(52, 104, 200) } else { Color32::from_rgb(47, 111, 222) }).min_size(Vec2::new(150.0, 0.0));
-                go = ui.add_enabled(n_go > 0, b).clicked();
+                let b = egui::Button::new(RichText::new(if n_core > 0 && ex.confirm_dep { format!("Create the dependency file and save {n_go} file(s)") } else { format!("Save {n_go} file(s)") }).strong().color(Color32::WHITE)).fill(if ex.native { Color32::from_rgb(190, 70, 70) } else if dark { Color32::from_rgb(52, 104, 200) } else { Color32::from_rgb(47, 111, 222) }).min_size(Vec2::new(150.0, 0.0));
+                go = ui.add_enabled(n_go > 0 && !(ex.native && ex.rows.iter().all(|r| r.status == Status::NeedsGeo || r.status == Status::Unchanged)), b).clicked();
+                if go && n_core > 0 && !ex.confirm_dep {
+                    // the first press only shows the prompt above
+                    ex.confirm_dep = true;
+                    go = false;
+                } else if go {
+                    ex.confirm_dep = false;
+                }
                 if !ex.ops.is_empty() {
                     undo = ui.add(egui::Button::new(RichText::new("Undo last save").small()).small().fill(Color32::TRANSPARENT).stroke(ui.visuals().widgets.inactive.bg_stroke)).clicked();
                 }
@@ -399,6 +464,7 @@ impl App {
         });
         self.ex = ex;
         if rebuild {
+            self.ex.confirm_dep = false;
             self.build_rows();
         }
         if go {

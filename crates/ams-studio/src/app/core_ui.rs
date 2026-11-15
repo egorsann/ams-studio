@@ -72,7 +72,7 @@ impl App {
                         ui.selectable_value(&mut st.setup.face, f, f.name());
                     }
                 });
-                info_icon(ui, "The face of the cube, named by where it looked in the core, that carries the arrow mark. Default: the face that looked up the hole. The cube's z axis points into the cube through this face.");
+                info_icon(ui, "The arrow drawn on the cube is the alignment mark for the Kappabridge holder: it fixes the cube's specimen axes. This is the face of the cube, named by where it looked in the core, that carries the arrow. Default: the face that looked up the hole. The cube's z axis points into the cube through this face.");
             });
 
             // 2. the direction of the arrow
@@ -104,7 +104,7 @@ impl App {
             ui.label(RichText::new("Offset of the orientation line from the arrow mark on the front surface").strong());
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut st.setup.offset).range(0.0..=360.0).speed(0.5).max_decimals(1).suffix(" \u{b0}"));
-                info_icon(ui, "The clockwise turn, looking down the hole, that brings the orientation line (the line along the core that marks the bottom of the hole) to the bottom, measured from the arrow mark. This is the BOH_ROTA of the AMS dashboard; enter the turn, not the position of the line. 0 when the arrow mark is the bottom of the hole.");
+                info_icon(ui, "The clockwise turn, looking down the hole, that brings the orientation line (the line along the core that marks the bottom of the hole) to the bottom, measured from the arrow mark (the alignment mark for the Kappabridge holder). This is the BOH_ROTA of the AMS dashboard; enter the turn, not the position of the line. 0 when the arrow mark is the bottom of the hole.\nThe offsets and everything else of the drill core reorientation are kept in a dependency file, <specimen folder>_geo_dependancy.json, that Save as .ams creates in the destination (_geo) folder.");
             });
 
             // 4b. separate offsets for intervals of the core (only when ticked)
@@ -175,7 +175,7 @@ impl App {
             let names: Vec<String> = self.doc.as_ref().map(|d| d.specs.iter().map(|s| s.name.clone()).collect()).unwrap_or_default();
             let jobs = core_jobs(&st.setup, st.intervals_on.then_some((st.by_slice, st.intervals.as_slice())), &names, st.first - 1..st.last);
             match self.rotate_doc(&jobs) {
-                Ok(()) => st.msg = format!("The reorientation of {} record(s) is stored; the geographic view (F6) shows it and the specimen coordinates stay as measured. Nothing is saved yet: File > Save as .ams writes it into the file.", jobs.len()),
+                Ok(()) => st.msg = format!("The reorientation of {} record(s) is held; the geographic view (F6) shows it and the specimen coordinates stay as measured. Nothing is saved yet: File > Save as .ams writes the _geo copy and, next to it, the dependency file <specimen folder>_geo_dependancy.json that holds the drill core reorientation.", jobs.len()),
                 Err(e) => self.info = Some(e),
             }
         }

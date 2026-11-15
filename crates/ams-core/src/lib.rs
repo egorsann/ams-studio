@@ -3,6 +3,7 @@ pub mod ams;
 pub mod coords;
 pub mod core;
 pub mod density;
+pub mod depjson;
 pub mod export;
 pub mod georot;
 pub mod ged;
