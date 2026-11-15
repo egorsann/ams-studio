@@ -358,8 +358,9 @@ impl App {
     /// The file browser while a set is active: every specimen folder with its `.ams` files, the main one in bold.
     /// Quick select: the main file (the string-matched, bold one) of every specimen folder goes into the tree selection.
     /// Folders of exported results (`_geo`, `_raw`, `_corr`, `<specimen folder>_geo`) are left out.
-    pub(super) fn select_all_matched(&mut self) {
-        let Some(set) = &self.set else { return };
+    /// The main file of every specimen folder of the file tree (result folders left out).
+    pub(super) fn tree_specimen_files(&self) -> Vec<PathBuf> {
+        let Some(set) = &self.set else { return vec![] };
         let mut v: Vec<PathBuf> = vec![];
         for (f, p) in set.folders.iter().zip(&set.picks) {
             let leaf = f.name.rsplit('/').next().unwrap_or(&f.name);
@@ -370,6 +371,11 @@ impl App {
                 v.push(f.dir.join(&f.files[m]));
             }
         }
+        v
+    }
+
+    pub(super) fn select_all_matched(&mut self) {
+        let v = self.tree_specimen_files();
         self.tree_anchor = v.first().cloned();
         self.tree_sel = v;
         self.last_focus = super::Focus::Files;

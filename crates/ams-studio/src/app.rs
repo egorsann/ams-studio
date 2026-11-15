@@ -7,7 +7,9 @@ use crate::plots::GroupBy;
 use ams_core::params::{param_class, param_sd, param_values_vol, N_PARAMS, PARAM_LABELS};
 mod analysis_ui;
 mod dialogs_ui;
+mod core_links;
 mod core_pane;
+mod stereo_planes;
 mod core_ui;
 mod export_ui;
 mod pane_cfg;
@@ -392,6 +394,13 @@ pub struct App {
     st_data: bool,
     st_caption: bool,
     st_legend: bool,
+    /// Planes entered by hand, drawn as great circles in the geographic net (stereonet options > Planes).
+    st_planes: Vec<stereo_planes::StPlane>,
+    st_planes_on: bool,
+    st_plane_comments: bool,
+    st_plane_strike: bool,
+    /// New planes are added specimen specific (off: global).
+    st_plane_new_spec: bool,
     st_connect: bool,
     st_mf: bool,
     st_overlay: analysis_ui::StereoOverlay,
@@ -571,6 +580,11 @@ impl App {
             st_data: true,
             st_caption: true,
             st_legend: true,
+            st_planes: vec![],
+            st_planes_on: true,
+            st_plane_comments: true,
+            st_plane_strike: false,
+            st_plane_new_spec: false,
             st_connect: false,
             st_mf: false,
             st_overlay: Default::default(),
@@ -649,6 +663,8 @@ impl App {
         };
         app.load_state();
         app.load_plots();
+        app.cv.links = core_links::read(&core_links::path());
+        app.st_planes = stereo_planes::read();
         if app.dark {
             std::mem::swap(&mut app.k_colors, &mut app.k_other);
         }
@@ -706,6 +722,11 @@ impl App {
                 "core_on" => self.cv.on = v == "1",
                 "core_root" if Path::new(v).is_dir() => self.cv.root = Some(PathBuf::from(v)),
                 "core_needle" if !v.trim().is_empty() => self.cv.needle = v.to_string(),
+                "core_fit_all" => self.cv.fit_all = v == "1",
+                "st_planes" => self.st_planes_on = v != "0",
+                "st_plane_comments" => self.st_plane_comments = v != "0",
+                "st_plane_strike" => self.st_plane_strike = v == "1",
+                "st_plane_new_spec" => self.st_plane_new_spec = v == "1",
                 "core_frac" => self.cv.frac = v.parse().unwrap_or(0.28f32).clamp(0.12, 0.6),
                 "hfrac" => self.hfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
                 "vfrac" => self.vfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
@@ -722,7 +743,7 @@ impl App {
         let _ = std::fs::write(
             p,
             format!(
-                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nuse_p={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\ncore_on={}\ncore_root={}\ncore_needle={}\ncore_frac={}\n",
+                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nuse_p={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\ncore_on={}\ncore_root={}\ncore_needle={}\ncore_frac={}\ncore_fit_all={}\nst_planes={}\nst_plane_comments={}\nst_plane_strike={}\nst_plane_new_spec={}\n",
                 self.browser_dir.display(),
                 self.dark as u8,
                 self.browser_open as u8,
@@ -742,7 +763,12 @@ impl App {
                 self.cv.on as u8,
                 self.cv.root.as_ref().map(|r| r.display().to_string()).unwrap_or_default(),
                 self.cv.needle.replace(['\n', '\r'], ""),
-                self.cv.frac
+                self.cv.frac,
+                self.cv.fit_all as u8,
+                self.st_planes_on as u8,
+                self.st_plane_comments as u8,
+                self.st_plane_strike as u8,
+                self.st_plane_new_spec as u8
             ),
         );
     }
@@ -1318,10 +1344,7 @@ impl App {
         self.win_vol = false;
         self.win_core = false;
         if self.cv.win {
-            self.cv.win = false;
-            if self.cv.dir.is_none() {
-                self.cv.on = false;
-            }
+            self.cv_dismiss();
         }
         self.win_set = false;
         self.win_classes = false;
@@ -2151,7 +2174,7 @@ impl App {
             }
             let out = match i {
                 0 => {
-                    let o = StereoOpts { show: self.show_k, size: self.marker, data: self.st_data, caption: self.st_caption, legend: self.st_legend, connect: self.st_connect, foliation: self.st_mf };
+                    let o = StereoOpts { show: self.show_k, size: self.marker, data: self.st_data, caption: self.st_caption, legend: self.st_legend, connect: self.st_connect, foliation: self.st_mf, planes: self.plane_draws() };
                     let out = plots::stereonet(ui, body, &cpts, &o, th, cs_label, &mut self.st_view);
                     if let Some(gs) = &overlay_gs {
                         let (c, r) = plots::net_geometry(body, &self.st_view);
@@ -2307,7 +2330,7 @@ impl App {
         let mut close = false;
         // the stereonet's options stay narrow; the plot panes get a wide pop-out with X and Y side by side. It starts at
         // the arrow that opened it and slides to the left when there is no room on the right.
-        let w = if i == 0 { 300.0 } else { 580.0f32.min(screen.width() - 16.0) };
+        let w = if i == 0 { 340.0 } else { 580.0f32.min(screen.width() - 16.0) };
         let arrow = self.arrow_rect[i];
         let x = (arrow.min.x - 12.0).min(screen.max.x - w - 8.0).max(screen.min.x + 8.0);
         // below the header when it fits, else above it (never over the arrow that opened it); the height is the one it had last time
@@ -2354,6 +2377,8 @@ impl App {
                             });
                             ui.checkbox(&mut self.st_data, RichText::new("Data points").strong());
                             ui.checkbox(&mut self.st_connect, "Connect symbols").on_hover_text("Join the points of each axis in file order");
+                            ui.separator();
+                            self.planes_ui(ui);
                             ui.separator();
                             ui.checkbox(&mut self.st_overlay.mean, RichText::new("Mean tensor").strong());
                             ui.add_enabled_ui(self.st_overlay.mean, |ui| {

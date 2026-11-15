@@ -480,6 +480,34 @@ pub struct StereoOpts {
     pub connect: bool,
     /// Magnetic foliation: great circle perpendicular to each K3.
     pub foliation: bool,
+    /// Planes entered by hand: great circles drawn below the data (empty unless the net is geographic).
+    pub planes: Vec<PlaneDraw>,
+}
+
+/// A plane drawn as a great circle: dip direction and dip in degrees, its colour and the comment next to it.
+pub struct PlaneDraw {
+    pub dip_dir: f64,
+    pub dip: f64,
+    pub color: Color32,
+    pub comment: String,
+}
+
+/// The great circle of a plane in the lower-hemisphere equal-area net, as unit-circle coordinates (x east, y north),
+/// from one end at the rim to the other. The last-but-middle point is where the plane dips steepest (azimuth = dip direction).
+pub fn plane_circle(dip_dir: f64, dip: f64) -> Vec<(f64, f64)> {
+    let (dd, dp) = (dip_dir.to_radians(), dip.to_radians());
+    let strike = dd - std::f64::consts::FRAC_PI_2;
+    let s = [strike.sin(), strike.cos(), 0.0];
+    let d = [dp.cos() * dd.sin(), dp.cos() * dd.cos(), dp.sin()];
+    (0..=180)
+        .map(|k| {
+            let phi = std::f64::consts::PI * k as f64 / 180.0;
+            let (sp, cp) = phi.sin_cos();
+            let w = [s[0] * cp + d[0] * sp, s[1] * cp + d[1] * sp, s[2] * cp + d[2] * sp];
+            let (dec, inc) = ams_core::tensor::dec_inc(w);
+            project(dec, inc)
+        })
+        .collect()
 }
 
 pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Theme, label: &str, view: &mut NetView) -> PlotOut {
@@ -536,6 +564,18 @@ pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Th
             FontId::proportional(12.0),
             th.ink(),
         );
+    }
+    // planes entered by hand: below everything that follows, so the data always overlay them
+    for pl in &opts.planes {
+        let line: Vec<Pos2> = plane_circle(pl.dip_dir, pl.dip).into_iter().map(|(x, y)| Pos2::new(c.x + x as f32 * r, c.y - y as f32 * r)).collect();
+        pa.add(Shape::line(line, egui::epaint::PathStroke::new(2.0, pl.color.gamma_multiply(0.9))));
+        if !pl.comment.is_empty() {
+            let (x, y) = project(pl.dip_dir, pl.dip);
+            let at = Pos2::new(c.x + x as f32 * r, c.y - y as f32 * r);
+            let right = at.x >= c.x;
+            let (anchor, dx) = if right { (Align2::LEFT_BOTTOM, 5.0) } else { (Align2::RIGHT_BOTTOM, -5.0) };
+            pa.text(at + Vec2::new(dx, -3.0), anchor, &pl.comment, FontId::proportional(11.5), pl.color);
+        }
     }
     if opts.foliation {
         for p in pts {
@@ -1125,4 +1165,27 @@ fn base_radius(rect: Rect) -> f32 {
 /// Centre and radius of the net drawn by [`stereonet`] inside `rect` for a zoom / pan state.
 pub fn net_geometry(rect: Rect, view: &NetView) -> (Pos2, f32) {
     (rect.center() + view.off, base_radius(rect) * view.zoom)
+}
+
+#[cfg(test)]
+mod plane_tests {
+    use super::*;
+
+    #[test]
+    fn a_vertical_north_south_plane_is_the_ns_diameter() {
+        // dip direction 90, dip 90: strike 0 (north), the great circle is the vertical diameter
+        let c = plane_circle(90.0, 90.0);
+        assert!(c.iter().all(|(x, _)| x.abs() < 1e-9));
+        assert!((c[0].1.abs() - 1.0).abs() < 1e-9 && (c[180].1.abs() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_flat_plane_is_the_rim_and_the_steepest_point_is_at_the_dip_direction() {
+        assert!(plane_circle(0.0, 0.0).iter().all(|(x, y)| ((x * x + y * y).sqrt() - 1.0).abs() < 1e-9));
+        let c = plane_circle(135.0, 40.0);
+        let (x, y) = project(135.0, 40.0);
+        assert!((c[90].0 - x).abs() < 1e-9 && (c[90].1 - y).abs() < 1e-9);
+        // every point of the circle lies in the lower hemisphere net
+        assert!(c.iter().all(|(x, y)| (x * x + y * y).sqrt() <= 1.0 + 1e-9));
+    }
 }
