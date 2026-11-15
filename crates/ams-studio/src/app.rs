@@ -1,6 +1,6 @@
 use crate::doc::{self, Derived, Doc};
 use crate::icons::{self, Icon};
-use crate::plots::{self, AxisCfg, ColorCfg, Pt, ScatterSpec, StereoOpts, Theme};
+use crate::plots::{self, AxisCfg, ColorCfg, NetView, Pt, ScatterSpec, StereoOpts, Theme};
 use ams_core::params::{param_class, param_sd, param_values, N_PARAMS, PARAM_LABELS};
 mod analysis_ui;
 mod dialogs_ui;
@@ -293,6 +293,8 @@ pub struct App {
     win_factors: bool,
     win_about: bool,
     win_edit: bool,
+    /// Zoom and pan of the stereonet.
+    st_view: NetView,
     win_classes: bool,
     edit: dialogs_ui::EditState,
     /// Data classes of the open file: definitions and, per specimen, an index into them.
@@ -419,6 +421,7 @@ impl App {
             win_factors: false,
             win_about: false,
             win_edit: false,
+            st_view: NetView::default(),
             win_classes: false,
             edit: Default::default(),
             classes: vec![],
@@ -834,6 +837,13 @@ impl App {
             return out;
         }
         for (m, k, a) in table {
+            if k == Key::Escape && self.st_view.is_zoomed() {
+                // Esc first takes the stereonet back to the default zoom; only then does it clear the selection
+                if ctx.input_mut(|i| i.consume_key(m, k)) {
+                    self.st_view.reset();
+                }
+                continue;
+            }
             if ctx.input_mut(|i| i.consume_key(m, k)) {
                 out.push(a);
             }
@@ -1434,9 +1444,9 @@ impl App {
             let out = match i {
                 0 => {
                     let o = StereoOpts { show: self.show_k, size: self.marker, data: self.st_data, caption: self.st_caption, legend: self.st_legend, connect: self.st_connect, foliation: self.st_mf };
-                    let out = plots::stereonet(ui, body, &cpts, &o, th, cs_label);
+                    let out = plots::stereonet(ui, body, &cpts, &o, th, cs_label, &mut self.st_view);
                     if let Some(gs) = &overlay_gs {
-                        let (c, r) = plots::net_geometry(body);
+                        let (c, r) = plots::net_geometry(body, &self.st_view);
                         let pa = ui.painter_at(body);
                         analysis_ui::draw_stereo_overlay(&pa, c, r, gs, &self.st_overlay, self.show_k, self.k_colors);
                     }

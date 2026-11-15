@@ -381,13 +381,30 @@ pub struct StereoOpts {
     pub foliation: bool,
 }
 
-pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Theme, label: &str) -> PlotOut {
+pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Theme, label: &str, view: &mut NetView) -> PlotOut {
     let resp = ui.interact(rect, ui.scope_id().with("stereo"), Sense::click_and_drag());
-    let mask = axis_mask(ui.input(|i| i.modifiers));
-    let (live, done) = band(ui, &resp, "band");
+    let mods = ui.input(|i| i.modifiers);
+    let mask = axis_mask(mods);
+    // zoom (Ctrl + scroll, or a pinch) about the pointer; plain scroll and middle-drag pan a zoomed net
+    if resp.hovered() {
+        if let Some(h) = resp.hover_pos() {
+            let (zd, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
+            if (zd - 1.0).abs() > 1e-4 {
+                view.zoom_about(rect, h, zd.powf(0.7));
+            } else if view.is_zoomed() && scroll != Vec2::ZERO && !(mods.ctrl || mods.command) {
+                view.off += scroll;
+                view.clamp(rect);
+            }
+        }
+    }
+    if resp.dragged_by(egui::PointerButton::Middle) {
+        view.off += resp.drag_delta();
+        view.clamp(rect);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+    let (live, done) = if resp.dragged_by(egui::PointerButton::Middle) { (None, None) } else { band(ui, &resp, "band") };
     let pa = ui.painter_at(rect);
-    let r = (rect.width().min(rect.height()) / 2.0 - 26.0).max(20.0);
-    let c = rect.center();
+    let (c, r) = net_geometry(rect, view);
     pa.circle_filled(c, r, th.canvas());
     pa.circle_stroke(c, r, Stroke::new(1.2, th.line()));
     // tick marks every 10 deg along the N-S and E-W diameters, like the original net
@@ -464,6 +481,8 @@ pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Th
 
     let hover = resp.hover_pos();
     let mut best: Option<(f32, usize, usize)> = None;
+    // nearest marker of any shown axis, for the Alt label (the Alt key also restricts selection to K2)
+    let mut nearest: Option<(f32, usize, usize, Pos2)> = None;
     let mut inside: Vec<usize> = vec![];
     // draw unselected first, selected on top
     for pass in [false, true] {
@@ -477,6 +496,12 @@ pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Th
                 let fill = p.color.map(|c| th.soft(c)).unwrap_or(th.k_colors[a]);
                 if opts.data || p.selected {
                     marker(&pa, s, a as u8, opts.size, fill, th.edge(), p.selected);
+                }
+                if let Some(h) = hover {
+                    let d = s.distance(h);
+                    if d < 9.0 && nearest.map_or(true, |b| d < b.0) {
+                        nearest = Some((d, pi, a, s));
+                    }
                 }
                 if !mask[a] {
                     continue;
@@ -509,10 +534,40 @@ pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Th
     if done.is_some() {
         out.band = Some(inside);
     }
+    // Alt + hover: the sub-specimen ID next to the marker, at once
+    let mut labelled = false;
+    if mods.alt {
+        if let Some((_, pi, a, s)) = nearest {
+            let p = &pts[pi];
+            let text = format!("{}  K{}", p.name, a + 1);
+            let font = FontId::proportional(12.5);
+            let galley = pa.layout_no_wrap(text, font, th.ink());
+            let size = galley.size() + Vec2::new(12.0, 6.0);
+            let mut pos = s + Vec2::new(11.0, -size.y - 6.0);
+            pos.x = pos.x.min(rect.max.x - size.x - 2.0).max(rect.min.x + 2.0);
+            pos.y = pos.y.max(rect.min.y + 2.0).min(rect.max.y - size.y - 2.0);
+            let box_rect = Rect::from_min_size(pos, size);
+            pa.rect(box_rect, 4.0, th.canvas(), Stroke::new(1.0, th.line()), egui::StrokeKind::Inside);
+            pa.galley(pos + Vec2::new(6.0, 3.0), galley, th.ink());
+            pa.circle_stroke(s, opts.size + 3.5, Stroke::new(1.6, th.accent));
+            labelled = true;
+        }
+    }
+    if view.is_zoomed() {
+        pa.text(
+            Pos2::new(rect.max.x - 8.0, rect.max.y - 8.0),
+            Align2::RIGHT_BOTTOM,
+            format!("zoom \u{d7}{:.1}   Esc resets", view.zoom),
+            FontId::proportional(11.0),
+            th.faint(),
+        );
+    }
     if let Some((_, pi, a)) = best {
         let p = &pts[pi];
         out.hover = Some(format!("Dec = {:5.1}   Inc = {:4.1}", p.di[a].0, p.di[a].1));
-        resp.clone().on_hover_text(format!("{} K{}", p.name, a + 1));
+        if !labelled {
+            resp.clone().on_hover_text(format!("{} K{}", p.name, a + 1));
+        }
         if resp.clicked() {
             out.click = Some(p.idx);
         }
@@ -704,7 +759,60 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
     out
 }
 
-/// Centre and radius of the net drawn by [`stereonet`] inside `rect`.
-pub fn net_geometry(rect: Rect) -> (Pos2, f32) {
-    (rect.center(), (rect.width().min(rect.height()) / 2.0 - 26.0).max(20.0))
+/// Zoom and pan of the stereonet (Ctrl + scroll zooms about the pointer, middle-drag or scroll pans, Esc resets).
+#[derive(Clone, Copy, PartialEq)]
+pub struct NetView {
+    pub zoom: f32,
+    /// Shift of the net centre from the middle of the plot, in points.
+    pub off: Vec2,
+}
+
+impl Default for NetView {
+    fn default() -> Self {
+        NetView { zoom: 1.0, off: Vec2::ZERO }
+    }
+}
+
+impl NetView {
+    pub const MAX_ZOOM: f32 = 60.0;
+
+    pub fn is_zoomed(&self) -> bool {
+        self.zoom > 1.0001
+    }
+
+    pub fn reset(&mut self) {
+        *self = NetView::default();
+    }
+
+    /// Zooms by `factor`, keeping the point `p` (in screen coordinates) where it is.
+    fn zoom_about(&mut self, rect: Rect, p: Pos2, factor: f32) {
+        let new = (self.zoom * factor).clamp(1.0, Self::MAX_ZOOM);
+        let k = new / self.zoom;
+        let centre = rect.center();
+        let c_old = centre + self.off;
+        let c_new = p - (p - c_old) * k;
+        self.zoom = new;
+        self.off = c_new - centre;
+        self.clamp(rect);
+    }
+
+    /// Keeps the net from being pushed completely out of the plot.
+    fn clamp(&mut self, rect: Rect) {
+        if !self.is_zoomed() {
+            self.reset();
+            return;
+        }
+        let r = base_radius(rect) * self.zoom;
+        self.off.x = self.off.x.clamp(-r, r);
+        self.off.y = self.off.y.clamp(-r, r);
+    }
+}
+
+fn base_radius(rect: Rect) -> f32 {
+    (rect.width().min(rect.height()) / 2.0 - 26.0).max(20.0)
+}
+
+/// Centre and radius of the net drawn by [`stereonet`] inside `rect` for a zoom / pan state.
+pub fn net_geometry(rect: Rect, view: &NetView) -> (Pos2, f32) {
+    (rect.center() + view.off, base_radius(rect) * view.zoom)
 }

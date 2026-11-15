@@ -109,9 +109,9 @@ The program never uses the network.
 | Ctrl+E / **Ctrl+Shift+E** | export all / **export selection** (CSV) | F9 / F12 | group statistics / contour |
 | Ctrl+C / Ctrl+F | copy / save graphics | F2 | data table |
 | Shift+Ins / Shift+Del / Alt+Backspace | invert / disregard / restore all | **Q / E** | previous / next specimen |
-| **Esc** | clear selection | Ctrl+B | show / hide the file browser |
+| **Esc** | reset the stereonet zoom, otherwise clear selection | Ctrl+B | show / hide the file browser |
 
-Mouse: click a row or marker to select, **drag over rows** or **drag a rubber band** in a plot to select several; with **Ctrl / Alt / Shift** held the band only picks K1 / K2 / K3 markers. Drag the dividers between plots and the panel edges to resize.
+Mouse: click a row or marker to select, **drag over rows** or **drag a rubber band** in a plot to select several; with **Ctrl / Alt / Shift** held the band only picks K1 / K2 / K3 markers. Drag the dividers between plots and the panel edges to resize. **Stereonet:** **Ctrl + scroll** (or a pinch) zooms about the pointer, scroll or middle-drag pans a zoomed net, **Esc** returns to the default zoom; **holding Alt over a marker** shows its sub-specimen ID and axis at once.
 
 ## For developers and other LLMs
 
