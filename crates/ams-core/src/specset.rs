@@ -20,6 +20,17 @@ pub struct SpecFolder {
 const MAX_DEPTH: usize = 4;
 const MAX_FOLDERS: usize = 20000;
 
+/// Folders of exported results: `_raw`, `_corr`, `_geo` and `<specimen folder>_geo` (File > Save as .ams, Drill Core to Geo).
+/// They hold copies of specimens, not specimens.
+pub fn is_result_folder(name: &str) -> bool {
+    matches!(name, "_geo" | "_raw" | "_corr") || name.ends_with("_geo")
+}
+
+/// Name of the folder the geographic copies of a specimen folder go into: `DC26AB002_AMS` -> `DC26AB002_AMS_geo`.
+pub fn geo_folder_name(specimen_folder: &str) -> String {
+    if specimen_folder.is_empty() { "_geo".to_string() } else { format!("{specimen_folder}_geo") }
+}
+
 /// Walks `root` (hidden folders skipped) and returns every folder that directly holds `.ams` files, sorted by name.
 pub fn scan(root: &Path) -> Vec<SpecFolder> {
     let mut out = vec![];
@@ -43,7 +54,7 @@ fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<SpecFolder>) {
         }
         if p.is_dir() {
             // folders of exported results (File > Save as .ams, Drill Core to Geo) are not specimens
-            if matches!(name.as_str(), "_geo" | "_raw" | "_corr") {
+            if is_result_folder(&name) {
                 continue;
             }
             subs.push(p);
@@ -276,9 +287,13 @@ mod tests {
     fn folders_of_exported_results_are_not_specimens() {
         let dir = std::env::temp_dir().join(format!("specset-geo-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("ZZ01").join("ZZ01_geo")).unwrap();
         std::fs::create_dir_all(dir.join("ZZ01").join("_geo")).unwrap();
         std::fs::write(dir.join("ZZ01").join("ZZ01_use.ams"), b"").unwrap();
         std::fs::write(dir.join("ZZ01").join("_geo").join("ZZ01_use_geo.ams"), b"").unwrap();
+        std::fs::write(dir.join("ZZ01").join("ZZ01_geo").join("ZZ01_use_geo.ams"), b"").unwrap();
+        assert!(is_result_folder("DC26AB002_AMS_geo") && is_result_folder("_geo") && !is_result_folder("DC26AB002_AMS"));
+        assert_eq!(geo_folder_name("DC26AB002_AMS"), "DC26AB002_AMS_geo");
         let s = scan(&dir);
         assert_eq!(s.len(), 1, "{:?}", s.iter().map(|f| f.name.clone()).collect::<Vec<_>>());
         assert_eq!(s[0].name, "ZZ01");

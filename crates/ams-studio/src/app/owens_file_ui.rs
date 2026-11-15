@@ -257,7 +257,7 @@ impl App {
                 self.of.ident = ident.clone();
                 for (f, p) in folders.iter().zip(&picks) {
                     let leaf = f.name.rsplit('/').next().unwrap_or(&f.name);
-                    if leaf == "_geo" || leaf == "_raw" || leaf == "_corr" {
+                    if specset::is_result_folder(leaf) {
                         continue; // exported results
                     }
                     let Some(k) = p.file() else { continue };
@@ -516,7 +516,7 @@ impl App {
                     // the long explanation is a pop-up on the (i), not text in the window
                     let how = match sc {
                     Scope::Single => "Specimen = a record name of this file (ZZ01-A1) or the name of the file / its folder (applies to every record). A file with a single row applies to every record.",
-                    Scope::Multiple => "Specimen = the specimen folder or main file name (applies to every record of its main file) or a record name. Rotate only turns the data in memory; nothing is saved. Select the files in the browser and use File > Export as .ams: the corrected file goes into a _geo folder inside the specimen folder.",
+                    Scope::Multiple => "Specimen = the specimen folder or main file name (applies to every record of its main file) or a record name. Rotate only turns the data in memory; nothing is saved. Select the files in the browser and use File > Export as .ams: the corrected file goes into a folder named after the specimen folder plus _geo (for example DC26AB002_AMS_geo) inside the specimen folder.",
                     };
                     super::info_icon(ui, &format!("{}\n\n{}", "One row per specimen. The header can be in any of the first 20 rows; any sheet of a workbook is tried. Also accepted: FS FD DS DD, \u{201c}Strike (LHR)\u{201d} (left-hand rule), \u{201c}Dip Direction\u{201d}, \u{201c}Sample ID\u{201d}. Strikes: index finger along the strike, thumb to the dip direction (0\u{b0} dips to 90\u{b0}); \u{201c}LHR\u{201d} is used as it stands, a dip direction is turned into a strike. Same for the drill table.", how));
                 });
@@ -556,7 +556,7 @@ impl App {
                         cols[0].label(RichText::new("\u{25cf} main file of the specimen").weak().small());
                         cols[0].add_space(4.0);
                         cols[0].label(RichText::new("After Export as .ams").strong().small());
-                        cols[0].label(mono("SPECIMEN-1/\n\u{251c}\u{2500} SPECIMEN-1_use.ams  (stays)\n\u{251c}\u{2500} _geo/  SPECIMEN-1_use_geo.ams\n\u{2514}\u{2500} other files stay here".to_string()));
+                        cols[0].label(mono("SPECIMEN-1/\n\u{251c}\u{2500} SPECIMEN-1_use.ams  (stays)\n\u{251c}\u{2500} SPECIMEN-1_geo/  SPECIMEN-1_use_geo.ams\n\u{2514}\u{2500} other files stay here".to_string()));
                         let root_name = self.of.root.as_ref().and_then(|r| r.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or("parent folder".into());
                         cols[1].label(RichText::new("Found under your parent folder").strong().small());
                         let mut s = format!("{root_name}/\n");

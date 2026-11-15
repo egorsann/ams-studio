@@ -1059,7 +1059,7 @@ impl App {
             Action::Import => self.import_files(),
             Action::SaveActive => {
                 if let Some(d) = &self.doc {
-                    // same naming as Save as .ams: <folder>/_geo/<name>_geo.ams
+                    // same naming as Save as .ams: <folder>/<folder>_geo/<name>_geo.ams
                     let (name, geo_dir) = if d.synthetic {
                         ("active.ams".to_string(), None)
                     } else {
@@ -1067,7 +1067,7 @@ impl App {
                         (g.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or("active.ams".into()), g.parent().map(|p| p.to_path_buf()))
                     };
                     let made_dir = geo_dir.as_ref().filter(|g| !g.exists() && std::fs::create_dir_all(g).is_ok()).cloned();
-                    let mut dlg = rfd::FileDialog::new().add_filter("AMS files", &["ams"]).set_file_name(name).set_title("Save the active records (default: the _geo folder)");
+                    let mut dlg = rfd::FileDialog::new().add_filter("AMS files", &["ams"]).set_file_name(name).set_title("Save the active records (default: the specimen folder's _geo folder)");
                     if let Some(g) = geo_dir.as_ref().filter(|g| g.is_dir()) {
                         dlg = dlg.set_directory(g);
                     }

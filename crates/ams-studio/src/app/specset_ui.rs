@@ -356,13 +356,13 @@ impl App {
 
     /// The file browser while a set is active: every specimen folder with its `.ams` files, the main one in bold.
     /// Quick select: the main file (the string-matched, bold one) of every specimen folder goes into the tree selection.
-    /// Folders of exported results (`_geo`, `_raw`, `_corr`) are left out.
+    /// Folders of exported results (`_geo`, `_raw`, `_corr`, `<specimen folder>_geo`) are left out.
     pub(super) fn select_all_matched(&mut self) {
         let Some(set) = &self.set else { return };
         let mut v: Vec<PathBuf> = vec![];
         for (f, p) in set.folders.iter().zip(&set.picks) {
             let leaf = f.name.rsplit('/').next().unwrap_or(&f.name);
-            if matches!(leaf, "_geo" | "_raw" | "_corr") {
+            if ams_core::specset::is_result_folder(leaf) {
                 continue;
             }
             if let Some(m) = p.file() {

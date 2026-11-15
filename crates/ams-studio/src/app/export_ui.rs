@@ -110,10 +110,13 @@ fn load_journal_in(dir: &Path) -> Vec<ExOp> {
         .collect()
 }
 
-/// `<folder>/_geo/<name>_geo.ams` for a source file.
+/// `<folder>/<folder>_geo/<name>_geo.ams` for a source file (DC26AB002_AMS/DC26AB002_AMS_geo/DC26AB002_use_geo.ams).
 pub(super) fn geo_path(src: &Path) -> PathBuf {
     let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    src.parent().unwrap_or(Path::new(".")).join("_geo").join(format!("{stem}_geo.ams"))
+    let dir = src.parent().unwrap_or(Path::new("."));
+    // the folder carries the specimen folder's name: DC26AB002_AMS/DC26AB002_AMS_geo/DC26AB002_use_geo.ams
+    let folder = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    dir.join(ams_core::specset::geo_folder_name(&folder)).join(format!("{stem}_geo.ams"))
 }
 
 impl App {
@@ -272,7 +275,7 @@ impl App {
             save_journal(&ops);
         }
         self.ex.ops = ops;
-        self.ex.msg = format!("Saved {n} file(s) {}{}{}.", if native { "into the .ams files themselves" } else { "into _geo folders" }, if skipped > 0 { format!("; {skipped} skipped") } else { String::new() }, if failed.is_empty() { String::new() } else { format!("; failed: {}", failed.join(", ")) });
+        self.ex.msg = format!("Saved {n} file(s) {}{}{}.", if native { "into the .ams files themselves" } else { "into the _geo folders" }, if skipped > 0 { format!("; {skipped} skipped") } else { String::new() }, if failed.is_empty() { String::new() } else { format!("; failed: {}", failed.join(", ")) });
         self.refresh_set();
         self.open_export_refresh();
     }
@@ -361,7 +364,7 @@ impl App {
             ui.label(if ex.native {
                 "Each file is saved into itself: the file is replaced by its edited version (the replaced version is kept for Undo)."
             } else {
-                "Each file is written as  <name>_geo.ams  into a sub-folder  _geo  of its specimen folder (made if it is not there). The source files stay where they are."
+                "Each file is written as  <name>_geo.ams  into a sub-folder named after the specimen folder plus _geo  (DC26AB002_AMS_geo, made if it is not there). The source files stay where they are."
             });
             ui.label(RichText::new("Nothing is saved by editing: rotations, deleted records and the like only live in memory until they are saved here.").weak().small());
             egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -397,7 +400,7 @@ impl App {
             }
             // the last question: where the changes go (the prompt first, the choices under it)
             ui.label(RichText::new("How should the changes be saved?").strong());
-            rebuild |= ui.radio_value(&mut ex.native, false, "Export as new .ams files (into the _geo folders, the originals stay)").changed();
+            rebuild |= ui.radio_value(&mut ex.native, false, "Export as new .ams files (into <specimen folder>_geo folders, the originals stay)").changed();
             rebuild |= ui.radio_value(&mut ex.native, true, "Save into the .ams files themselves (natively, replaces them)").on_hover_text("The original files are overwritten with the rotated / edited records. Every record stays in the file, also the disregarded ones. The replaced version is kept in the settings folder, so Undo last save brings it back, also after a restart. Which records were Owens-rotated is written next to the file (.owens.json).").changed();
             if ex.native {
                 ui.label(RichText::new("The originals are replaced. Undo last save puts them back.").small().color(bad));
