@@ -1,6 +1,7 @@
 //! Core of AMS Studio: `.ams` reading and anisotropy maths (no GUI).
 pub mod ams;
 pub mod coords;
+pub mod core;
 pub mod density;
 pub mod export;
 pub mod ged;

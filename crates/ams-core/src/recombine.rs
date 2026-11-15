@@ -58,13 +58,37 @@ pub struct Planned {
 /// `(sample part, letters, number)` of a name like `ZZ01-A1`.
 pub fn split_id(name: &str) -> (String, Option<(String, u64)>) {
     let name = name.trim();
-    if let Some(p) = name.rfind(|c: char| matches!(c, '-' | '_' | ' ')) {
-        let tail = &name[p + 1..];
+    // the sub-specimen part is letters + number (A1) or number + letters (1A)
+    let tail_parts = |tail: &str| -> Option<(String, u64)> {
         let letters: String = tail.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
         let digits = &tail[letters.len()..];
         if !letters.is_empty() && !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
-            if let Ok(n) = digits.parse::<u64>() {
-                return (name[..p].to_string(), Some((letters.to_lowercase(), n)));
+            return Some((letters.to_lowercase(), digits.parse::<u64>().ok()?));
+        }
+        let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let letters = &tail[digits.len()..];
+        if !digits.is_empty() && !letters.is_empty() && letters.chars().all(|c| c.is_ascii_alphabetic()) {
+            return Some((letters.to_lowercase(), digits.parse::<u64>().ok()?));
+        }
+        None
+    };
+    // after the last separator: ZZ01-A1, ZZ01_c12, ZZ01 2B
+    if let Some(p) = name.rfind(|c: char| matches!(c, '-' | '_' | ' ')) {
+        if let Some(t) = tail_parts(&name[p + 1..]) {
+            return (name[..p].to_string(), Some(t));
+        }
+    }
+    // no separator: trailing letters + number that follow a digit of the sample name (DC26AB002A1 -> DC26AB002 | A1)
+    let digits_at_end = name.len() - name.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    if digits_at_end > 0 {
+        let head = &name[..name.len() - digits_at_end];
+        let letters_at_end = head.len() - head.trim_end_matches(|c: char| c.is_ascii_alphabetic()).len();
+        if letters_at_end > 0 {
+            let sample = &head[..head.len() - letters_at_end];
+            if sample.ends_with(|c: char| c.is_ascii_digit()) {
+                if let Some(t) = tail_parts(&name[sample.len()..]) {
+                    return (sample.to_string(), Some(t));
+                }
             }
         }
     }
@@ -166,6 +190,23 @@ mod tests {
         assert_eq!(split_id("DC26AB002_c12"), ("DC26AB002".into(), Some(("c".into(), 12))));
         assert_eq!(split_id("ZZ01").1, None);
         assert_eq!(split_id("ZZ01-7").1, None);
+        // number + letter, and names without a separator
+        assert_eq!(split_id("ZZ01-2B"), ("ZZ01".into(), Some(("b".into(), 2))));
+        assert_eq!(split_id("DC26AB002A1"), ("DC26AB002".into(), Some(("a".into(), 1))));
+        assert_eq!(split_id("SPX12C3"), ("SPX12".into(), Some(("c".into(), 3))));
+        assert_eq!(split_id("ZZ01").1, None);
+        assert_eq!(split_id("AB12").1, None);
+    }
+
+    #[test]
+    fn the_choice_between_the_two_orders_changes_number_letter_names_too() {
+        let f = vec![vec![r("ZZ01-1A", 1), r("ZZ01-2A", 2), r("ZZ01-1B", 3), r("ZZ01-2B", 4)]];
+        let a = plan(&f, &Options::default());
+        let b = plan(&f, &Options { within: Within::LetterThenNumber, ..Default::default() });
+        assert_eq!(names(&f, &a), ["ZZ01-1A", "ZZ01-1B", "ZZ01-2A", "ZZ01-2B"]);
+        assert_eq!(names(&f, &b), ["ZZ01-1A", "ZZ01-2A", "ZZ01-1B", "ZZ01-2B"]);
+        let g = vec![vec![r("DC26AB002A2", 1), r("DC26AB002B1", 2), r("DC26AB002A1", 3)]];
+        assert_ne!(names(&g, &plan(&g, &Options::default())), names(&g, &plan(&g, &Options { within: Within::LetterThenNumber, ..Default::default() })));
     }
 
     #[test]

@@ -21,7 +21,7 @@ pub const TOOL_NAMES: [&str; 5] = ["GED Editor", "Tensor Addition / Subtraction"
 
 #[derive(Default)]
 pub struct ToolsState {
-    open: [bool; 5],
+    pub(super) open: [bool; 5],
     ged: GedState,
     tens: TensState,
     fab: FabState,

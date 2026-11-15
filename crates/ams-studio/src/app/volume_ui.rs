@@ -1,6 +1,7 @@
 //! Edit > Volume Correction: the sample volume (and whether the sample is a cube or a cylinder).
 //!
-//! The volume goes into the `Volume` field of every record (the field Anisoft's Edit Data shows). The shape has no
+//! The volume goes into the `Volume` field of the chosen rows (preset: all rows; first and last row like the Owens
+//! window) of the open file (the field Anisoft's Edit Data shows). The shape has no
 //! place in an `.ams` record, so it is kept in `<file>.volume.json` next to the file, after the user has been told.
 //! Km as displayed stays as stored; the parameters marked * (corrected mean susceptibility and unnormalised K) use
 //! `10 / volume`, because Km is reported for the Kappabridge's 10 cm3.
@@ -21,11 +22,14 @@ pub(super) struct VolState {
     /// what the json next to the open file says, read when the file was opened
     pub info: Option<VolInfo>,
     pub msg: String,
+    /// 1-based first and last row the volume is applied to (preset to the whole file)
+    pub first: usize,
+    pub last: usize,
 }
 
 impl Default for VolState {
     fn default() -> Self {
-        VolState { volume: REF_VOLUME, shape: 0, dims: [20.0, 25.0, 22.0], confirm: false, info: None, msg: String::new() }
+        VolState { volume: REF_VOLUME, shape: 0, dims: [20.0, 25.0, 22.0], confirm: false, info: None, msg: String::new(), first: 1, last: 1 }
     }
 }
 
@@ -63,6 +67,9 @@ impl App {
         if let Some(s) = d.specs.first() {
             self.vol.volume = s.volume_cm3;
         }
+        // preselected: the whole file
+        self.vol.first = 1;
+        self.vol.last = d.specs.len().max(1);
         if let Some(i) = &self.vol.info {
             self.vol.shape = SHAPES.iter().position(|s| *s == i.shape).unwrap_or(0);
         }
@@ -80,22 +87,31 @@ impl App {
             return;
         };
         let has_path = !d.synthetic;
+        let n = d.specs.len().max(1);
+        let row_name = |r: usize| d.specs.get(r.wrapping_sub(1)).map(|s| s.name.clone()).unwrap_or_default();
         let json_path = doc::volume_json_path(&d.path);
         let summary = self.volume_summary();
         let dark = self.dark;
         let mut st = std::mem::replace(&mut self.vol, VolState::default());
+        st.first = st.first.clamp(1, n);
+        st.last = st.last.clamp(st.first, n);
         let (mut open, mut apply, mut store, mut back) = (true, false, false, false);
-        self.base_window(ctx, "Volume Correction", W_VOL, Vec2::new(620.0, 470.0)).open(&mut open).resizable(false).show(ctx, |ui| {
+        self.base_window(ctx, "Volume Correction", W_VOL, Vec2::new(640.0, 560.0)).open(&mut open).resizable(false).show(ctx, |ui| {
             tools_ui::pop_style(ui, 1.25);
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
             ui.label(RichText::new(&summary).strong());
             ui.separator();
             if st.confirm {
-                ui.label(RichText::new(format!("Apply {} cm\u{b3} ({}) to this file?", st.volume, SHAPES[st.shape])).strong());
-                ui.label(format!("The volume is written into the records of the open .ams file; use File > Save Active Records As afterwards to keep it in a file."));
+                let whole = st.first == 1 && st.last == n;
+                let what = if whole { "this file".to_string() } else { format!("rows {} to {} of this file", st.first, st.last) };
+                ui.label(RichText::new(format!("Apply {} cm\u{b3} ({}) to {what}?", st.volume, SHAPES[st.shape])).strong());
+                ui.label(format!("The volume is written into the {} record(s) of the open file ({}); use File > Save as .ams afterwards to keep it in a file.", st.last - st.first + 1, if whole { "all of them".to_string() } else { format!("{} ... {}", row_name(st.first), row_name(st.last)) }));
                 if has_path {
                     ui.label("An .ams file has no place for the sample shape. The shape, the volume and today's date are kept with the file and written to a .json file next to the saved .ams file when you save it (File > Save as .ams); nothing is written to disk now. For the original file that would be:");
                     ui.label(RichText::new(json_path.display().to_string()).monospace().small());
+                    if !whole {
+                        ui.label(RichText::new("The volume (and shape) of each record is listed one by one in the json, because the records do not all have the same volume.").weak().small());
+                    }
                 } else {
                     ui.label(RichText::new("This data set has no file behind it yet, so the shape cannot be stored next to it.").color(Color32::from_rgb(214, 150, 40)));
                 }
@@ -130,7 +146,25 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Volume of the sample").strong());
                 ui.add(egui::DragValue::new(&mut st.volume).range(0.01..=1000.0).speed(0.01).max_decimals(3).suffix(" cm\u{b3}"));
-                super::info_icon(ui, "Volume of the specimen in cm\u{b3} (a 20 mm cube is 8 cm\u{b3}, a 25.4 mm x 22 mm cylinder about 11.1 cm\u{b3}). It is written into the Volume field of every record.");
+                super::info_icon(ui, "Volume of the specimen in cm\u{b3} (a 20 mm cube is 8 cm\u{b3}, a 25.4 mm x 22 mm cylinder about 11.1 cm\u{b3}). It is written into the Volume field of the chosen rows.");
+            });
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Apply to rows").strong());
+                    super::info_icon(ui, "The rows (records of the open file, numbered as in the Edit Data table) that get this volume. Preset to the whole file; narrow the range to give only some rows this volume and the others another one.");
+                    ui.add_space(10.0);
+                    ui.label("from the first row");
+                    ui.add(egui::DragValue::new(&mut st.first).range(1..=n).speed(0.2));
+                    ui.add_space(6.0);
+                    ui.label("to the last row");
+                    let first = st.first;
+                    ui.add(egui::DragValue::new(&mut st.last).range(first..=n).speed(0.2));
+                });
+                ui.label(RichText::new(format!(
+                    "Row {} ({}) to row {} ({}), the file has {n}: {} of {n} rows get this volume.",
+                    st.first, row_name(st.first), st.last, row_name(st.last), st.last - st.first + 1
+                )).weak().small());
             });
             ui.label(RichText::new("The Kappabridge reports Km for 10 cm\u{b3}. The parameters marked * (corrected mean susceptibility, unnormalised K1-K3) are multiplied by 10 / volume; Km as shown stays as stored in the file.").weak().small());
             ui.add_space(4.0);
@@ -153,10 +187,22 @@ impl App {
         if store {
             let (shape, volume) = (SHAPES[st.shape].to_string(), st.volume);
             if let Some(d) = &mut self.doc {
-                d.set_volume(volume);
-                let mut msg = format!("{} cm\u{b3} written into the {} records.", volume, d.specs.len());
+                let (first, last) = (st.first, st.last);
+                let whole = first == 1 && last == d.specs.len();
+                d.set_volume_range(first - 1..last, volume);
+                let mut msg = format!("{} cm\u{b3} written into {} of the {} records (rows {first} to {last}).", volume, last - first + 1, d.specs.len());
                 if has_path {
-                    let info = VolInfo { volume_cm3: volume, shape, applied: doc::today() };
+                    // shapes per record, when the rows do not all share one
+                    let before = self.vol_pending.get(&d.path).cloned().or_else(|| st.info.clone());
+                    let rec_shapes = if whole {
+                        vec![]
+                    } else {
+                        let base = before.as_ref().map(|i| i.shape.clone()).unwrap_or_default();
+                        let mut v = before.as_ref().filter(|i| i.rec_shapes.len() == d.specs.len()).map(|i| i.rec_shapes.clone()).unwrap_or_else(|| vec![base; d.specs.len()]);
+                        v[first - 1..last].iter_mut().for_each(|x| *x = shape.clone());
+                        v
+                    };
+                    let info = VolInfo { volume_cm3: volume, shape, applied: doc::today(), rec_shapes };
                     self.vol_pending.insert(d.path.clone(), info.clone());
                     msg += " Shape and date are kept in memory and written next to the file when you save it.";
                     st.info = Some(info);

@@ -11,7 +11,7 @@ Fixed **640-byte records, no file header**; record count = file size / 640. All 
 | 40 | 4 | frequency (Hz) |
 | 44 | 8 | instrument text (e.g. `KLY5`) |
 | 52 | 8 | program text (e.g. `Safyr7`; `SimulDat` for Fabric Overprint output) |
-| 68 | 4 | sample volume in cm3 (the Volume column of Anisoft's Edit Data); 10.0, the reference volume of the Kappabridge, in every record seen. AMS Studio's Volume Correction writes the real sample volume here; the shape (cubic / cylindrical) has no place in a record and goes to `<file>.volume.json` next to the file |
+| 68 | 4 | sample volume in cm3 (the Volume column of Anisoft's Edit Data); 10.0, the reference volume of the Kappabridge, in every record seen. AMS Studio's Volume Correction writes the real sample volume here; the shape (cubic / cylindrical) has no place in a record and goes to `<file>.volume.json` next to the file (when the rows of a file got different volumes, the json also lists `record_volumes_cm3` and `record_shapes`, row 1 first) |
 | 82, 84, 86, 88 | 2 each | int16 orientation parameters OP1..OP4 (default 6, 0, 6, 0) |
 | 90 | 2 | int16 `-1` when the record carries GED orientation data |
 | 92, 96 | 4 each | sampling azimuth alpha and plunge phi (float32) |

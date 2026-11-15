@@ -1,10 +1,14 @@
 use crate::doc::{self, Derived, Doc};
 use crate::icons::{self, Icon};
-use crate::plots::{self, AxisCfg, ColorCfg, NetView, Pt, ScatterSpec, StereoOpts, Theme};
+use pane_cfg::PaneCfg;
+use crate::plots::{self, AxisCfg, ColorCfg, NetView, Pt, ScatterSpec, StereoOpts, Theme, XyKind, ZoomView};
+use crate::plots::GroupBy;
 use ams_core::params::{param_class, param_sd, param_values_vol, N_PARAMS, PARAM_LABELS};
 mod analysis_ui;
 mod dialogs_ui;
+mod core_ui;
 mod export_ui;
+mod pane_cfg;
 mod owens_file_ui;
 mod recombine_ui;
 mod specset_ui;
@@ -49,29 +53,15 @@ pub enum Action {
     Factors,
     OrientParams,
     Owens,
+    CoreGeo,
     Colors,
     About,
     ToggleBrowser,
     ToggleTheme,
     StepSpecimen(i32),
     TogglePhase,
-}
-
-/// Options of one of the two scatter plots (P vs Kmean, T vs P).
-#[derive(Clone, PartialEq)]
-struct ScCfg {
-    x: AxisCfg,
-    y: AxisCfg,
-    diag: bool,
-    conf: bool,
-    connect: bool,
-    legend: bool,
-}
-
-impl ScCfg {
-    fn new(x: usize, y: usize) -> ScCfg {
-        ScCfg { x: AxisCfg::new(x), y: AxisCfg::new(y), diag: false, conf: false, connect: false, legend: true }
-    }
+    ResetPanes,
+    UndoResetPanes,
 }
 
 impl PartialEq for AxisCfg {
@@ -83,6 +73,15 @@ impl PartialEq for ColorCfg {
     fn eq(&self, o: &Self) -> bool {
         self.on == o.on && self.param == o.param && self.auto == o.auto && self.min == o.min && self.max == o.max && self.log == o.log && self.palette == o.palette && self.by_class == o.by_class
     }
+}
+
+/// Which part of the window was used last (for Esc).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    None,
+    Files,
+    Specimens,
+    Graphs,
 }
 
 /// K1 / K2 / K3 marker colours: strong ones on white, softer ones on the dark blue-grey.
@@ -112,12 +111,54 @@ const PARAM_GROUPS: [(&str, &[usize]); 7] = [
     ("Confidence", &[21, 22, 23]),
 ];
 
+/// What a plottable parameter is (shown by the (i) next to every parameter drop-down and when hovering its entry).
+fn param_info(i: usize) -> &'static str {
+    match i {
+        0 => "Kmean: mean (bulk) susceptibility, (K1 + K2 + K3) / 3, in SI. The size of the magnetic signal, not its anisotropy.",
+        1 => "L: magnetic lineation, K1 / K2 (Balsley & Buddington). 1 = no lineation; larger = more linear fabric.",
+        2 => "F: magnetic foliation, K2 / K3 (Stacey). 1 = no foliation; larger = more planar fabric.",
+        3 => "P: degree of anisotropy, K1 / K3. 1 = isotropic. It ignores the intermediate axis; Pj is the corrected version.",
+        4 => "Pj: corrected degree of anisotropy (Jelinek), exp(sqrt(2 * sum (ln Ki - mean ln K)^2)). 1 = isotropic; uses all three axes. The default in the plots.",
+        5 => "T: shape parameter (Jelinek), (2 ln K2 - ln K1 - ln K3) / (ln K1 - ln K3). +1 = purely oblate (flattened, K1 = K2), -1 = purely prolate (elongated, K2 = K3), 0 = neutral.",
+        6 => "U: shape parameter (Jelinek 1981), (2 K2 - K1 - K3) / (K1 - K3). +1 oblate, -1 prolate, like T but on the linear eigenvalues.",
+        7 => "Q: anisotropy factor, (K1 - K2) / ((K1 + K2) / 2 - K3). Large for lineated fabrics, small for foliated ones.",
+        8 => "E: ellipticity, K2^2 / (K1 K3). Above 1 the intermediate axis is closer to K1 (prolate side), below 1 closer to K3 (oblate side).",
+        9 => "K1: the largest normalised principal susceptibility (maximum axis); the three are scaled to a mean of 1.",
+        10 => "K2: the intermediate normalised principal susceptibility.",
+        11 => "K3: the smallest normalised principal susceptibility (minimum axis, the pole of the magnetic foliation).",
+        12 => "K1_Dec: declination (azimuth, 0-360 deg) of the K1 axis, in the coordinate system that is selected (S, G, P or T).",
+        13 => "K1_Inc: inclination (plunge below the horizontal, -90 to 90 deg) of the K1 axis.",
+        14 => "K2_Dec: declination (azimuth, 0-360 deg) of the K2 axis.",
+        15 => "K2_Inc: inclination (plunge) of the K2 axis.",
+        16 => "K3_Dec: declination (azimuth, 0-360 deg) of the K3 axis.",
+        17 => "K3_Inc: inclination (plunge) of the K3 axis.",
+        18 => "FTest: F-test of the anisotropy as a whole (is the specimen anisotropic at all?). Larger = more clearly anisotropic.",
+        19 => "FTest_F12: F-test for the difference between K1 and K2 (is there a real lineation?).",
+        20 => "FTest_F23: F-test for the difference between K2 and K3 (is there a real foliation?).",
+        21 => "E12: confidence angle (deg) of the K1-K2 plane from the measurement scatter (approximate, about 5 % from the original's value). Small = well defined.",
+        22 => "E23: confidence angle (deg) of the K2-K3 plane (approximate). Small = well defined.",
+        23 => "E13: confidence angle (deg) of the K1-K3 plane (approximate). Small = well defined.",
+        24 => "Kmean_vol*: mean susceptibility corrected for the sample volume, Kmean * 10 / volume (the Kappabridge reports Km for 10 cm3). Lab sheet quantity (Edit > Volume Correction).",
+        25 => "L_Khan*: lineation after Khan, (K1 - K2) / Kmean, on the volume-corrected values. Lab sheet quantity.",
+        26 => "F_Khan*: foliation after Khan, (K2 - K3) / Kmean, on the volume-corrected values. Lab sheet quantity.",
+        27 => "H_Owens*: total anisotropy after Owens, (K1 - K3) / Kmean, on the volume-corrected values. Lab sheet quantity.",
+        28 => "K1_unnorm*: K1 multiplied back to SI (normalised K1 * volume-corrected Kmean). Lab sheet quantity.",
+        29 => "K2_unnorm*: K2 in SI (normalised K2 * volume-corrected Kmean). Lab sheet quantity.",
+        30 => "K3_unnorm*: K3 in SI (normalised K3 * volume-corrected Kmean). Lab sheet quantity.",
+        31 => "Lin_Plunge*: plunge of the magnetic lineation (the K1 axis) in deg. Lab sheet quantity.",
+        32 => "Fol_Dip*: dip of the magnetic foliation (the plane perpendicular to K3) in deg. Lab sheet quantity.",
+        33 => "Fol_DipDir*: dip direction of the magnetic foliation in deg. Lab sheet quantity.",
+        _ => "",
+    }
+}
+
 /// Drop-down of all plottable parameters. It opens as one wide panel with the parameters
 /// grouped by type in columns, each on the background colour the original uses.
 fn param_combo(ui: &mut Ui, id: &str, v: &mut usize, dark: bool) -> bool {
     let mut changed = false;
     let cur = RichText::new(PARAM_LABELS[(*v).min(N_PARAMS - 1)]);
     let cur = match class_color(param_class(*v), dark) { Some(c) => cur.background_color(c).color(Color32::BLACK), None => cur };
+    ui.horizontal(|ui| {
     egui::ComboBox::from_id_salt(id).width(120.0).selected_text(cur).show_ui(ui, |ui| {
         ui.horizontal_top(|ui| {
             for (title, items) in PARAM_GROUPS {
@@ -127,7 +168,7 @@ fn param_combo(ui: &mut Ui, id: &str, v: &mut usize, dark: bool) -> bool {
                     for &i in items {
                         let t = RichText::new(PARAM_LABELS[i]);
                         let t = match class_color(param_class(i), dark) { Some(c) => t.background_color(c).color(Color32::BLACK), None => t };
-                        if ui.add(egui::Button::selectable(*v == i, t).min_size(Vec2::new(84.0, 0.0))).clicked() {
+                        if ui.add(egui::Button::selectable(*v == i, t).min_size(Vec2::new(84.0, 0.0))).on_hover_text(param_info(i)).clicked() {
                             *v = i;
                             changed = true;
                             ui.close();
@@ -139,6 +180,9 @@ fn param_combo(ui: &mut Ui, id: &str, v: &mut usize, dark: bool) -> bool {
         });
         ui.separator();
         ui.label(RichText::new("* belongs to the M3ORE lab sheet (not in Anisoft). Corrected for the sample volume where it applies: Edit > Volume Correction.").small().weak());
+    });
+    // what the chosen parameter is
+    info_icon(ui, param_info((*v).min(N_PARAMS - 1)));
     });
     changed
 }
@@ -167,9 +211,10 @@ fn axis_ui(ui: &mut Ui, title: &str, id: &str, cfg: &mut AxisCfg, dark: bool) {
     range_fields(ui, &mut cfg.auto, &mut cfg.min, &mut cfg.max, &mut cfg.log, id);
 }
 
-fn color_ui(ui: &mut Ui, id: &str, c: &mut ColorCfg, dark: bool) {
-    ui.checkbox(&mut c.on, RichText::new("Color-coding").strong());
-    ui.add_enabled_ui(c.on, |ui| {
+fn color_ui(ui: &mut Ui, id: &str, c: &mut ColorCfg, dark: bool, title: &str) {
+    ui.checkbox(&mut c.on, RichText::new(title).strong());
+    // the settings only show while colour-coding is on (keeps the pop-outs short enough for the screen)
+    if c.on {
         ui.horizontal(|ui| {
             ui.radio_value(&mut c.by_class, false, "Parameter");
             ui.radio_value(&mut c.by_class, true, "Data Classes").on_hover_text("Colour by the classes set in Edit > Set Data Classes");
@@ -183,7 +228,7 @@ fn color_ui(ui: &mut Ui, id: &str, c: &mut ColorCfg, dark: bool) {
                 ui.radio_value(&mut c.palette, 2, "Grayscales");
             });
         });
-    });
+    }
 }
 
 /// A drag over rows of a list: anchor position, whether it adds to the previous selection, and that selection.
@@ -208,6 +253,7 @@ const W_SET: usize = 15;
 const W_VOL: usize = 16;
 const W_RECOMB: usize = 17;
 const W_EXPORT: usize = 18;
+const W_CORE: usize = 19;
 
 struct ShotJob {
     copy: bool,
@@ -241,10 +287,18 @@ fn phone_switch(ui: &mut Ui, on: &mut bool) -> egui::Response {
     resp
 }
 
-/// Top row of the Owens window: the classic / new switch and the short notice; true when the switch was flipped.
-fn owens_head(ui: &mut Ui, old: &mut bool, toast: &Option<(String, f64)>, now: f64, accent: Color32) -> bool {
+/// Top row of the Owens window: a back arrow (one step back; greyed at the first step), the classic / new switch and the
+/// short notice. Returns (the switch was flipped, the back arrow was clicked).
+fn owens_head(ui: &mut Ui, old: &mut bool, toast: &Option<(String, f64)>, now: f64, accent: Color32, back_on: bool, show_switch: bool) -> (bool, bool) {
     let mut switched = false;
+    let mut back = false;
     ui.horizontal(|ui| {
+        back = ui.add_enabled(back_on, egui::Button::new(RichText::new("\u{2190}").strong()).min_size(Vec2::new(30.0, 0.0))).on_hover_text("Back one step").on_disabled_hover_text("This is the first step").clicked();
+        if !show_switch {
+            // the steps of a correction from a file: classic and new Owens do not apply there, so the switch is not shown
+            ui.label(RichText::new("Owens correction from a file").strong());
+            return;
+        }
         let mut new_mode = !*old;
         if phone_switch(ui, &mut new_mode).on_hover_text("Left: classic Owens of Anisoft 4.2 (a table with one row per specimen).\nRight: new Owens (four values and a row range).").changed() {
             *old = !new_mode;
@@ -263,7 +317,7 @@ fn owens_head(ui: &mut Ui, old: &mut bool, toast: &Option<(String, f64)>, now: f
             }
         });
     });
-    switched
+    (switched, back)
 }
 
 /// Drag box for a strike (0-360, k even) or a dip (0-180, k odd).
@@ -276,7 +330,7 @@ fn info_icon(ui: &mut Ui, text: &str) {
     // small and raised like a superscript; the whole cell around it answers to the pointer
     let row = ui.spacing().interact_size.y;
     let s = (row * 0.44).max(9.0);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(s + 5.0, row), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new((s + 5.0).max(18.0), row), Sense::hover());
     let col = if resp.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
     let c = Pos2::new(rect.min.x + 2.5 + s * 0.5, rect.center().y - row * 0.2);
     ui.painter().circle_stroke(c, s * 0.5, Stroke::new(1.0, col));
@@ -289,6 +343,7 @@ pub(super) struct OwensUndo {
     raw: Vec<u8>,
     specs: Vec<ams_core::ams::Specimen>,
     pending: std::collections::HashMap<PathBuf, Vec<Option<ams_core::tensor::Mat3>>>,
+    done: std::collections::HashMap<PathBuf, Vec<bool>>,
 }
 
 pub struct App {
@@ -308,12 +363,29 @@ pub struct App {
 
     show_k: [bool; 3],
     marker: f32,
-    bins: usize,
     export: [bool; 4],
-    hist_cfg: AxisCfg,
-    sc: [ScCfg; 2],
+    /// The Graphics > Export graphics menu is open: the panes it would export are highlighted.
+    export_menu_open: bool,
+    /// The state before the last "Reset all panes" (undo is offered for ten minutes).
+    reset_snap: Option<pane_cfg::ResetSnap>,
+    /// The pane that was clicked last, and whether the selection in the plots came from a drag.
+    last_focus: Focus,
+    last_band: bool,
+    /// What the three plot panes draw (top right, bottom left, bottom right), and the settings that only belong to one file.
+    panes: [PaneCfg; 3],
+    spec_cfg: [std::collections::HashMap<PathBuf, PaneCfg>; 3],
+    /// The arrow button of each pane's header (the options pop-out points at it).
+    arrow_rect: [Rect; 4],
+    /// Height of each pane's pop-out when it was last open (to decide whether it fits below the header).
+    popup_h: [f32; 4],
+    /// Zoom of the three plot panes.
+    views: [ZoomView; 3],
+    /// P and not Pj in the plots that show it.
+    use_p: bool,
     color: [ColorCfg; 4],
     color_master: ColorCfg,
+    /// The pane has colour-coding of its own (set in its options); the others follow `color_master`.
+    color_own: [bool; 4],
     st_data: bool,
     st_caption: bool,
     st_legend: bool,
@@ -348,6 +420,10 @@ pub struct App {
     /// Volume information (shape, date) of files whose volume was set but not saved yet.
     vol_pending: std::collections::HashMap<PathBuf, doc::VolInfo>,
     win_export: bool,
+    /// The "unsaved edits" question that opens when the program is asked to close.
+    quit_prompt: bool,
+    /// The user chose to leave without saving: the next close request goes through.
+    quit_ok: bool,
     ex: export_ui::ExportState,
     /// Files selected in the browser tree (Shift: range, Ctrl: single) and the anchor of a range.
     tree_sel: Vec<PathBuf>,
@@ -362,6 +438,8 @@ pub struct App {
     win_recomb: bool,
     rc: recombine_ui::RecState,
     win_vol: bool,
+    win_core: bool,
+    core: core_ui::CoreState,
     vol: volume_ui::VolState,
     win_set: bool,
     /// The parent-folder dialog, the confirmed set shown in the browser, and the identifier used last.
@@ -389,6 +467,12 @@ pub struct App {
     /// Short notice next to the Owens toggle: (text, time it appeared).
     owens_toast: Option<(String, f64)>,
     owens_undo: Option<OwensUndo>,
+    /// Records that were Owens-rotated in memory (per file); the ones rotated before are in the file's `.owens.json`.
+    owens_done: std::collections::HashMap<PathBuf, Vec<bool>>,
+    /// The rectangle of the file browser (the Owens window keeps clear of it and points at it).
+    tree_rect: Rect,
+    /// The pointer was over "the files selected in the file tree" last frame: the rest of the window is dimmed.
+    tree_hint: bool,
     /// Rotations of files that are not saved yet, per file and record (applied when the file is opened, used by Export as .ams).
     pending: std::collections::HashMap<PathBuf, Vec<Option<ams_core::tensor::Mat3>>>,
     ana: analysis_ui::AnaState,
@@ -467,12 +551,20 @@ impl App {
             spec_color_open: false,
             show_k: [true; 3],
             marker: DEFAULT_MARKER,
-            bins: 12,
             export: [true; 4],
-            hist_cfg: AxisCfg::new(0),
-            sc: [ScCfg::new(0, 3), { let mut s = ScCfg::new(3, 5); s.y.auto = false; s.y.min = -1.0; s.y.max = 1.0; s }],
+            export_menu_open: false,
+            reset_snap: None,
+            last_focus: Focus::None,
+            last_band: false,
+            panes: [PaneCfg::default_for(0, false), PaneCfg::default_for(1, false), PaneCfg::default_for(2, false)],
+            spec_cfg: Default::default(),
+            arrow_rect: [Rect::NOTHING; 4],
+            popup_h: [0.0; 4],
+            views: [ZoomView::default(); 3],
+            use_p: false,
             color: Default::default(),
             color_master: ColorCfg::default(),
+            color_own: [false; 4],
             st_data: true,
             st_caption: true,
             st_legend: true,
@@ -503,6 +595,8 @@ impl App {
             stash: Default::default(),
             vol_pending: Default::default(),
             win_export: false,
+            quit_prompt: false,
+            quit_ok: false,
             ex: Default::default(),
             tree_sel: vec![],
             tree_anchor: None,
@@ -513,6 +607,8 @@ impl App {
             win_recomb: false,
             rc: Default::default(),
             win_vol: false,
+            win_core: false,
+            core: Default::default(),
             vol: Default::default(),
             win_set: false,
             sd: Default::default(),
@@ -532,6 +628,9 @@ impl App {
             owens_old: true,
             owens_toast: None,
             owens_undo: None,
+            owens_done: Default::default(),
+            tree_rect: Rect::NOTHING,
+            tree_hint: false,
             pending: Default::default(),
             ana: Default::default(),
             info: None,
@@ -546,6 +645,7 @@ impl App {
             last_title: String::new(),
         };
         app.load_state();
+        app.load_plots();
         if app.dark {
             std::mem::swap(&mut app.k_colors, &mut app.k_other);
         }
@@ -567,6 +667,11 @@ impl App {
                 app.open_path(p);
             }
         }
+        // the last Save as .ams of the previous session can still be undone
+        app.ex.ops = export_ui::load_journal();
+        for o in &app.ex.ops {
+            app.exported.insert(o.src.clone());
+        }
         app
     }
 
@@ -577,7 +682,10 @@ impl App {
             match k {
                 "last_dir" if Path::new(v).is_dir() => self.browser_dir = PathBuf::from(v),
                 "dark" => self.dark = v == "1",
-                "logkm" => self.sc[0].x.log = v == "1",
+                "use_p" => {
+                    self.use_p = v == "1";
+                    self.apply_p_choice();
+                }
                 "marker" => self.marker = v.parse().unwrap_or(DEFAULT_MARKER).clamp(2.0, 9.0),
                 "browser_w" => self.browser_w = v.parse().unwrap_or(230.0f32).clamp(150.0, 520.0),
                 "spec_w" => self.spec_w = v.parse().unwrap_or(170.0f32).clamp(110.0, 420.0),
@@ -607,13 +715,13 @@ impl App {
         let _ = std::fs::write(
             p,
             format!(
-                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nlogkm={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\n",
+                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nuse_p={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\n",
                 self.browser_dir.display(),
                 self.dark as u8,
                 self.browser_open as u8,
                 self.hfrac,
                 self.vfrac,
-                self.sc[0].x.log as u8,
+                self.use_p as u8,
                 self.marker,
                 self.browser_w,
                 self.spec_w,
@@ -652,11 +760,72 @@ impl App {
         v
     }
 
+    /// Edits that live in memory only: the files from `edited_files` plus an open data set without a file.
+    pub(super) fn unsaved_count(&self) -> usize {
+        self.edited_files().len() + usize::from(self.doc.as_ref().map_or(false, |d| d.synthetic && d.modified))
+    }
+
+    /// Closing the program (window button, Alt+F4, File > Exit): asks first when edits would be lost.
+    fn guard_quit(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quit_ok && self.unsaved_count() > 0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.quit_prompt = true;
+        }
+    }
+
+    fn quit_window(&mut self, ctx: &egui::Context) {
+        if !self.quit_prompt {
+            return;
+        }
+        let n = self.unsaved_count();
+        let files = self.edited_files();
+        let (mut save, mut leave, mut stay) = (false, false, false);
+        egui::Window::new("Unsaved edits").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            tools_ui::pop_style(ui, 1.3);
+            ui.set_max_width(620.0);
+            ui.label(RichText::new(format!("{n} file(s) have edits that are not saved.")).strong());
+            ui.label("Rotations, deleted records, names, orientation and volume are only kept in memory until they are saved; closing the program loses them.");
+            for f in files.iter().take(8) {
+                ui.label(RichText::new(f.display().to_string()).small().monospace());
+            }
+            if files.len() > 8 {
+                ui.label(RichText::new(format!("... and {} more", files.len() - 8)).small().weak());
+            }
+            ui.horizontal(|ui| {
+                save = ui.add(egui::Button::new(RichText::new("Save as .ams ...").strong().color(Color32::WHITE)).fill(Color32::from_rgb(47, 111, 222))).clicked();
+                leave = ui.add(egui::Button::new(RichText::new("Quit without saving").color(Color32::from_rgb(214, 90, 90)))).clicked();
+                stay = ui.button("Cancel").clicked();
+            });
+        });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            stay = true;
+        }
+        if save {
+            self.quit_prompt = false;
+            self.ex.scope = 1;
+            self.open_export();
+            self.ex.scope = 1;
+            self.build_rows_pub();
+        } else if leave {
+            self.quit_prompt = false;
+            self.quit_ok = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if stay {
+            self.quit_prompt = false;
+        }
+    }
+
     /// Rotates records of the open file now and remembers the rotation for the file: it is applied again when the
     /// file is opened later and used by Export as .ams. Nothing is written.
-    pub(super) fn rotate_doc(&mut self, jobs: &[(usize, ams_core::tensor::Mat3)]) {
-        let Some(d) = &mut self.doc else { return };
-        self.owens_undo = Some(OwensUndo { raw: d.raw.clone(), specs: d.specs.clone(), pending: self.pending.clone() });
+    pub(super) fn rotate_doc(&mut self, jobs: &[(usize, ams_core::tensor::Mat3)]) -> Result<(), String> {
+        let Some(d) = &self.doc else { return Ok(()) };
+        // a sample that is already Owens-rotated is not rotated again
+        if !d.synthetic {
+            let names: Vec<String> = d.specs.iter().map(|s| s.name.clone()).collect();
+            self.owens_check(&d.path.clone(), jobs.iter().map(|j| j.0), Some(&names))?;
+        }
+        let Some(d) = &mut self.doc else { return Ok(()) };
+        self.owens_undo = Some(OwensUndo { raw: d.raw.clone(), specs: d.specs.clone(), pending: self.pending.clone(), done: self.owens_done.clone() });
         for (i, r) in jobs {
             d.rotate_specimen(*i, r);
         }
@@ -665,6 +834,24 @@ impl App {
             self.add_pending(&path, n, jobs);
         }
         self.dirty = true;
+        Ok(())
+    }
+
+    /// Error text when any of the records `idx` of `path` is already Owens-rotated (the correction is not applied then).
+    pub(super) fn owens_check(&self, path: &Path, idx: impl Iterator<Item = usize>, names: Option<&[String]>) -> Result<(), String> {
+        let marks = doc::read_owens_marks(path);
+        let bad: Vec<usize> = idx.filter(|&i| self.owens_done.get(path).and_then(|v| v.get(i)).copied().unwrap_or(false) || marks.get(i).copied().unwrap_or(false)).collect();
+        if bad.is_empty() {
+            return Ok(());
+        }
+        let list: Vec<String> = bad.iter().take(6).map(|&i| names.and_then(|n| n.get(i)).cloned().unwrap_or_else(|| format!("record {}", i + 1))).collect();
+        Err(format!(
+            "Not rotated: {} record(s) of {} are already rotated to geographic coordinates (Owens or drill core) ({}{}). Rotating them again would turn the data twice.\nUse Undo to take the earlier rotation back, or open the original, unrotated file.",
+            bad.len(),
+            path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            list.join(", "),
+            if bad.len() > 6 { ", ..." } else { "" }
+        ))
     }
 
     pub(super) fn undo_doc_rotation(&mut self) {
@@ -672,12 +859,21 @@ impl App {
             d.raw = u.raw;
             d.specs = u.specs;
             self.pending = u.pending;
+            self.owens_done = u.done;
             self.dirty = true;
         }
     }
 
     /// Adds rotations to the pending ones of a file (a later one acts after an earlier one).
     pub(super) fn add_pending(&mut self, path: &Path, n: usize, jobs: &[(usize, ams_core::tensor::Mat3)]) {
+        // these records now count as Owens-rotated
+        let done = self.owens_done.entry(path.to_path_buf()).or_insert_with(|| vec![false; n]);
+        done.resize(n, false);
+        for (i, _) in jobs {
+            if let Some(m) = done.get_mut(*i) {
+                *m = true;
+            }
+        }
         if let Some(d) = self.stash.get_mut(path) {
             for (i, r) in jobs {
                 if *i < d.specs.len() {
@@ -750,10 +946,34 @@ impl App {
         }
     }
 
-    /// The Specimens-panel / toolbar colour-coding applies to every plot that has markers.
+    /// The Specimens-panel / toolbar colour-coding is the general one: it applies to every plot that has markers and no
+    /// colour-coding of its own. A plot with its own setting keeps it.
     fn apply_master_color(&mut self) {
-        for i in [0usize, 2, 3] {
-            self.color[i] = self.color_master.clone();
+        for i in [0usize, 1, 2, 3] {
+            if !self.color_own[i] {
+                self.color[i] = self.color_master.clone();
+            }
+        }
+    }
+
+    /// The colour-coding block of a plot's options: this plot only, or back to the general one.
+    fn pane_color_ui(&mut self, ui: &mut Ui, i: usize, id: &str) {
+        let dark = self.dark;
+        let before = self.color[i].clone();
+        color_ui(ui, id, &mut self.color[i], dark, "Color-coding (this plot only)");
+        if before != self.color[i] {
+            self.color_own[i] = true;
+        }
+        if self.color_own[i] {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("This plot has its own colour-coding.").weak().small());
+                if ui.small_button("Use the general one").on_hover_text("Follow the colour-coding above the specimen list (all plots) again").clicked() {
+                    self.color_own[i] = false;
+                    self.color[i] = self.color_master.clone();
+                }
+            });
+        } else {
+            ui.label(RichText::new("Follows the general colour-coding (above the specimen list, all plots) until you change it here.").weak().small());
         }
     }
 
@@ -830,6 +1050,7 @@ impl App {
                     let p = d.path.clone();
                     self.stash.remove(&p);
                     self.pending.remove(&p);
+                    self.owens_done.remove(&p);
                     self.vol_pending.remove(&p);
                     self.doc.as_mut().unwrap().modified = false;
                     self.open_path(p);
@@ -838,11 +1059,38 @@ impl App {
             Action::Import => self.import_files(),
             Action::SaveActive => {
                 if let Some(d) = &self.doc {
-                    let name = d.path.file_stem().map(|s| format!("{}_active.ams", s.to_string_lossy())).unwrap_or("active.ams".into());
-                    if let Some(p) = rfd::FileDialog::new().add_filter("AMS files", &["ams"]).set_file_name(name).save_file() {
+                    // same naming as Save as .ams: <folder>/_geo/<name>_geo.ams
+                    let (name, geo_dir) = if d.synthetic {
+                        ("active.ams".to_string(), None)
+                    } else {
+                        let g = export_ui::geo_path(&d.path);
+                        (g.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or("active.ams".into()), g.parent().map(|p| p.to_path_buf()))
+                    };
+                    let made_dir = geo_dir.as_ref().filter(|g| !g.exists() && std::fs::create_dir_all(g).is_ok()).cloned();
+                    let mut dlg = rfd::FileDialog::new().add_filter("AMS files", &["ams"]).set_file_name(name).set_title("Save the active records (default: the _geo folder)");
+                    if let Some(g) = geo_dir.as_ref().filter(|g| g.is_dir()) {
+                        dlg = dlg.set_directory(g);
+                    }
+                    let picked = dlg.save_file();
+                    if let Some(g) = &made_dir {
+                        let _ = std::fs::remove_dir(g); // only goes when nothing was saved into it
+                    }
+                    if let Some(p) = picked {
                         let bytes = d.records((0..d.specs.len()).filter(|&i| d.active[i]));
-                        if let Err(e) = std::fs::write(&p, bytes) {
-                            self.info = Some(format!("Could not save: {e}"));
+                        let n_rec = bytes.len() / ams_core::ams::RECORD_LEN;
+                        match std::fs::write(&p, &bytes) {
+                            Err(e) => self.info = Some(format!("Could not save: {e}")),
+                            Ok(()) => {
+                                // the volume information entered for this file goes next to the saved file, as with Save as .ams
+                                if let Some(info) = self.vol_pending.get(&d.path).filter(|_| !d.synthetic) {
+                                    let vols: Vec<f64> = ams_core::ams::parse(&bytes).map(|v| v.iter().map(|s| s.volume_cm3).collect()).unwrap_or_default();
+                                    let _ = doc::write_volume_json(&p, info, &vols);
+                                }
+                                let others = self.edited_files().into_iter().filter(|f| *f != d.path).count();
+                                if others > 0 {
+                                    self.info = Some(format!("Saved {n_rec} active record(s) of this file.\n{others} other file(s) still have edits held in memory (rotations, names, volume); File > Save as .ams writes those."));
+                                }
+                            }
                         }
                     }
                 }
@@ -899,6 +1147,11 @@ impl App {
             }
             Action::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Action::EditData => self.open_edit_data(),
+            Action::CoreGeo => {
+                if self.doc.is_some() {
+                    self.open_core();
+                }
+            }
             Action::Owens => {
                 if let Some(d) = &self.doc {
                     if self.owens.len() != d.specs.len() {
@@ -967,6 +1220,8 @@ impl App {
                 self.out_phase = op;
                 self.dirty = true;
             }
+            Action::ResetPanes => self.reset_all_panes(),
+            Action::UndoResetPanes => self.undo_reset_panes(),
             Action::TogglePhase => {
                 if has {
                     self.out_phase = !self.out_phase;
@@ -1021,12 +1276,69 @@ impl App {
         }
     }
 
+    /// A dialog, pop-out or message is open (the egui drop-down menus are asked separately).
+    fn any_dialog_open(&self) -> bool {
+        self.win_table || self.win_group || self.win_contour || self.win_orient || self.win_colors || self.win_factors || self.win_about || self.win_edit
+            || self.win_export || self.win_recomb || self.win_vol || self.win_core || self.win_set || self.win_classes || self.win_owens
+            || self.tools.open.iter().any(|o| *o) || self.info.is_some() || self.quit_prompt || self.pane_settings.iter().any(|o| *o)
+    }
+
+    /// Esc: closes every dialog and pop-out. The Owens window starts from its beginning next time.
+    fn close_all_dialogs(&mut self) {
+        self.win_table = false;
+        self.win_group = false;
+        self.win_contour = false;
+        self.win_orient = false;
+        self.win_colors = false;
+        self.win_factors = false;
+        self.win_about = false;
+        self.win_edit = false;
+        self.win_export = false;
+        self.win_recomb = false;
+        self.win_vol = false;
+        self.win_core = false;
+        self.win_set = false;
+        self.win_classes = false;
+        self.close_owens();
+        self.tools.open.iter_mut().for_each(|o| *o = false);
+        self.info = None;
+        self.quit_prompt = false;
+        self.pane_settings = [false; 4];
+    }
+
+    /// Esc with nothing open: clears what was selected in the pane that was used last (files or sub-specimens); after
+    /// the plots it only undoes a drag selection.
+    fn esc_clear_selection(&mut self) {
+        let files = !self.tree_sel.is_empty();
+        let specs = self.doc.as_ref().map_or(false, |d| d.n_selected() > 0);
+        let clear_files = |s: &mut App| s.tree_sel.clear();
+        let clear_specs = |s: &mut App| {
+            if let Some(d) = &mut s.doc {
+                d.selected.iter_mut().for_each(|a| *a = false);
+            }
+        };
+        match self.last_focus {
+            Focus::Files if files => clear_files(self),
+            Focus::Files if specs => clear_specs(self),
+            Focus::Specimens if specs => clear_specs(self),
+            Focus::Specimens if files => clear_files(self),
+            Focus::Graphs => {
+                // only the last drag selection goes
+                if self.last_band && specs {
+                    clear_specs(self);
+                }
+                self.last_band = false;
+            }
+            Focus::None if specs => clear_specs(self),
+            _ => {}
+        }
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context) -> Vec<Action> {
         let mut out = vec![];
         let c = Modifiers::CTRL;
         let table: Vec<(Modifiers, Key, Action)> = vec![
             (Modifiers::SHIFT | Modifiers::CTRL, Key::F12, Action::ClearSel),
-            (Modifiers::NONE, Key::Escape, Action::ClearSel),
             (c, Key::F1, Action::SetClasses),
             (Modifiers::SHIFT | Modifiers::CTRL, Key::O, Action::OpenSet),
             (Modifiers::SHIFT | Modifiers::CTRL, Key::S, Action::ExportAms),
@@ -1067,14 +1379,25 @@ impl App {
         if ctx.egui_wants_keyboard_input() {
             return out;
         }
-        for (m, k, a) in table {
-            if k == Key::Escape && self.st_view.is_zoomed() {
-                // Esc first takes the stereonet back to the default zoom; only then does it clear the selection
-                if ctx.input_mut(|i| i.consume_key(m, k)) {
-                    self.st_view.reset();
-                }
-                continue;
+        // Esc: first everything that is open (dialogs, pop-outs, drop-down menus) closes at once; with nothing open
+        // it takes zoomed plots back, and then clears the selection of the pane that was used last
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            if egui::Popup::is_any_open(ctx) || self.any_dialog_open() {
+                // an open menu closes by itself when the key is left alone
+                self.close_all_dialogs();
+                return out;
             }
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                if self.st_view.is_zoomed() || self.views.iter().any(|v| v.is_zoomed()) {
+                    self.st_view.reset();
+                    self.views.iter_mut().for_each(|v| v.reset());
+                } else {
+                    self.esc_clear_selection();
+                }
+            }
+            return out;
+        }
+        for (m, k, a) in table {
             if ctx.input_mut(|i| i.consume_key(m, k)) {
                 out.push(a);
             }
@@ -1190,7 +1513,23 @@ fn item(ui: &mut Ui, label: &str, sc: &str, enabled: bool) -> bool {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // tooltips (the (i) explanations) appear the moment the pointer is over their target, also while it still moves
+        if ctx.global_style().interaction.tooltip_delay != 0.0 || ctx.global_style().interaction.show_tooltips_only_when_still {
+            ctx.all_styles_mut(|st| {
+                st.interaction.tooltip_delay = 0.0;
+                st.interaction.show_tooltips_only_when_still = false;
+            });
+        }
+        // drop-down lists show all their entries when the screen has the room (no scrollbar)
+        let combo_h = (ctx.content_rect().height() - 90.0).max(200.0);
+        if (ctx.global_style().spacing.combo_height - combo_h).abs() > 1.0 {
+            ctx.all_styles_mut(|st| st.spacing.combo_height = combo_h);
+        }
         self.track_layout(&ctx);
+        if self.reset_snap.is_some() && self.reset_undo_left().is_none() {
+            self.reset_snap = None; // the ten minutes are over
+        }
+        self.guard_quit(&ctx);
         self.refresh();
         let mut actions = self.shortcuts(&ctx);
         self.handle_screenshot(&ctx);
@@ -1213,6 +1552,7 @@ impl eframe::App for App {
         }
 
         // ------------------------------------------------------------ menu bar
+        self.export_menu_open = false;
         egui::Panel::top("menubar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -1238,6 +1578,7 @@ impl eframe::App for App {
                     if item(ui, "Set Data Classes", "Ctrl+F1", has) { actions.push(Action::SetClasses) }
                     ui.separator();
                     if item(ui, "Spec to Geo (Owens)", "", has) { actions.push(Action::Owens) }
+                    if item(ui, "Drill Core to Geo (cubes) ...", "", has) { actions.push(Action::CoreGeo) }
                     {
                         // hovering shows the volume that is already applied to this file
                         let hint = if has { self.volume_summary() } else { String::new() };
@@ -1258,6 +1599,17 @@ impl eframe::App for App {
                 ui.menu_button("Graphics", |ui| {
                     if item(ui, "Copy Graphics To Clipboard", "Ctrl+C", has) { actions.push(Action::CopyGraphics) }
                     if item(ui, "Save Graphics To File", "Ctrl+F", has) { actions.push(Action::SaveGraphics) }
+                    ui.separator();
+                    // which panes Copy / Save take; the panes are outlined in the plots while this is open
+                    let names = self.pane_names();
+                    let cfg = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+                    let (_, sub) = egui::containers::menu::SubMenuButton::new("Export graphics: panes").config(cfg).ui(ui, |ui| {
+                        ui.label(RichText::new("Panes that Copy / Save Graphics take").weak().small());
+                        for i in 0..4 {
+                            ui.checkbox(&mut self.export[i], names[i].as_str());
+                        }
+                    });
+                    self.export_menu_open = sub.is_some();
                 });
                 ui.menu_button("View", |ui| {
                     if item(ui, "Data Table", "F2", has) { actions.push(Action::DataTable) }
@@ -1280,6 +1632,22 @@ impl eframe::App for App {
                     ui.separator();
                     if item(ui, "File Browser", "Ctrl+B", true) { actions.push(Action::ToggleBrowser) }
                     if item(ui, if self.dark { "Light Theme" } else { "Dark Theme" }, "", true) { actions.push(Action::ToggleTheme) }
+                    ui.separator();
+                    // the four panes back to the Anisoft 6 settings; the undo sits in the same row while it is offered
+                    let undo_left = self.reset_undo_left();
+                    ui.horizontal(|ui| {
+                        if ui.button("Reset all panes to default").on_hover_text("The stereonet and the three plots go back to their Anisoft 6 settings (the open file's specimen-specific settings too)").clicked() {
+                            actions.push(Action::ResetPanes);
+                            ui.close();
+                        }
+                        if let Some(left) = undo_left {
+                            let mins = (left + 59) / 60;
+                            if ui.button("Undo reset").on_hover_text(format!("Takes the last reset back; offered for {mins} more minute(s)")).clicked() {
+                                actions.push(Action::UndoResetPanes);
+                                ui.close();
+                            }
+                        }
+                    });
                 });
                 ui.menu_button("Analysis", |ui| {
                     if item(ui, "Group Statistics", "F9", has) { actions.push(Action::GroupStats) }
@@ -1347,7 +1715,7 @@ impl eframe::App for App {
                         self.color_master.on = true;
                         self.apply_master_color();
                     }
-                    ui.label(RichText::new("").small()).on_hover_text("Parameter used for colour-coding all plots");
+                    ui.label(RichText::new("").small()).on_hover_text("General colour-coding parameter (all plots; a plot with its own colour-coding keeps it)");
                 }
                 if tool(ui, Icon::GroupStats, "Group Statistics  F9", has, self.win_group, d) { actions.push(Action::GroupStats) }
                 if tool(ui, Icon::Contour, "Contour Plot  F12", has, self.win_contour, d) { actions.push(Action::Contour) }
@@ -1360,10 +1728,12 @@ impl eframe::App for App {
         });
 
         // ---------------------------------------------------------- file browser
+        let mut browser_rect = Rect::NOTHING;
         if self.browser_open {
             let r = egui::Panel::left("browser").resizable(true).default_size(self.browser_w).min_size(150.0).max_size(520.0).show(ui, |ui| {
                 self.browser_ui(ui, &mut actions);
             });
+            browser_rect = r.response.rect;
             let w = r.response.rect.width();
             if (w - self.browser_w).abs() > 0.5 {
                 self.browser_w = w;
@@ -1383,6 +1753,8 @@ impl eframe::App for App {
         let r = egui::Panel::left("specimens").resizable(true).default_size(self.spec_w).min_size(110.0).max_size(420.0).show(ui, |ui| {
             self.specimens_ui(ui);
         });
+        self.tree_rect = browser_rect;
+        let spec_rect = r.response.rect;
         let w = r.response.rect.width();
         if (w - self.spec_w).abs() > 0.5 {
             self.spec_w = w;
@@ -1390,12 +1762,28 @@ impl eframe::App for App {
         }
 
         // ---------------------------------------------------------------- plots
-        egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(6.0)).show(ui, |ui| {
+        let plots_rect = egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(6.0)).show(ui, |ui| {
             self.plots_ui(ui, &th);
-        });
+        }).response.rect;
+
+        // which pane was clicked last (Esc clears the selection of that one)
+        if let Some(p) = ctx.input(|i| if i.pointer.primary_pressed() { i.pointer.press_origin() } else { None }) {
+            if ctx.layer_id_at(p).map_or(true, |l| l.order == egui::Order::Background) {
+                self.last_focus = if browser_rect.contains(p) {
+                    Focus::Files
+                } else if spec_rect.contains(p) {
+                    Focus::Specimens
+                } else if plots_rect.contains(p) {
+                    Focus::Graphs
+                } else {
+                    self.last_focus
+                };
+            }
+        }
 
         // -------------------------------------------------------------- windows
         self.windows(&ctx);
+        self.quit_window(&ctx);
         for a in actions {
             self.run(&ctx, a);
         }
@@ -1546,7 +1934,8 @@ impl App {
         if self.spec_color_open {
             let before = self.color_master.clone();
             let dark = self.dark;
-            color_ui(ui, "metric_panel", &mut self.color_master, dark);
+            ui.label(RichText::new("General colour-coding: every plot and this list").small().weak()).on_hover_text("A UI-wide setting. Plots that have their own colour-coding (their options) keep it.");
+            color_ui(ui, "metric_panel", &mut self.color_master, dark, "Color-coding (all plots)");
             if before != self.color_master {
                 self.apply_master_color();
             }
@@ -1682,7 +2071,7 @@ impl App {
             CoordSys::Tectonic => "TECTO",
         };
         let rects = [tl, tr, bl, br];
-        let names = ["Stereonet", "N vs Kmean", "P vs Kmean", "T vs P"];
+        let names = self.pane_names();
         let class_cols = self.class_colors();
         let mut overlay_gs: Option<ams_core::stats::GroupStats> = None;
         if self.st_overlay.mean || self.st_overlay.boot {
@@ -1692,9 +2081,12 @@ impl App {
             overlay_gs = ams_core::stats::group_stats(&tensors, &kms);
         }
         for i in 0..4 {
-            let mut body = self.pane_frame(ui, rects[i], i, names[i], th);
-            let (cpts, crange) = if i == 1 { (pts.clone(), None) } else { Self::colorized(&pts, &self.color[i], &class_cols) };
-            let show_bar = i != 1 && crange.is_some() && (i == 0 || self.sc[i - 2].legend);
+            let mut body = self.pane_frame(ui, rects[i], i, &names[i], th);
+            // the settings of the three plot panes (the stereonet has none)
+            let cfg: Option<PaneCfg> = (i >= 1).then(|| self.cfg(i - 1).clone());
+            let coloured = i == 0 || cfg.as_ref().map_or(false, |c| matches!(c.kind, XyKind::Scatter | XyKind::Line));
+            let (cpts, crange) = if coloured { Self::colorized(&pts, &self.color[i], &class_cols) } else { (pts.clone(), None) };
+            let show_bar = coloured && crange.is_some() && (i == 0 || cfg.as_ref().map_or(false, |c| c.legend));
             if show_bar {
                 let bar = Rect::from_min_max(Pos2::new(body.min.x, body.max.y - 30.0), body.max);
                 body.max.y -= 30.0;
@@ -1711,11 +2103,22 @@ impl App {
                     }
                     out
                 }
-                1 => plots::histogram(ui, body, &pts, self.bins, &self.hist_cfg, th),
                 _ => {
-                    let c = &self.sc[i - 2];
-                    let spec = ScatterSpec { x: &c.x, y: &c.y, zero_line: i == 3, diagonal: c.diag, conf: c.conf, connect: c.connect, salt: if i == 2 { "pkm" } else { "tp" } };
-                    plots::scatter(ui, body, &cpts, &spec, self.marker, th)
+                    let c = cfg.unwrap_or_else(|| PaneCfg::default_for(0, false));
+                    let k = i - 1;
+                    // "Selection only": just the sub-specimens selected in the specimen list
+                    let shown: Vec<Pt> = if c.sel_only { cpts.iter().filter(|p| p.selected).cloned().collect() } else { cpts.clone() };
+                    const SALT: [&str; 3] = ["xy_a", "xy_b", "xy_c"];
+                    const SALT_BIN: [&str; 3] = ["bn_a", "bn_b", "bn_c"];
+                    match c.kind {
+                        XyKind::Histogram => plots::histogram(ui, body, &shown, c.bins, &c.hist, th, SALT[k]),
+                        XyKind::Scatter | XyKind::Line => {
+                            let line = c.kind == XyKind::Line;
+                            let spec = ScatterSpec { x: &c.x, y: &c.y, zero_line: c.zero, diagonal: c.diag, conf: c.conf, connect: c.connect || line, sort_x: line, salt: SALT[k] };
+                            plots::scatter(ui, body, &shown, &spec, self.marker, th, &mut self.views[k])
+                        }
+                        kind => plots::binned_plot(ui, body, &shown, kind, &c.x, &c.y, c.bins, c.group, th, &mut self.views[k], SALT_BIN[k]),
+                    }
                 }
             };
             self.hover[i] = out.hover.unwrap_or_default();
@@ -1725,6 +2128,11 @@ impl App {
             if out.band.is_some() {
                 band = out.band;
             }
+        }
+        if band.is_some() {
+            self.last_band = true;
+        } else if click.is_some() {
+            self.last_band = false;
         }
         if let Some(b) = band {
             if let Some(doc) = &mut self.doc {
@@ -1742,7 +2150,16 @@ impl App {
         }
         if let Some(job) = &mut self.shot {
             if job.rects.is_empty() {
-                job.rects = names.iter().zip(rects).enumerate().filter(|(i, _)| self.export[*i]).map(|(_, (n, r))| (*n, r)).map(|(n, r)| (match n { "Stereonet" => "stereonet", "N vs Kmean" => "n_vs_km", "P vs Kmean" => "p_vs_km", _ => "t_vs_p" }, r)).collect();
+                let tag = |n: &str| -> &'static str { Box::leak(n.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect::<String>().into_boxed_str()) };
+                job.rects = names.iter().zip(rects).enumerate().filter(|(i, _)| self.export[*i]).map(|(_, (n, r))| (tag(n), r)).collect();
+            }
+        }
+        // while Graphics > Export graphics is open, the panes that would be exported are outlined
+        if self.export_menu_open {
+            for i in 0..4 {
+                if self.export[i] {
+                    ui.painter().rect(rects[i], 8.0, th.accent.gamma_multiply(0.13), Stroke::new(3.0, th.accent), StrokeKind::Inside);
+                }
             }
         }
     }
@@ -1754,19 +2171,49 @@ impl App {
         let header = Rect::from_min_size(rect.min + Vec2::new(6.0, 4.0), Vec2::new(rect.width() - 12.0, 24.0));
         let mut child = ui.new_child(UiBuilder::new().max_rect(header).layout(Layout::left_to_right(Align::Center)));
         let arrow = if self.pane_settings[i] { "▾" } else { "▸" };
-        if child.small_button(arrow).on_hover_text("Plot options").clicked() {
+        let arrow_resp = child.small_button(arrow).on_hover_text("Plot options");
+        self.arrow_rect[i] = arrow_resp.rect;
+        if arrow_resp.clicked() {
             self.pane_settings[i] = !self.pane_settings[i];
         }
         let txt = if self.hover[i].is_empty() { RichText::new(name).weak() } else { RichText::new(&self.hover[i]) };
-        child.label(txt);
+        // the title / hover text gives way to the tick boxes on the right
+        let c0 = (i >= 1).then(|| self.cfg(i - 1).clone());
+        let has_p = c0.as_ref().map_or(false, |c| [&c.x, &c.y, &c.hist].iter().any(|a| a.param == 3 || a.param == 4));
+        let has_log = i == 2 && c0.as_ref().map_or(false, |c| matches!(c.kind, XyKind::Scatter | XyKind::Line));
+        let reserved = if i == 0 { 0.0 } else { 118.0 + if has_p { 34.0 } else { 0.0 } + if has_log { 78.0 } else { 0.0 } };
+        child.add_sized([(header.width() - reserved - 34.0).max(40.0), 18.0], egui::Label::new(txt).truncate());
         let mut changed = false;
+        let mut p_changed = false;
+        let mut cfg_changed = false;
         child.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.checkbox(&mut self.export[i], "Export graphics");
-            if i == 2 {
-                let lab = if self.sc[0].x.param == 0 { "Log Km" } else { "Log X" };
-                changed |= ui.checkbox(&mut self.sc[0].x.log, lab).on_hover_text("Logarithmic X axis").changed();
+            if let Some(c) = &c0 {
+                let mut sel = c.sel_only;
+                if ui.checkbox(&mut sel, "Selection only").on_hover_text("Show only the sub-specimens that are selected in the specimen list").changed() {
+                    self.cfg_mut(i - 1).sel_only = sel;
+                    cfg_changed = true;
+                }
+                if has_p {
+                    p_changed |= ui.checkbox(&mut self.use_p, "P").on_hover_text("Use P instead of Pj (the default) wherever a plot shows it").changed();
+                }
+                if has_log {
+                    let lab = if c.x.param == 0 { "Log Km" } else { "Log X" };
+                    let mut lg = c.x.log;
+                    if ui.checkbox(&mut lg, lab).on_hover_text("Logarithmic X axis").changed() {
+                        self.cfg_mut(i - 1).x.log = lg;
+                        cfg_changed = true;
+                    }
+                }
             }
         });
+        if p_changed {
+            self.apply_p_choice();
+            cfg_changed = true;
+            changed = true;
+        }
+        if cfg_changed {
+            self.save_plots();
+        }
         if changed {
             self.save_state();
         }
@@ -1778,15 +2225,40 @@ impl App {
     }
 
     /// The options panel of a plot (opened with the arrow in its header), with the choices the original offers.
-    fn pane_options(&mut self, ctx: &egui::Context, rect: Rect, header: Rect, i: usize) {
+    fn pane_options(&mut self, ctx: &egui::Context, _rect: Rect, header: Rect, i: usize) {
         let dark = self.dark;
         let marker_before = self.marker;
-        let max_h = (rect.height() - 40.0).max(120.0);
+        let screen = ctx.content_rect();
+        // as tall as the screen allows: the area slides up when it would run off the bottom, so no scrollbar appears while there is room
+        let max_h = (screen.height() - 16.0).max(160.0);
         let mut close = false;
-        egui::Area::new(egui::Id::unique(("pane-options", i))).order(egui::Order::Foreground).fixed_pos(Pos2::new(rect.min.x + 8.0, header.max.y + 2.0)).show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_width(300.0);
-                egui::ScrollArea::vertical().max_height(max_h).auto_shrink([true, true]).show(ui, |ui| {
+        // the stereonet's options stay narrow; the plot panes get a wide pop-out with X and Y side by side. It starts at
+        // the arrow that opened it and slides to the left when there is no room on the right.
+        let w = if i == 0 { 300.0 } else { 580.0f32.min(screen.width() - 16.0) };
+        let arrow = self.arrow_rect[i];
+        let x = (arrow.min.x - 12.0).min(screen.max.x - w - 8.0).max(screen.min.x + 8.0);
+        // below the header when it fits, else above it (never over the arrow that opened it); the height is the one it had last time
+        let h_est = if self.popup_h[i] > 0.0 { self.popup_h[i] } else { 430.0 };
+        let below_y = header.max.y + 12.0;
+        let above_y = header.min.y - 12.0 - h_est;
+        let (py, dir) = if below_y + h_est <= screen.max.y - 8.0 {
+            (below_y, 1)
+        } else if above_y >= screen.min.y + 8.0 {
+            (above_y, -1)
+        } else {
+            (below_y.min((screen.max.y - h_est - 8.0).max(screen.min.y + 8.0)), 0)
+        };
+        let mut popup_h = 0.0f32;
+        let mut pane_edit: Option<(PaneCfg, PaneCfg, bool, bool, bool)> = None;
+        egui::Area::new(egui::Id::unique(("pane-options", i))).order(egui::Order::Foreground).fixed_pos(Pos2::new(x, py)).show(ctx, |ui| {
+            let framed = egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(w - 18.0);
+                // the area only offers the height it had last time; the pop-out may use what the screen has
+                ui.set_max_height(max_h);
+                egui::ScrollArea::both().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+                    if i != 0 {
+                        ui.set_min_width(520.0);
+                    }
                     ui.horizontal(|ui| {
                         ui.label("Symbol size");
                         ui.add(egui::DragValue::new(&mut self.marker).range(2.0..=15.0).speed(0.2).max_decimals(0));
@@ -1810,13 +2282,6 @@ impl App {
                             ui.checkbox(&mut self.st_data, RichText::new("Data points").strong());
                             ui.checkbox(&mut self.st_connect, "Connect symbols").on_hover_text("Join the points of each axis in file order");
                             ui.separator();
-                            let before = self.color[0].clone();
-                            color_ui(ui, "st-color", &mut self.color[0], dark);
-                            if before != self.color[0] {
-                                self.color_master = self.color[0].clone();
-                                self.apply_master_color();
-                            }
-                            ui.separator();
                             ui.checkbox(&mut self.st_overlay.mean, RichText::new("Mean tensor").strong());
                             ui.add_enabled_ui(self.st_overlay.mean, |ui| {
                                 ui.indent("mt", |ui| {
@@ -1838,41 +2303,114 @@ impl App {
                                 ui.checkbox(&mut self.st_caption, "Caption");
                                 ui.checkbox(&mut self.st_legend, "Legend");
                             });
-                        }
-                        1 => {
-                            ui.label(RichText::new("Data").strong());
-                            param_combo(ui, "hist-param", &mut self.hist_cfg.param, dark);
-                            let h = &mut self.hist_cfg;
-                            range_fields(ui, &mut h.auto, &mut h.min, &mut h.max, &mut h.log, "hist");
-                            ui.add(egui::Slider::new(&mut self.bins, 3..=60).text("bins"));
+                            ui.separator();
+                            self.pane_color_ui(ui, 0, "st-color");
                         }
                         _ => {
-                            let k = i - 2;
-                            let id = if i == 2 { "pk" } else { "tp" };
-                            axis_ui(ui, "X-axis", &format!("{id}-x"), &mut self.sc[k].x, dark);
-                            ui.separator();
-                            axis_ui(ui, "Y-axis", &format!("{id}-y"), &mut self.sc[k].y, dark);
+                            // every plot pane: any plot type, any X / Y parameter
+                            let k = i - 1;
+                            let orig = self.cfg(k).clone();
+                            let mut c = orig.clone();
+                            let specific = self.is_specific(k);
+                            let mut spec_tick = specific;
+                            let mut reset = false;
                             ui.horizontal(|ui| {
-                                ui.checkbox(&mut self.sc[k].diag, "Diagonal line");
-                                ui.checkbox(&mut self.sc[k].conf, "Conf. intervals").on_hover_text("Error bars (±SD) for K1, K2, K3 on the Y axis");
+                                ui.label(RichText::new("Plot type").strong());
+                                egui::ComboBox::from_id_salt(("xy-kind", i)).selected_text(c.kind.name()).width(290.0).show_ui(ui, |ui| {
+                                    for kd in XyKind::ALL {
+                                        ui.selectable_value(&mut c.kind, kd, kd.name());
+                                    }
+                                });
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add_enabled(self.doc.as_ref().map_or(false, |d| !d.synthetic), egui::Checkbox::new(&mut spec_tick, "Specimen specific"))
+                                    .on_hover_text("Keep this plot's settings for the open file only. Any other file shows the general settings again; untick to forget the file's own.");
+                                reset = ui.button("Reset default").on_hover_text(match k { 0 => "Back to the Anisoft 6 plot of this pane: N vs Kmean (histogram)", 1 => "Back to the Anisoft 6 plot of this pane: P vs Kmean (Pj, or P when the P tick is set)", _ => "Back to the Anisoft 6 plot of this pane: T vs P (Pj, or P when the P tick is set)" }).clicked();
                             });
                             ui.separator();
-                            let before = self.color[i].clone();
-                            color_ui(ui, &format!("{id}-color"), &mut self.color[i], dark);
-                            if before != self.color[i] {
-                                self.color_master = self.color[i].clone();
-                                self.apply_master_color();
+                            if c.kind == XyKind::Histogram {
+                                ui.label(RichText::new("Data").strong());
+                                param_combo(ui, &format!("hist-param{i}"), &mut c.hist.param, dark);
+                                let h = &mut c.hist;
+                                range_fields(ui, &mut h.auto, &mut h.min, &mut h.max, &mut h.log, &format!("hist{i}"));
+                                ui.add(egui::Slider::new(&mut c.bins, 3..=60).text("bins"));
+                            } else {
+                                let grouped = matches!(c.kind, XyKind::Bar | XyKind::Box);
+                                if grouped {
+                                    // a bar or box plot needs to know what forms its groups
+                                    ui.label(RichText::new("Group by").strong());
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.radio_value(&mut c.group, GroupBy::Classes, "Classes of the X parameter");
+                                        ui.add_enabled_ui(c.group == GroupBy::Classes, |ui| {
+                                            ui.add(egui::DragValue::new(&mut c.bins).range(2..=40).speed(0.2).suffix(" classes"));
+                                        });
+                                        ui.radio_value(&mut c.group, GroupBy::Sample, "Sample (specimen name)").on_hover_text("One group per sample: the sub-specimens ZZ01-A1, ZZ01-B1 ... form the group ZZ01");
+                                    });
+                                    ui.separator();
+                                }
+                                ui.columns(2, |cols| {
+                                    let by_sample = grouped && c.group == GroupBy::Sample;
+                                    cols[0].add_enabled_ui(!by_sample, |ui| axis_ui(ui, if grouped { "X-axis (grouped)" } else { "X-axis" }, &format!("xy-x{i}"), &mut c.x, dark));
+                                    axis_ui(&mut cols[1], "Y-axis", &format!("xy-y{i}"), &mut c.y, dark);
+                                });
+                                match c.kind {
+                                    XyKind::Bar | XyKind::Box => {}
+                                    _ => {
+                                        ui.separator();
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.checkbox(&mut c.diag, "Diagonal line");
+                                            ui.checkbox(&mut c.zero, "Zero line").on_hover_text("A horizontal line at Y = 0");
+                                            ui.checkbox(&mut c.conf, "Conf. intervals").on_hover_text("Error bars (±SD) for K1, K2, K3 on the Y axis");
+                                            ui.checkbox(&mut c.connect, "Connect symbols").on_hover_text("Join the points in file order");
+                                            ui.checkbox(&mut c.legend, "Legend").on_hover_text("Show the colour scale below the plot");
+                                        });
+                                        ui.separator();
+                                        self.pane_color_ui(ui, i, &format!("xy-color{i}"));
+                                    }
+                                }
                             }
-                            ui.separator();
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut self.sc[k].connect, "Connect symbols").on_hover_text("Join the points in file order");
-                                ui.checkbox(&mut self.sc[k].legend, "Legend").on_hover_text("Show the colour scale below the plot");
-                            });
+                            pane_edit = Some((orig, c, spec_tick, specific, reset));
                         }
                     }
                 });
             });
+            // the tear that ties the pop-out to the arrow that opened it
+            let r = framed.response.rect;
+            popup_h = r.height();
+            if dir != 0 {
+                let bx = arrow.center().x.clamp(r.min.x + 16.0, r.max.x - 16.0);
+                let (fill, stroke) = (ui.visuals().window_fill(), ui.visuals().window_stroke());
+                let pa = ui.painter();
+                let (base, sgn) = if dir > 0 { (r.min.y, -1.0f32) } else { (r.max.y, 1.0f32) };
+                let tip = Pos2::new(bx, base + sgn * 11.0);
+                pa.add(egui::Shape::convex_polygon(vec![tip, Pos2::new(bx - 5.0, base + sgn * 3.5), Pos2::new(bx + 5.0, base + sgn * 3.5)], fill, Stroke::new(1.0, stroke.color)));
+                pa.circle(Pos2::new(bx, base + sgn * 2.5), 5.0, fill, Stroke::new(1.0, stroke.color));
+                pa.circle_filled(Pos2::new(bx, base + sgn * 1.0), 5.5, fill);
+                pa.circle_filled(tip - Vec2::new(0.0, sgn), 1.5, stroke.color);
+            }
         });
+        if popup_h > 0.0 {
+            if (popup_h - self.popup_h[i]).abs() > 1.0 {
+                // the content changed size: lay it out again at once, with the new height deciding the place
+                ctx.request_repaint();
+            }
+            self.popup_h[i] = popup_h;
+        }
+        if let Some((orig, mut c, tick, was, reset)) = pane_edit {
+            let k = i - 1;
+            if tick != was {
+                self.set_specific(k, tick);
+            }
+            if reset {
+                c = PaneCfg::default_for(k, self.use_p);
+                self.views[k].reset();
+            }
+            if (tick || !was) && (c != orig || reset) {
+                *self.cfg_mut(k) = c;
+                self.views[k].reset();
+                self.save_plots();
+            }
+        }
         if self.marker != marker_before {
             self.layout_changed = Some(ctx.input(|t| t.time));
         }
@@ -2040,10 +2578,14 @@ impl App {
             W_FACTORS => self.win_factors = true,
             W_ABOUT => self.win_about = true,
             W_EDIT => self.win_edit = true,
-            W_OWENS => self.win_owens = true,
+            W_OWENS => {
+                self.reset_owens_file();
+                self.win_owens = true;
+            }
             W_CLASSES => self.win_classes = true,
             W_SET => self.win_set = true,
             W_VOL => self.win_vol = true,
+            W_CORE => self.win_core = true,
             W_RECOMB => self.win_recomb = true,
             W_EXPORT => self.win_export = true,
             _ => {}
@@ -2155,6 +2697,7 @@ impl App {
         self.classes_window(ctx);
         self.poll_restore(ctx);
         self.export_window(ctx);
+        self.core_window(ctx);
         self.recombine_window(ctx);
         self.volume_window(ctx);
         self.owens_window(ctx);
@@ -2172,7 +2715,7 @@ impl App {
             return;
         }
         if self.doc.is_none() {
-            self.win_owens = false;
+            self.close_owens();
             return;
         }
         if self.of.stage != owens_file_ui::Stage::Manual {
@@ -2209,17 +2752,17 @@ impl App {
         let file_last = self.of.last;
         let accent = if dark { Color32::from_rgb(106, 160, 255) } else { Color32::from_rgb(47, 111, 222) };
         const TIPS: [&str; 4] = [
-            "FS - field strike.\nCompass direction (0-360 deg) of the strike line of a reference plane (bedding, a vein, a foliation) measured in the field. Right-hand rule: the plane dips to the right when you look along the strike.",
-            "FD - field dip.\nDip angle of that same plane in the field, measured down from the horizontal (0-90 deg).",
-            "DS - strike on the drilling table.\nStrike of the same plane on the hand specimen while it lies on the drilling table, before the core was drilled out. Same right-hand rule.",
-            "DD - dip on the drilling table.\nDip angle of that same plane on the hand specimen as it lies on the drilling table (0-90 deg).",
+            "FS: the strike you measured in the field.\nMeasured with the compass on a marked reference plane (bedding, a vein, a foliation) before the sample was taken out, 0-360 deg. Index finger along the strike, thumb towards the dip direction.",
+            "FD: the dip you measured in the field.\nThe dip of that same marked plane in the field before sampling: the angle down from the horizontal, 0-90 deg.",
+            "DS: the strike on the drilling table.\nThe strike of that same marked plane measured on the hand sample while it lay on the drilling table, before the core was drilled out. Same convention as FS.",
+            "DD: the dip on the drilling table.\nThe dip of that same marked plane on the hand sample on the drilling table, measured before drilling: the angle down from the horizontal, 0-90 deg.",
         ];
         self.base_window(ctx, "Specimen to Geographic Rotation (Owens' method)", W_OWENS, Vec2::new(700.0, 780.0)).open(&mut open).resizable(true).show(ctx, |ui| {
             tools_ui::pop_style(ui, 1.3);
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
 
             // ---- mode switch (top left) and a short notice on the right
-            if owens_head(ui, &mut old, &toast, now, accent) {
+            if owens_head(ui, &mut old, &toast, now, accent, false, true).0 {
                 switched = true;
             }
             ui.separator();
@@ -2245,7 +2788,6 @@ impl App {
                                     ui.add_sized([34.0, 20.0], egui::Label::new(RichText::new(["FS", "FD", "DS", "DD"][k]).strong()));
                                     ui.add(angle_drag(&mut one[k], k));
                                     info_icon(ui, TIPS[k]);
-                                    ui.label(RichText::new(["strike", "dip", "strike", "dip"][k]).weak().small());
                                 });
                             }
                         });
@@ -2272,7 +2814,6 @@ impl App {
                 let h = (ui.available_height() - preview_h - 90.0).max(110.0);
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(RichText::new("FS / FD: strike and dip of a plane in the field.   DS / DD: strike and dip of the same plane on the drilling table.").weak().small());
                     egui::ScrollArea::vertical().id_salt("owens-table").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
                         egui::Grid::new("owens-grid").striped(true).num_columns(6).min_col_width(96.0).spacing([14.0, 6.0]).show(ui, |ui| {
                             ui.label(RichText::new("#").strong());
@@ -2366,8 +2907,10 @@ impl App {
             if self.doc.is_some() {
                 if !jobs.is_empty() {
                     let mats: Vec<(usize, ams_core::tensor::Mat3)> = jobs.iter().map(|(i, r)| (*i, ams_core::coords::owens_rotation(r[0], r[1], r[2], r[3]))).collect();
-                    self.rotate_doc(&mats);
-                    self.of.last = None;
+                    match self.rotate_doc(&mats) {
+                        Ok(()) => self.of.last = None,
+                        Err(e) => self.info = Some(e),
+                    }
                 }
                 rows.iter_mut().for_each(|r| *r = [0.0; 4]);
                 one = [0.0; 4];
@@ -2385,7 +2928,9 @@ impl App {
         self.owens = rows;
         self.owens_one = one;
         self.owens_range = (first, last);
-        self.win_owens = open && !cancel && !rotate;
+        if !(open && !cancel && !rotate) {
+            self.close_owens();
+        }
     }
 
     fn table_window(&mut self, ctx: &egui::Context) {

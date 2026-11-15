@@ -91,9 +91,10 @@ impl Doc {
         self.modified = true;
     }
 
-    /// Writes the specimen volume (cm3) into every record (the field Anisoft's Edit Data shows as Volume).
-    pub fn set_volume(&mut self, v: f64) {
-        for i in 0..self.specs.len() {
+    /// Writes the specimen volume (cm3) into the records `rows` (the field Anisoft's Edit Data shows as Volume).
+    /// Only the records `rows` (0-based, end excluded) when the file does not have one volume throughout.
+    pub fn set_volume_range(&mut self, rows: std::ops::Range<usize>, v: f64) {
+        for i in rows.start..rows.end.min(self.specs.len()) {
             self.raw[i * RECORD_LEN + ams_core::ams::OFF_VOLUME..i * RECORD_LEN + ams_core::ams::OFF_VOLUME + 4].copy_from_slice(&(v as f32).to_le_bytes());
             self.specs[i].volume_cm3 = v as f32 as f64;
         }
@@ -133,6 +134,8 @@ pub struct VolInfo {
     pub shape: String,
     /// Date the correction was entered, `YYYY-MM-DD`.
     pub applied: String,
+    /// Shape of each record when the records were not all given the same shape (empty = `shape` for all of them).
+    pub rec_shapes: Vec<String>,
 }
 
 /// `<folder>/<file name without .ams>.volume.json`
@@ -141,35 +144,35 @@ pub fn volume_json_path(ams: &Path) -> PathBuf {
     ams.with_file_name(format!("{stem}.volume.json"))
 }
 
-/// Today's date as `YYYY-MM-DD` (UTC).
+/// Today's date as `YYYY-MM-DD` (local time).
 pub fn today() -> String {
     fmt_time(std::time::SystemTime::now())[..10].to_string()
 }
 
-/// `YYYY-MM-DD HH:MM` (UTC) of a time.
+/// `YYYY-MM-DD HH:MM` of a time, in the computer's local time zone.
 pub fn fmt_time(t: std::time::SystemTime) -> String {
-    let secs = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
-    let (h, mi) = (secs.rem_euclid(86400) / 3600, secs.rem_euclid(3600) / 60);
-    let z = secs.div_euclid(86400) + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z.rem_euclid(146097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    format!("{:04}-{:02}-{:02} {:02}:{:02}", if m <= 2 { y + 1 } else { y }, m, d, h, mi)
+    chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string()
 }
 
-pub fn write_volume_json(ams: &Path, info: &VolInfo, n_records: usize) -> std::io::Result<PathBuf> {
+pub fn write_volume_json(ams: &Path, info: &VolInfo, volumes: &[f64]) -> std::io::Result<PathBuf> {
     let p = volume_json_path(ams);
     let file = ams.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let text = format!(
-        "{{\n  \"file\": \"{}\",\n  \"volume_cm3\": {},\n  \"shape\": \"{}\",\n  \"applied\": \"{}\",\n  \"records\": {}\n}}\n",
-        esc(&file), info.volume_cm3, esc(&info.shape), esc(&info.applied), n_records
+    let mut text = format!(
+        "{{\n  \"file\": \"{}\",\n  \"volume_cm3\": {},\n  \"shape\": \"{}\",\n  \"applied\": \"{}\",\n  \"records\": {}",
+        esc(&file), info.volume_cm3, esc(&info.shape), esc(&info.applied), volumes.len()
     );
+    // records that did not all get the same volume / shape are listed one by one (row 1 first)
+    let (lo, hi) = volumes.iter().fold((f64::MAX, f64::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
+    if volumes.len() > 1 && hi - lo > 1e-6 {
+        let v: Vec<String> = volumes.iter().map(|v| format!("{}", (v * 1e4).round() / 1e4)).collect();
+        text += &format!(",\n  \"record_volumes_cm3\": [{}]", v.join(", "));
+    }
+    if !info.rec_shapes.is_empty() {
+        let v: Vec<String> = info.rec_shapes.iter().map(|s| format!("\"{}\"", esc(s))).collect();
+        text += &format!(",\n  \"record_shapes\": [{}]", v.join(", "));
+    }
+    text += "\n}\n";
     std::fs::write(&p, text)?;
     Ok(p)
 }
@@ -185,7 +188,42 @@ pub fn read_volume_json(ams: &Path) -> Option<VolInfo> {
             Some(rest.chars().take_while(|c| !matches!(c, ',' | '}' | '\n')).collect::<String>().trim().to_string())
         }
     };
-    Some(VolInfo { volume_cm3: after("volume_cm3")?.parse().ok()?, shape: after("shape").unwrap_or_default(), applied: after("applied").unwrap_or_default() })
+    let rec_shapes = text
+        .find("\"record_shapes\"")
+        .and_then(|i| {
+            let r = &text[i..];
+            let (a, b) = (r.find('[')?, r.find(']')?);
+            Some(r[a + 1..b].split('"').skip(1).step_by(2).map(|s| s.to_string()).collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+    Some(VolInfo { volume_cm3: after("volume_cm3")?.parse().ok()?, shape: after("shape").unwrap_or_default(), applied: after("applied").unwrap_or_default(), rec_shapes })
+}
+
+/// `<folder>/<file name without .ams>.owens.json`: which records of a file were already Owens-rotated.
+pub fn owens_json_path(ams: &Path) -> PathBuf {
+    let stem = ams.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    ams.with_file_name(format!("{stem}.owens.json"))
+}
+
+/// The records of `ams` that were Owens-rotated before (from its `.owens.json`; empty when there is none).
+pub fn read_owens_marks(ams: &Path) -> Vec<bool> {
+    let Ok(text) = std::fs::read_to_string(owens_json_path(ams)) else { return vec![] };
+    let Some(i) = text.find("\"rotated\"") else { return vec![] };
+    let r = &text[i..];
+    let (Some(a), Some(b)) = (r.find('['), r.find(']')) else { return vec![] };
+    r[a + 1..b].split(',').filter_map(|t| match t.trim() { "1" => Some(true), "0" => Some(false), _ => None }).collect()
+}
+
+/// Writes the marks next to the file (`rotated[i]` = record i was Owens-rotated). With no mark set the file is removed.
+pub fn write_owens_marks(ams: &Path, rotated: &[bool]) -> std::io::Result<()> {
+    let p = owens_json_path(ams);
+    if !rotated.iter().any(|r| *r) {
+        let _ = std::fs::remove_file(&p);
+        return Ok(());
+    }
+    let file = ams.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default().replace('\\', "\\\\").replace('"', "\\\"");
+    let list: Vec<&str> = rotated.iter().map(|r| if *r { "1" } else { "0" }).collect();
+    std::fs::write(&p, format!("{{\n  \"file\": \"{file}\",\n  \"applied\": \"{}\",\n  \"records\": {},\n  \"rotated\": [{}]\n}}\n", today(), rotated.len(), list.join(", ")))
 }
 
 pub fn is_ams(p: &Path) -> bool {
@@ -284,14 +322,46 @@ mod tests {
         let (d, p) = tmp_doc();
         let mut doc = Doc::open(&p).unwrap();
         assert_eq!(doc.specs[0].volume_cm3, 10.0);
-        doc.set_volume(3.375);
+        doc.set_volume_range(0..2, 3.375);
         let again = ams::parse(&doc.raw).unwrap();
         assert!(again.iter().all(|s| (s.volume_cm3 - 3.375).abs() < 1e-6));
-        let info = VolInfo { volume_cm3: 3.375, shape: "cubic".into(), applied: "2026-11-15".into() };
-        let jp = write_volume_json(&p, &info, 2).unwrap();
+        let info = VolInfo { volume_cm3: 3.375, shape: "cubic".into(), applied: "2026-11-15".into(), rec_shapes: vec![] };
+        let jp = write_volume_json(&p, &info, &[3.375, 3.375]).unwrap();
         assert!(jp.ends_with("ZZ01.volume.json"));
         assert_eq!(read_volume_json(&p), Some(info));
         assert!(read_volume_json(&d.0.join("nothing.ams")).is_none());
+    }
+
+    #[test]
+    fn volume_for_some_rows_only() {
+        let (_d, p) = tmp_doc();
+        let mut doc = Doc::open(&p).unwrap();
+        doc.set_volume_range(1..2, 8.0);
+        assert_eq!(doc.specs[0].volume_cm3, 10.0);
+        assert_eq!(doc.specs[1].volume_cm3, 8.0);
+        let again = ams::parse(&doc.raw).unwrap();
+        assert_eq!((again[0].volume_cm3, again[1].volume_cm3), (10.0, 8.0));
+        // out-of-range ends are cut off
+        doc.set_volume_range(0..99, 5.0);
+        assert!(doc.specs.iter().all(|s| s.volume_cm3 == 5.0));
+        // per-record json round trip
+        let info = VolInfo { volume_cm3: 8.0, shape: "cubic".into(), applied: "2026-11-15".into(), rec_shapes: vec!["cylindrical".into(), "cubic".into()] };
+        write_volume_json(&p, &info, &[10.0, 8.0]).unwrap();
+        let text = std::fs::read_to_string(volume_json_path(&p)).unwrap();
+        assert!(text.contains("record_volumes_cm3"));
+        assert_eq!(read_volume_json(&p), Some(info));
+    }
+
+    #[test]
+    fn owens_marks_round_trip() {
+        let (_d, p) = tmp_doc();
+        assert!(read_owens_marks(&p).is_empty());
+        write_owens_marks(&p, &[true, false]).unwrap();
+        assert_eq!(read_owens_marks(&p), vec![true, false]);
+        assert!(owens_json_path(&p).ends_with("ZZ01.owens.json"));
+        // nothing marked: the file goes away
+        write_owens_marks(&p, &[false, false]).unwrap();
+        assert!(!owens_json_path(&p).exists());
     }
 
     #[test]

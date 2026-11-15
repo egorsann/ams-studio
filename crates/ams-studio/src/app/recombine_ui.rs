@@ -1,6 +1,7 @@
 //! Edit > Recombine Split AMS Files: joins `.ams` files that were exported in parts into one file, in a suggested
 //! order by specimen ID (see `ams_core::recombine`). The files can be dragged into the order they should follow each
-//! other; the suggestions can be switched off; single records can be left out.
+//! other; the suggestions can be switched off; single records can be left out or dragged to another place in the
+//! combined list.
 
 use super::{tools_ui, App, W_RECOMB};
 use ams_core::ams::{self, RECORD_LEN};
@@ -23,11 +24,15 @@ pub(super) struct RecState {
     pub manual: HashMap<(PathBuf, usize), bool>,
     pub open_after: bool,
     pub msg: String,
+    /// The order the user gave the records by dragging (file, index in the file); `None` = the suggested order.
+    pub order: Option<Vec<(PathBuf, usize)>>,
+    /// The table of duplicates is showing.
+    pub show_dups: bool,
 }
 
 impl Default for RecState {
     fn default() -> Self {
-        RecState { files: vec![], opts: Options::default(), manual: HashMap::new(), open_after: true, msg: String::new() }
+        RecState { files: vec![], opts: Options::default(), manual: HashMap::new(), open_after: true, msg: String::new(), order: None, show_dups: false }
     }
 }
 
@@ -40,6 +45,19 @@ fn load(path: PathBuf) -> SrcFile {
         }
         Err(e) => SrcFile { path, name, records: vec![], error: Some(e) },
     }
+}
+
+/// The planned list, in the order the user dragged the records into (if they did). Also gives the files that load.
+fn plan_ordered(st: &RecState) -> (Vec<usize>, Vec<recombine::Planned>) {
+    let good: Vec<usize> = (0..st.files.len()).filter(|&i| st.files[i].error.is_none()).collect();
+    let lists: Vec<Vec<RecInfo>> = good.iter().map(|&i| st.files[i].records.clone()).collect();
+    let mut planned = recombine::plan(&lists, &st.opts);
+    if let Some(o) = &st.order {
+        let pos: HashMap<&(PathBuf, usize), usize> = o.iter().enumerate().map(|(i, k)| (k, i)).collect();
+        // stable: records the dragged order does not know keep their suggested place at the end
+        planned.sort_by_key(|p| pos.get(&(st.files[good[p.file]].path.clone(), p.idx)).copied().unwrap_or(usize::MAX));
+    }
+    (good, planned)
 }
 
 impl App {
@@ -64,32 +82,68 @@ impl App {
         let ok = Color32::from_rgb(70, 170, 90);
         let warn = Color32::from_rgb(214, 150, 40);
         let bad = Color32::from_rgb(214, 90, 90);
-        let open_doc_path = self.doc.as_ref().filter(|d| !d.synthetic).map(|d| d.path.clone());
+        // the files selected in the file browser (Shift range, Ctrl single), else the open file
+        let selected: Vec<PathBuf> = self.selected_or_open().into_iter().filter(|p| crate::doc::is_ams(p)).collect();
         let mut st = std::mem::take(&mut self.rc);
-        let good: Vec<usize> = (0..st.files.len()).filter(|&i| st.files[i].error.is_none()).collect();
-        let lists: Vec<Vec<RecInfo>> = good.iter().map(|&i| st.files[i].records.clone()).collect();
-        let planned = recombine::plan(&lists, &st.opts);
+        let opts_before = st.opts;
+        let (good, planned) = plan_ordered(&st);
         let included = |st: &RecState, p: &recombine::Planned| {
             let f = &st.files[good[p.file]];
             st.manual.get(&(f.path.clone(), p.idx)).copied().unwrap_or(p.skip.is_none())
         };
         let n_in = planned.iter().filter(|p| included(&st, p)).count();
+        // records that are byte for byte the same as an earlier one: (specimen, its file, the earlier record's file and name)
+        let dups: Vec<(String, String, String)> = {
+            let lists: Vec<Vec<RecInfo>> = good.iter().map(|&i| st.files[i].records.clone()).collect();
+            let all = recombine::plan(&lists, &Options { skip_duplicates: true, one_per_name: false, ..st.opts });
+            let mut first_seen: HashMap<&[u8], (&str, &str)> = HashMap::new();
+            let mut v = vec![];
+            for p in &all {
+                let (f, r) = (&st.files[good[p.file]], &st.files[good[p.file]].records[p.idx]);
+                match (p.skip, first_seen.get(r.bytes.as_slice())) {
+                    (Some(Skip::Duplicate), Some((ff, fname))) => v.push((r.name.clone(), f.name.clone(), format!("{fname} in {ff}"))),
+                    _ => {
+                        first_seen.entry(r.bytes.as_slice()).or_insert((f.name.as_str(), r.name.as_str()));
+                    }
+                }
+            }
+            v
+        };
+        // why a change of the order may not move anything: names that cannot be read, or both orders giving one list
+        let n_readable = planned.iter().filter(|p| recombine::split_id(&st.files[good[p.file]].records[p.idx].name).1.is_some()).count();
+        let same_both = {
+            let lists: Vec<Vec<RecInfo>> = good.iter().map(|&i| st.files[i].records.clone()).collect();
+            let other = if st.opts.within == Within::NumberThenLetter { Within::LetterThenNumber } else { Within::NumberThenLetter };
+            let a = recombine::plan(&lists, &st.opts);
+            let b = recombine::plan(&lists, &Options { within: other, ..st.opts });
+            a.iter().map(|p| (p.file, p.idx)).eq(b.iter().map(|p| (p.file, p.idx)))
+        };
         let (mut open, mut add, mut add_open, mut clear, mut save, mut close) = (true, false, false, false, false, false);
         let mut mv: Option<(usize, usize)> = None;
+        let mut rec_mv: Option<(usize, usize)> = None;
+        let mut reset_order = false;
         let mut remove: Option<usize> = None;
         let mut toggles: Vec<((PathBuf, usize), bool)> = vec![];
-        self.base_window(ctx, "Recombine Split AMS Files", W_RECOMB, Vec2::new(1120.0, 760.0)).open(&mut open).resizable(true).show(ctx, |ui| {
+        // opens in the top left corner of the program window and fills it to the bottom and right
+        let cr = ctx.content_rect();
+        // never larger than the program window, so the bottom row (Save to ...) stays on screen and the edges can be dragged
+        let avail = Vec2::new((cr.width() - 24.0).max(420.0), (cr.height() - 56.0).max(360.0));
+        let size = Vec2::new(avail.x.min(1500.0), avail.y.min(900.0));
+        self.base_window(ctx, "Recombine Split AMS Files", W_RECOMB, size).max_size(avail).min_size(Vec2::new(420.0, 340.0)).open(&mut open).resizable(true).show(ctx, |ui| {
             tools_ui::pop_style(ui, 1.15);
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
             ui.label(RichText::new("Join .ams files that were exported in parts into one file. Pick the parts, drag them into the order they should follow each other, check the suggested order of the records, and save.").weak().small());
             ui.horizontal(|ui| {
                 add = ui.button("Add files ...").clicked();
-                add_open = ui.add_enabled(open_doc_path.is_some(), egui::Button::new("Add the open file")).clicked();
+                let label = if selected.len() > 1 { format!("Add the currently selected (n={})", selected.len()) } else { "Add the currently selected".to_string() };
+                add_open = ui.add_enabled(!selected.is_empty(), egui::Button::new(label)).on_hover_text("The files selected in the file browser (Shift+click for a range, Ctrl+click for single files); with nothing selected, the open file").clicked();
                 clear = ui.add_enabled(!st.files.is_empty(), egui::Button::new("Clear")).clicked();
             });
+            // the two columns get the height that is left above the bottom row
+            let body_h = (ui.available_height() - 70.0).max(120.0);
             ui.columns(2, |cols| {
                 // ---------------------------------------------------------------- the parts
-                let ui = &mut cols[0];
+                egui::ScrollArea::vertical().id_salt("rc-left").max_height(body_h).auto_shrink([false, false]).show(&mut cols[0], |ui| {
                 ui.label(RichText::new("Parts").strong());
                 ui.label(RichText::new("Drag a file above or below another one: the first one comes first.").weak().small());
                 egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -147,8 +201,42 @@ impl App {
                             ui.radio_value(&mut st.opts.within, Within::LetterThenNumber, "A1, A2, A3, then B1, B2, B3 ...");
                         });
                     });
-                    ui.checkbox(&mut st.opts.skip_duplicates, "Leave out records that are identical to an earlier one");
-                    ui.checkbox(&mut st.opts.one_per_name, "Keep one record per specimen name (the file listed last wins)");
+                    ui.label("Records that are identical to an earlier one:");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.radio_value(&mut st.opts.skip_duplicates, true, "Leave them out").on_hover_text("Only a record that is byte for byte the same as an earlier one is left out");
+                        ui.radio_value(&mut st.opts.skip_duplicates, false, "Keep duplicates");
+                        let label = if st.show_dups { "(hide duplicates)" } else { "(show duplicates)" };
+                        if ui.add(egui::Label::new(RichText::new(label).weak()).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            st.show_dups = !st.show_dups;
+                        }
+                        ui.label(RichText::new(format!("{} found", dups.len())).weak().small());
+                    });
+                    if st.show_dups {
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            egui::ScrollArea::both().id_salt("rc-dups").max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
+                                if dups.is_empty() {
+                                    ui.label(RichText::new("No record is identical to an earlier one.").weak());
+                                } else {
+                                    egui::Grid::new("rc-dup-grid").striped(true).num_columns(4).spacing([14.0, 4.0]).show(ui, |ui| {
+                                        for hd in ["#", "Specimen", "In file", "Identical to"] {
+                                            ui.label(RichText::new(hd).strong());
+                                        }
+                                        ui.end_row();
+                                        for (i, (name, file, of)) in dups.iter().enumerate() {
+                                            ui.label(RichText::new((i + 1).to_string()).weak());
+                                            ui.label(name);
+                                            ui.label(RichText::new(file).small().weak());
+                                            ui.label(RichText::new(of).small().weak());
+                                            ui.end_row();
+                                        }
+                                    });
+                                }
+                            });
+                        });
+                    }
+                    ui.checkbox(&mut st.opts.one_per_name, "Keep one record per specimen name (the file listed last wins)")
+                        .on_hover_text("For specimens that were measured again: when the same name occurs in several parts with different data, only the record from the part listed last is kept and the older ones are left out. (Leaving out duplicates only drops records that are exactly the same.)");
                     if !st.opts.order {
                         ui.label(RichText::new("Not ordered: the files follow each other in the order of the list, the records stay as they are in each file.").weak().small());
                     }
@@ -169,15 +257,28 @@ impl App {
                     }).weak().small());
                 });
 
+                });
+
                 // ---------------------------------------------------------------- the result
                 let ui = &mut cols[1];
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Combined file").strong());
                     ui.label(RichText::new(format!("{n_in} of {} records", planned.len())).small().color(if n_in == planned.len() { ok } else { warn }));
+                    if st.order.is_some() && ui.small_button("Back to the suggested order").on_hover_text("Forget the order you dragged the records into").clicked() {
+                        reset_order = true;
+                    }
                 });
+                if st.opts.order && !planned.is_empty() {
+                    if n_readable < planned.len() {
+                        ui.label(RichText::new(format!("{n_readable} of {} names read as letter + number (A1) or number + letter (1A). The others keep their file order, so the A1 B1 C1 / A1 A2 A3 choice cannot move them.", planned.len())).small().color(warn));
+                    } else if same_both {
+                        ui.label(RichText::new("For these names both orders give the same list (for example only one letter, or one number).").small().color(warn));
+                    }
+                }
+                ui.label(RichText::new("Drag a record by its handle to another place in the list; untick it to leave it out.").weak().small());
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    let h = (ui.available_height() - 120.0).max(260.0);
+                    let h = (body_h - 60.0).max(80.0);
                     egui::ScrollArea::both().id_salt("rc-result").max_height(h).auto_shrink([false, false]).show(ui, |ui| {
                         egui::Grid::new("rc-grid").striped(true).num_columns(5).spacing([14.0, 4.0]).show(ui, |ui| {
                             for hd in ["", "#", "Specimen", "From", "Note"] {
@@ -185,7 +286,7 @@ impl App {
                             }
                             ui.end_row();
                             let mut k = 0;
-                            for p in &planned {
+                            for (row, p) in planned.iter().enumerate() {
                                 let f = &st.files[good[p.file]];
                                 let mut inc = included(&st, p);
                                 let was = inc;
@@ -197,7 +298,20 @@ impl App {
                                 }
                                 let dim = |s: String| if inc { RichText::new(s) } else { RichText::new(s).weak().strikethrough() };
                                 ui.label(if inc { RichText::new(k.to_string()).weak() } else { RichText::new("\u{2013}").weak() });
-                                ui.label(dim(f.records[p.idx].name.clone()));
+                                let item = ui.dnd_drag_source(ui.make_persistent_id(("rc-rec", row)), row, |ui| {
+                                    ui.style_mut().interaction.selectable_labels = false;
+                                    ui.label(RichText::new("\u{2630}").weak());
+                                    ui.label(dim(f.records[p.idx].name.clone()));
+                                });
+                                let resp = item.response;
+                                if let (Some(pos), Some(_)) = (ui.input(|i| i.pointer.interact_pos()), resp.dnd_hover_payload::<usize>()) {
+                                    let above = pos.y < resp.rect.center().y;
+                                    let y = if above { resp.rect.top() - 2.0 } else { resp.rect.bottom() + 2.0 };
+                                    ui.painter().hline(resp.rect.left() - 60.0..=resp.rect.right() + 260.0, y, Stroke::new(2.5, accent));
+                                    if let Some(from) = resp.dnd_release_payload::<usize>() {
+                                        rec_mv = Some((*from, if above { row } else { row + 1 }));
+                                    }
+                                }
                                 ui.label(RichText::new(&f.name).small().weak());
                                 ui.label(RichText::new(match p.skip {
                                     Some(Skip::Duplicate) => "identical to an earlier record",
@@ -217,7 +331,7 @@ impl App {
                 });
             });
             ui.horizontal(|ui| {
-                let go = egui::Button::new(RichText::new("Save combined file ...").strong().color(Color32::WHITE)).fill(if dark { Color32::from_rgb(52, 104, 200) } else { Color32::from_rgb(47, 111, 222) }).min_size(Vec2::new(190.0, 0.0));
+                let go = egui::Button::new(RichText::new("Save to ...").strong().color(Color32::WHITE)).fill(if dark { Color32::from_rgb(52, 104, 200) } else { Color32::from_rgb(47, 111, 222) }).min_size(Vec2::new(190.0, 0.0));
                 save = ui.add_enabled(n_in > 0, go).clicked();
                 ui.checkbox(&mut st.open_after, "open it afterwards");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -232,12 +346,30 @@ impl App {
         if close {
             open = false;
         }
+        if st.opts != opts_before || reset_order || rec_mv.is_some() || mv.is_some() {
+            // the table on the right was drawn before the change: run this pass again before anything is shown
+            ctx.request_repaint();
+            ctx.request_discard("recombine: options changed");
+        }
+        if st.opts != opts_before || reset_order {
+            // a new suggestion replaces what was dragged by hand
+            st.order = None;
+        }
+        if let Some((from, to)) = rec_mv {
+            let mut keys: Vec<(PathBuf, usize)> = planned.iter().map(|p| (st.files[good[p.file]].path.clone(), p.idx)).collect();
+            if from < keys.len() {
+                let k = keys.remove(from);
+                keys.insert(if to > from { to - 1 } else { to }.min(keys.len()), k);
+                st.order = Some(keys);
+            }
+        }
         for (k, v) in toggles {
             st.manual.insert(k, v);
         }
         if let Some(i) = remove {
             let f = st.files.remove(i);
             st.manual.retain(|k, _| k.0 != f.path);
+            st.order = None;
         }
         if let Some((from, to)) = mv {
             // from / to are positions in the whole list (files with errors included)
@@ -245,11 +377,13 @@ impl App {
                 let f = st.files.remove(from);
                 let at = if to > from { to - 1 } else { to }.min(st.files.len());
                 st.files.insert(at, f);
+                st.order = None;
             }
         }
         if clear {
             st.files.clear();
             st.manual.clear();
+            st.order = None;
             st.msg.clear();
         }
         self.rc = st;
@@ -265,9 +399,7 @@ impl App {
             }
         }
         if add_open {
-            if let Some(p) = open_doc_path {
-                self.rc_add(vec![p]);
-            }
+            self.rc_add(selected);
         }
         if save {
             self.rc_save();
@@ -277,9 +409,8 @@ impl App {
 
     fn rc_save(&mut self) {
         let st = &self.rc;
-        let good: Vec<&SrcFile> = st.files.iter().filter(|f| f.error.is_none()).collect();
-        let lists: Vec<Vec<RecInfo>> = good.iter().map(|f| f.records.clone()).collect();
-        let planned = recombine::plan(&lists, &st.opts);
+        let (idx, planned) = plan_ordered(st);
+        let good: Vec<&SrcFile> = idx.iter().map(|&i| &st.files[i]).collect();
         let mut bytes: Vec<u8> = vec![];
         let mut n = 0;
         for p in &planned {

@@ -264,6 +264,103 @@ pub fn range_of(vals: impl Iterator<Item = f64>, pad: f64) -> (f64, f64) {
     (lo - d, hi + d)
 }
 
+/// The plot rectangle `draw_axes` leaves inside `outer`.
+pub fn plot_rect(outer: Rect, ylog: bool) -> Rect {
+    Rect::from_min_max(Pos2::new(outer.min.x + if ylog { 62.0 } else { 54.0 }, outer.min.y + 12.0), Pos2::new(outer.max.x - 16.0, outer.max.y - 46.0))
+}
+
+/// Zoom and pan of an x-y plot: the visible part of the full range as fractions (x from the left, y from the bottom).
+/// Ctrl + scroll zooms about the pointer, scroll or middle-drag pans a zoomed plot, Esc resets.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ZoomView {
+    pub x: (f64, f64),
+    pub y: (f64, f64),
+}
+
+impl Default for ZoomView {
+    fn default() -> Self {
+        ZoomView { x: (0.0, 1.0), y: (0.0, 1.0) }
+    }
+}
+
+impl ZoomView {
+    pub const MAX: f64 = 60.0;
+
+    pub fn is_zoomed(&self) -> bool {
+        self.x.0 > 1e-9 || self.x.1 < 1.0 - 1e-9 || self.y.0 > 1e-9 || self.y.1 < 1.0 - 1e-9
+    }
+
+    pub fn reset(&mut self) {
+        *self = ZoomView::default();
+    }
+
+    fn zoom_axis(a: (f64, f64), u: f64, factor: f64) -> (f64, f64) {
+        let w = a.1 - a.0;
+        let nw = (w / factor).clamp(1.0 / Self::MAX, 1.0);
+        let na = (a.0 + u * w - u * nw).clamp(0.0, 1.0 - nw);
+        (na, na + nw)
+    }
+
+    fn pan_axis(a: (f64, f64), d: f64) -> (f64, f64) {
+        let w = a.1 - a.0;
+        let na = (a.0 + d * w).clamp(0.0, 1.0 - w);
+        (na, na + w)
+    }
+
+    /// Zooms by `factor` about the point (`u`, `v`) of the visible window (0..1, v from the bottom).
+    pub fn zoom_about(&mut self, u: f64, v: f64, factor: f64) {
+        self.x = Self::zoom_axis(self.x, u, factor);
+        self.y = Self::zoom_axis(self.y, v, factor);
+    }
+
+    /// Moves the window by fractions of itself.
+    pub fn pan(&mut self, du: f64, dv: f64) {
+        self.x = Self::pan_axis(self.x, du);
+        self.y = Self::pan_axis(self.y, dv);
+    }
+
+    /// The visible ranges inside the full ones.
+    pub fn apply(&self, xr: (f64, f64), yr: (f64, f64)) -> ((f64, f64), (f64, f64)) {
+        let at = |r: (f64, f64), f: (f64, f64)| (r.0 + (r.1 - r.0) * f.0, r.0 + (r.1 - r.0) * f.1);
+        (at(xr, self.x), at(yr, self.y))
+    }
+}
+
+/// Ctrl + scroll (or a pinch) zooms about the pointer, scroll and middle-drag pan a zoomed plot.
+fn handle_zoom(ui: &Ui, resp: &Response, plot: Rect, view: &mut ZoomView) {
+    let mods = ui.input(|i| i.modifiers);
+    if resp.hovered() {
+        if let Some(h) = resp.hover_pos() {
+            let (zd, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
+            if (zd - 1.0).abs() > 1e-4 {
+                let u = ((h.x - plot.min.x) / plot.width()).clamp(0.0, 1.0) as f64;
+                let v = ((plot.max.y - h.y) / plot.height()).clamp(0.0, 1.0) as f64;
+                view.zoom_about(u, v, (zd as f64).powf(0.7));
+            } else if view.is_zoomed() && scroll != Vec2::ZERO && !(mods.ctrl || mods.command) {
+                view.pan(-(scroll.x / plot.width()) as f64, (scroll.y / plot.height()) as f64);
+            }
+        }
+    }
+    if resp.dragged_by(egui::PointerButton::Middle) {
+        let d = resp.drag_delta();
+        view.pan(-(d.x / plot.width()) as f64, (d.y / plot.height()) as f64);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+}
+
+/// A small label box next to a marker (Alt + hover), kept inside `bounds`.
+fn label_box(pa: &egui::Painter, bounds: Rect, at: Pos2, text: String, th: &Theme) {
+    let galley = pa.layout_no_wrap(text, FontId::proportional(12.5), th.ink());
+    let size = galley.size() + Vec2::new(12.0, 6.0);
+    let mut pos = at + Vec2::new(11.0, -size.y - 6.0);
+    pos.x = pos.x.min(bounds.max.x - size.x - 2.0).max(bounds.min.x + 2.0);
+    pos.y = pos.y.max(bounds.min.y + 2.0).min(bounds.max.y - size.y - 2.0);
+    let r = Rect::from_min_size(pos, size);
+    pa.rect(r, 4.0, th.canvas(), Stroke::new(1.0, th.line()), egui::StrokeKind::Inside);
+    pa.galley(pos + Vec2::new(6.0, 3.0), galley, th.ink());
+    pa.circle_stroke(at, 7.5, Stroke::new(1.6, th.accent));
+}
+
 struct Frame2D {
     plot: Rect,
     x: (f64, f64),
@@ -299,15 +396,19 @@ fn log_ticks(pa: &egui::Painter, lo: f64, hi: f64, mut draw: impl FnMut(f64, boo
 }
 
 fn draw_axes(ui: &Ui, outer: Rect, x: (f64, f64), y: (f64, f64), xlabel: &str, ylabel: &str, th: &Theme, xlog: bool, ylog: bool) -> Frame2D {
+    draw_axes_ex(ui, outer, x, y, xlabel, ylabel, th, xlog, ylog, false)
+}
+
+/// `xcat`: the X axis holds categories, which the caller labels itself (no numeric ticks).
+fn draw_axes_ex(ui: &Ui, outer: Rect, x: (f64, f64), y: (f64, f64), xlabel: &str, ylabel: &str, th: &Theme, xlog: bool, ylog: bool, xcat: bool) -> Frame2D {
     let pa = ui.painter_at(outer);
-    let plot = Rect::from_min_max(
-        Pos2::new(outer.min.x + if ylog { 62.0 } else { 54.0 }, outer.min.y + 12.0),
-        Pos2::new(outer.max.x - 16.0, outer.max.y - 46.0),
-    );
+    let plot = plot_rect(outer, ylog);
     let f = Frame2D { plot, x, y };
     pa.rect_filled(plot, 2.0, th.canvas());
     let font = FontId::proportional(11.0);
-    if xlog {
+    if xcat {
+        // categories: the caller writes the labels
+    } else if xlog {
         log_ticks(&pa, x.0, x.1, |v, major, label| {
             let s = f.to_screen(v, y.0);
             pa.line_segment([Pos2::new(s.x, plot.max.y), Pos2::new(s.x, plot.max.y + if major { 5.0 } else { 3.0 })], Stroke::new(1.0, th.line()));
@@ -627,7 +728,7 @@ fn axis_range(cfg: &AxisCfg, vals: &[f64], scale: f64, pad: f64) -> (f64, f64) {
 }
 
 /// Histogram of one parameter (N vs parameter).
-pub fn histogram(ui: &mut Ui, rect: Rect, pts: &[Pt], bins: usize, cfg: &AxisCfg, th: &Theme) -> PlotOut {
+pub fn histogram(ui: &mut Ui, rect: Rect, pts: &[Pt], bins: usize, cfg: &AxisCfg, th: &Theme, salt: &str) -> PlotOut {
     let exp = scale_exp(cfg.param, pts.iter().map(|p| p.vals[0]));
     let scale = if cfg.log { 1.0 } else { 10f64.powi(-exp) };
     let (vals, hidden) = axis_values(pts, cfg, scale);
@@ -652,7 +753,7 @@ pub fn histogram(ui: &mut Ui, rect: Rect, pts: &[Pt], bins: usize, cfg: &AxisCfg
         pa.text(Pos2::new(f.plot.max.x - 6.0, f.plot.min.y + 6.0), Align2::RIGHT_TOP, format!("{hidden} values <= 0 not shown"), FontId::proportional(11.0), th.faint());
     }
     let mut out = PlotOut::default();
-    let resp = ui.interact(f.plot, ui.scope_id().with("hist"), Sense::hover());
+    let resp = ui.interact(f.plot, ui.scope_id().with(("hist", salt)), Sense::hover());
     let w = (hi - lo) / nb as f64;
     for (i, n) in counts.iter().enumerate() {
         if *n == 0 {
@@ -678,10 +779,12 @@ pub struct ScatterSpec<'a> {
     pub diagonal: bool,
     pub conf: bool,
     pub connect: bool,
+    /// Join the points in the order of their x values (a line plot) instead of file order.
+    pub sort_x: bool,
     pub salt: &'a str,
 }
 
-pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f32, th: &Theme) -> PlotOut {
+pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f32, th: &Theme, view: &mut ZoomView) -> PlotOut {
     let xexp = scale_exp(spec.x.param, pts.iter().map(|p| p.vals[0]));
     let yexp = scale_exp(spec.y.param, pts.iter().map(|p| p.vals[0]));
     let (xs_, xh) = axis_values(pts, spec.x, if spec.x.log { 1.0 } else { 10f64.powi(-xexp) });
@@ -693,6 +796,11 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
     let xs: Vec<(usize, f64, f64)> = xs_.iter().filter_map(|(i, x)| ymap.get(i).map(|y| (*i, *x, *y))).collect();
     let xr = axis_range(spec.x, &xs.iter().map(|v| v.1).collect::<Vec<_>>(), if spec.x.log { 1.0 } else { 10f64.powi(-xexp) }, 0.06);
     let yr = axis_range(spec.y, &xs.iter().map(|v| v.2).collect::<Vec<_>>(), if spec.y.log { 1.0 } else { 10f64.powi(-yexp) }, 0.06);
+    // zoom and pan first, so that the axes are drawn for the range that is visible
+    let plot0 = plot_rect(rect, spec.y.log);
+    let resp = ui.interact(plot0, ui.scope_id().with(spec.salt), Sense::click_and_drag());
+    handle_zoom(ui, &resp, plot0, view);
+    let (xr, yr) = view.apply(xr, yr);
     let f = draw_axes(ui, rect, xr, yr, &axis_label(spec.x, xexp), &axis_label(spec.y, yexp), th, spec.x.log, spec.y.log);
     let pa = ui.painter_at(rect);
     if xh + yh > 0 {
@@ -710,13 +818,16 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
         }
     }
     if spec.connect {
-        let pts2: Vec<Pos2> = xs.iter().map(|(_, x, y)| f.to_screen(*x, *y)).collect();
+        let mut order: Vec<&(usize, f64, f64)> = xs.iter().collect();
+        if spec.sort_x {
+            order.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        let pts2: Vec<Pos2> = order.iter().map(|(_, x, y)| f.to_screen(*x, *y)).collect();
         if pts2.len() > 1 {
             clip.add(Shape::line(pts2, egui::epaint::PathStroke::new(1.0, th.faint())));
         }
     }
-    let resp = ui.interact(f.plot, ui.scope_id().with(spec.salt), Sense::click_and_drag());
-    let (live, done) = band(ui, &resp, "band");
+    let (live, done) = if resp.dragged_by(egui::PointerButton::Middle) { (None, None) } else { band(ui, &resp, "band") };
     let mut inside: Vec<usize> = vec![];
     let hover = resp.hover_pos();
     let mut best: Option<(f32, usize)> = None;
@@ -749,12 +860,211 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
     if done.is_some() {
         out.band = Some(inside);
     }
+    if view.is_zoomed() {
+        pa.text(Pos2::new(rect.max.x - 8.0, rect.max.y - 4.0), Align2::RIGHT_BOTTOM, format!("zoom \u{d7}{:.1}   Esc resets", 1.0 / (view.x.1 - view.x.0).min(view.y.1 - view.y.0)), FontId::proportional(11.0), th.faint());
+    }
+    if xs.is_empty() {
+        pa.text(f.plot.center(), Align2::CENTER_CENTER, "No specimens to show", FontId::proportional(13.0), th.faint());
+    }
     if let Some((_, i)) = best {
         let p = &pts[i];
         out.hover = Some(format!("{}   {} = {:.4}   {} = {:.4}", p.name, spec.x.label(), p.vals[spec.x.param], spec.y.label(), p.vals[spec.y.param]));
+        // Alt + hover: the sub-specimen ID next to the marker, at once
+        if ui.input(|i| i.modifiers.alt) {
+            if let Some((_, _, y)) = xs.iter().find(|(k, _, _)| *k == i) {
+                let x = xs.iter().find(|(k, _, _)| *k == i).map(|v| v.1).unwrap_or(0.0);
+                label_box(&pa, f.plot, f.to_screen(x, *y), p.name.clone(), th);
+            }
+        }
         if resp.clicked() {
             out.click = Some(p.idx);
         }
+    }
+    out
+}
+
+/// Which plot the top right pane draws.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum XyKind {
+    Histogram,
+    Scatter,
+    Line,
+    Bar,
+    Box,
+}
+
+impl XyKind {
+    pub const ALL: [XyKind; 5] = [XyKind::Histogram, XyKind::Scatter, XyKind::Line, XyKind::Bar, XyKind::Box];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            XyKind::Histogram => "Histogram (N vs parameter)",
+            XyKind::Scatter => "Scatter plot",
+            XyKind::Line => "Line plot",
+            XyKind::Bar => "Bar plot (mean of Y per class of X)",
+            XyKind::Box => "Box plot (Y per class of X)",
+        }
+    }
+
+    pub fn short(self) -> &'static str {
+        match self {
+            XyKind::Histogram => "Histogram",
+            XyKind::Scatter => "Scatter",
+            XyKind::Line => "Line",
+            XyKind::Bar => "Bar",
+            XyKind::Box => "Box",
+        }
+    }
+}
+
+/// How a bar or box plot forms its groups.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GroupBy {
+    /// Equal classes of the X parameter.
+    Classes,
+    /// One group per sample (the specimen name without its sub-specimen part, ZZ01 for ZZ01-A1).
+    Sample,
+}
+
+/// Bar plot (mean and SD of Y) or box plot (quartiles, whiskers at 1.5 IQR, outliers) of Y per group: classes of X,
+/// or one group per sample.
+pub fn binned_plot(ui: &mut Ui, rect: Rect, pts: &[Pt], kind: XyKind, x: &AxisCfg, y: &AxisCfg, bins: usize, group: GroupBy, th: &Theme, view: &mut ZoomView, salt: &str) -> PlotOut {
+    let xexp = scale_exp(x.param, pts.iter().map(|p| p.vals[0]));
+    let yexp = scale_exp(y.param, pts.iter().map(|p| p.vals[0]));
+    let (xscale, yscale) = (if x.log { 1.0 } else { 10f64.powi(-xexp) }, if y.log { 1.0 } else { 10f64.powi(-yexp) });
+    let (xs_, _) = axis_values(pts, x, xscale);
+    let (ys_, _) = axis_values(pts, y, yscale);
+    let ymap: std::collections::HashMap<usize, f64> = ys_.into_iter().collect();
+    let data: Vec<(usize, f64, f64)> = xs_.iter().filter_map(|(i, xv)| ymap.get(i).map(|yv| (*i, *xv, *yv))).collect();
+    let by_sample = group == GroupBy::Sample;
+    let mut labels: Vec<String> = vec![];
+    let (xlo, xhi, nb, mut groups): (f64, f64, usize, Vec<Vec<f64>>) = if by_sample {
+        // one group per sample, in the order a person reads the names
+        let mut map: Vec<(String, Vec<f64>)> = vec![];
+        for (i, _, yv) in &data {
+            let sample = ams_core::recombine::split_id(&pts[*i].name).0;
+            match map.iter_mut().find(|(n, _)| *n == sample) {
+                Some((_, v)) => v.push(*yv),
+                None => map.push((sample, vec![*yv])),
+            }
+        }
+        map.sort_by(|a, b| ams_core::recombine::natural_cmp(&a.0, &b.0));
+        let n = map.len().max(1);
+        labels = map.iter().map(|(n, _)| n.clone()).collect();
+        (0.0, n as f64, n, map.into_iter().map(|(_, v)| v).collect())
+    } else {
+        let (a, b) = axis_range(x, &data.iter().map(|v| v.1).collect::<Vec<_>>(), xscale, 0.0);
+        let (lo, hi) = if (b - a).abs() < 1e-30 { (a - 0.5, b + 0.5) } else { (a, b) };
+        let nb = bins.clamp(1, 60);
+        let w = (hi - lo) / nb as f64;
+        let mut g: Vec<Vec<f64>> = vec![vec![]; nb];
+        for (_, xv, yv) in &data {
+            if *xv < lo || *xv > hi {
+                continue;
+            }
+            g[(((xv - lo) / w).floor() as usize).min(nb - 1)].push(*yv);
+        }
+        (lo, hi, nb, g)
+    };
+    let w = (xhi - xlo) / nb as f64;
+    for g in &mut groups {
+        g.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    let quant = |g: &[f64], q: f64| -> f64 {
+        let pos = q * (g.len() - 1) as f64;
+        let (i, fr) = (pos.floor() as usize, pos - pos.floor());
+        if i + 1 < g.len() { g[i] * (1.0 - fr) + g[i + 1] * fr } else { g[i] }
+    };
+    let mean_sd = |g: &[f64]| -> (f64, f64) {
+        let m = g.iter().sum::<f64>() / g.len() as f64;
+        let sd = if g.len() > 1 { (g.iter().map(|v| (v - m).powi(2)).sum::<f64>() / (g.len() - 1) as f64).sqrt() } else { 0.0 };
+        (m, sd)
+    };
+    // the Y range that holds everything that is drawn
+    let mut ext: Vec<f64> = vec![];
+    for g in groups.iter().filter(|g| !g.is_empty()) {
+        if kind == XyKind::Bar {
+            let (m, sd) = mean_sd(g);
+            ext.extend([m - sd, m + sd, 0.0]);
+        } else {
+            ext.extend([g[0], g[g.len() - 1]]);
+        }
+    }
+    let yr = if y.auto || ext.is_empty() { range_of(ext.iter().copied(), 0.08) } else { axis_range(y, &[], yscale, 0.0) };
+    let plot0 = plot_rect(rect, y.log);
+    let resp = ui.interact(plot0, ui.scope_id().with(salt), Sense::click_and_drag());
+    handle_zoom(ui, &resp, plot0, view);
+    let (xr, yr) = view.apply((xlo, xhi), yr);
+    let xlabel = if by_sample { "Sample (specimen name)".to_string() } else { axis_label(x, xexp) };
+    let f = draw_axes_ex(ui, rect, xr, yr, &xlabel, &axis_label(y, yexp), th, x.log && !by_sample, y.log, by_sample);
+    let pa = ui.painter_at(f.plot);
+    let mut out = PlotOut::default();
+    let hover = resp.hover_pos();
+    let base = f.to_screen(xr.0, 0.0_f64.clamp(yr.0, yr.1)).y;
+    if by_sample {
+        // the sample names under their groups (every other one when they would touch)
+        let outer = ui.painter_at(rect);
+        let step_px = f.to_screen(1.0, 0.0).x - f.to_screen(0.0, 0.0).x;
+        let skip = ((62.0 / step_px.max(1.0)).ceil() as usize).max(1);
+        for (b, l) in labels.iter().enumerate() {
+            let cx = f.to_screen(b as f64 + 0.5, 0.0).x;
+            if b % skip == 0 && cx > f.plot.min.x && cx < f.plot.max.x {
+                outer.text(Pos2::new(cx, f.plot.max.y + 6.0), Align2::CENTER_TOP, l, FontId::proportional(11.0), th.ink());
+            }
+        }
+    }
+    for (b, g) in groups.iter().enumerate() {
+        if g.is_empty() {
+            continue;
+        }
+        let (x0, x1) = (xlo + b as f64 * w, xlo + (b + 1) as f64 * w);
+        let pad = w * 0.12;
+        let (sl, sr) = (f.to_screen(x0 + pad, 0.0).x, f.to_screen(x1 - pad, 0.0).x);
+        let mid = (sl + sr) / 2.0;
+        let fill = th.accent.gamma_multiply(0.75);
+        let stroke = Stroke::new(1.2, th.line());
+        let info;
+        if kind == XyKind::Bar {
+            let (m, sd) = mean_sd(g);
+            let top = f.to_screen(x0, m).y;
+            let r = Rect::from_min_max(Pos2::new(sl, top.min(base)), Pos2::new(sr, top.max(base)));
+            pa.rect_filled(r, 0.0, fill);
+            pa.rect_stroke(r, 0.0, stroke, egui::StrokeKind::Inside);
+            let (a, c) = (f.to_screen(x0, m - sd).y, f.to_screen(x0, m + sd).y);
+            pa.line_segment([Pos2::new(mid, a), Pos2::new(mid, c)], stroke);
+            for yy in [a, c] {
+                pa.line_segment([Pos2::new(mid - 4.0, yy), Pos2::new(mid + 4.0, yy)], stroke);
+            }
+            info = if by_sample { format!("{}: N = {}   mean = {:.4}   SD = {:.4}", labels.get(b).cloned().unwrap_or_default(), g.len(), m / yscale, sd / yscale) } else { format!("{} {:.3} to {:.3}: N = {}   mean = {:.4}   SD = {:.4}", x.label(), x0 / xscale, x1 / xscale, g.len(), m / yscale, sd / yscale) };
+        } else {
+            let (q1, med, q3) = (quant(g, 0.25), quant(g, 0.5), quant(g, 0.75));
+            let iqr = q3 - q1;
+            let lo_w = g.iter().copied().find(|v| *v >= q1 - 1.5 * iqr).unwrap_or(g[0]);
+            let hi_w = g.iter().rev().copied().find(|v| *v <= q3 + 1.5 * iqr).unwrap_or(g[g.len() - 1]);
+            let r = Rect::from_min_max(Pos2::new(sl, f.to_screen(x0, q3).y), Pos2::new(sr, f.to_screen(x0, q1).y));
+            pa.rect_filled(r, 0.0, fill);
+            pa.rect_stroke(r, 0.0, stroke, egui::StrokeKind::Inside);
+            pa.line_segment([Pos2::new(sl, f.to_screen(x0, med).y), Pos2::new(sr, f.to_screen(x0, med).y)], Stroke::new(2.0, th.ink()));
+            pa.line_segment([Pos2::new(mid, f.to_screen(x0, q3).y), Pos2::new(mid, f.to_screen(x0, hi_w).y)], stroke);
+            pa.line_segment([Pos2::new(mid, f.to_screen(x0, q1).y), Pos2::new(mid, f.to_screen(x0, lo_w).y)], stroke);
+            for v in [lo_w, hi_w] {
+                pa.line_segment([Pos2::new(mid - 5.0, f.to_screen(x0, v).y), Pos2::new(mid + 5.0, f.to_screen(x0, v).y)], stroke);
+            }
+            for v in g.iter().filter(|v| **v < lo_w || **v > hi_w) {
+                pa.circle_stroke(Pos2::new(mid, f.to_screen(x0, *v).y), 2.5, Stroke::new(1.0, th.line()));
+            }
+            let head = if by_sample { labels.get(b).cloned().unwrap_or_default() } else { format!("{} {:.3} to {:.3}", x.label(), x0 / xscale, x1 / xscale) };
+            info = format!("{head}: N = {}   median = {:.4}   Q1 = {:.4}   Q3 = {:.4}   min = {:.4}   max = {:.4}", g.len(), med / yscale, q1 / yscale, q3 / yscale, g[0] / yscale, g[g.len() - 1] / yscale);
+        }
+        if hover.map_or(false, |h| h.x >= f.to_screen(x0, 0.0).x && h.x <= f.to_screen(x1, 0.0).x && f.plot.contains(h)) {
+            out.hover = Some(info);
+        }
+    }
+    if view.is_zoomed() {
+        ui.painter_at(rect).text(Pos2::new(rect.max.x - 8.0, rect.max.y - 4.0), Align2::RIGHT_BOTTOM, format!("zoom \u{d7}{:.1}   Esc resets", 1.0 / (view.x.1 - view.x.0).min(view.y.1 - view.y.0)), FontId::proportional(11.0), th.faint());
+    }
+    if data.is_empty() {
+        pa.text(f.plot.center(), Align2::CENTER_CENTER, "No specimens to show", FontId::proportional(13.0), th.faint());
     }
     out
 }

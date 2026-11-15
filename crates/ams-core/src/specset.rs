@@ -42,6 +42,10 @@ fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<SpecFolder>) {
             continue;
         }
         if p.is_dir() {
+            // folders of exported results (File > Save as .ams, Drill Core to Geo) are not specimens
+            if matches!(name.as_str(), "_geo" | "_raw" | "_corr") {
+                continue;
+            }
             subs.push(p);
         } else if p.extension().map_or(false, |x| x.eq_ignore_ascii_case("ams")) {
             files.push(name);
@@ -265,6 +269,19 @@ mod tests {
         let names: Vec<&str> = s.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["ZZ01", "ZZ02", "ZZ03/sub"]);
         assert_eq!(s[0].files, ["ZZ01.ams", "ZZ01_use.ams"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folders_of_exported_results_are_not_specimens() {
+        let dir = std::env::temp_dir().join(format!("specset-geo-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("ZZ01").join("_geo")).unwrap();
+        std::fs::write(dir.join("ZZ01").join("ZZ01_use.ams"), b"").unwrap();
+        std::fs::write(dir.join("ZZ01").join("_geo").join("ZZ01_use_geo.ams"), b"").unwrap();
+        let s = scan(&dir);
+        assert_eq!(s.len(), 1, "{:?}", s.iter().map(|f| f.name.clone()).collect::<Vec<_>>());
+        assert_eq!(s[0].name, "ZZ01");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
