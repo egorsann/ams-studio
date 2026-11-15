@@ -6,7 +6,7 @@
 use super::{info_icon, tools_ui, App, W_COREVIEW};
 use crate::core_view::{self, Cube};
 use egui::{Align, Color32, ColorImage, Layout, Pos2, Rect, RichText, Stroke, StrokeKind, TextureHandle, TextureOptions, Ui, Vec2};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver};
@@ -107,20 +107,42 @@ fn parse_photo(stem: &str) -> Option<(String, char, u32)> {
     Some((id.to_string(), letter, digits.parse().ok()?))
 }
 
+/// The photo formats that are read, in the order that is preferred when one cube has the same photo in several.
+/// HEIC / HEIF is not among them (it needs the libheif C library); convert those photos to PNG or JPG first.
+const PHOTO_EXT: [&str; 5] = ["png", "tif", "tiff", "jpg", "jpeg"];
+
+/// Position of the file's extension in `PHOTO_EXT`, `None` when it is not a readable photo format.
+fn photo_rank(p: &Path) -> Option<usize> {
+    let x = p.extension()?.to_string_lossy().to_lowercase();
+    PHOTO_EXT.iter().position(|e| *e == x)
+}
+
+/// Decodes a photo, turned upright by its EXIF orientation (phone / camera JPEGs and TIFFs carry one).
+fn open_photo(path: &Path) -> Option<image::DynamicImage> {
+    let mut dec = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_decoder().ok()?;
+    let orient = image::ImageDecoder::orientation(&mut dec).unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = image::DynamicImage::from_decoder(dec).ok()?;
+    img.apply_orientation(orient);
+    Some(img)
+}
+
 /// The cube photos directly in `dir`: (specimen id, letter, slice, path).
 fn photos_in(dir: &Path) -> Vec<(String, char, u32, PathBuf)> {
     let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
-    rd.filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let p = e.path();
-            if !p.is_file() || !p.extension().map_or(false, |x| x.eq_ignore_ascii_case("png")) {
-                return None;
-            }
-            let stem = p.file_stem()?.to_string_lossy().to_string();
-            let (id, l, s) = parse_photo(&stem)?;
-            Some((id, l, s, p))
-        })
-        .collect()
+    // one photo per cube: when the same cube exists in several formats the preferred format wins
+    let mut best: HashMap<(String, char, u32), (usize, PathBuf)> = HashMap::new();
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        let Some(rank) = photo_rank(&p).filter(|_| p.is_file()) else { continue };
+        let Some((id, l, s)) = p.file_stem().and_then(|s| parse_photo(&s.to_string_lossy())) else { continue };
+        let slot = best.entry((id.to_uppercase(), l, s)).or_insert((rank, p.clone()));
+        if rank < slot.0 || (rank == slot.0 && p < slot.1) {
+            *slot = (rank, p);
+        }
+    }
+    let mut out: Vec<_> = best.into_iter().map(|((_, l, s), (_, p))| (p.file_stem().and_then(|f| parse_photo(&f.to_string_lossy())).map(|x| x.0).unwrap_or_default(), l, s, p)).collect();
+    out.sort_by(|a, b| a.3.cmp(&b.3));
+    out
 }
 
 fn most_common(ids: impl Iterator<Item = String>) -> String {
@@ -145,8 +167,8 @@ fn scan(root: &Path, needle: &str) -> ScanResult {
             break;
         }
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        let mut n = 0usize;
         let mut ids: Vec<String> = vec![];
+        let mut cubes: HashSet<(String, char, u32)> = HashSet::new();
         for e in rd.filter_map(|e| e.ok()) {
             let p = e.path();
             let name = e.file_name().to_string_lossy().to_string();
@@ -154,13 +176,15 @@ fn scan(root: &Path, needle: &str) -> ScanResult {
                 if !name.starts_with('.') && depth < 14 {
                     stack.push((p, depth + 1));
                 }
-            } else if p.extension().map_or(false, |x| x.eq_ignore_ascii_case("png")) {
-                if let Some((id, _, _)) = p.file_stem().and_then(|s| parse_photo(&s.to_string_lossy())) {
-                    n += 1;
-                    ids.push(id);
+            } else if photo_rank(&p).is_some() {
+                if let Some((id, l, s)) = p.file_stem().and_then(|s| parse_photo(&s.to_string_lossy())) {
+                    if cubes.insert((id.to_uppercase(), l, s)) {
+                        ids.push(id);
+                    }
                 }
             }
         }
+        let n = cubes.len();
         if n >= 1 {
             let rel = dir.strip_prefix(root).map(|r| r.display().to_string()).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| ".".into());
             let f = Found { dir: dir.clone(), rel, n, id: most_common(ids.into_iter()) };
@@ -271,7 +295,7 @@ impl App {
             std::thread::spawn(move || loop {
                 let i = next.fetch_add(1, Ordering::SeqCst);
                 let Some((key, path, turn)) = items.get(i) else { break };
-                let Ok(img) = image::open(path) else { continue };
+                let Some(img) = open_photo(path) else { continue };
                 let mut rgba = img.thumbnail(TEX_PX, TEX_PX).to_rgba8();
                 rgba = match turn.rem_euclid(360) {
                     90 => image::imageops::rotate270(&rgba),
@@ -383,7 +407,7 @@ impl App {
             ui.spacing_mut().button_padding = Vec2::new(12.0, 6.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Which folder holds the cube photos?").strong().size(19.0));
-                info_icon(ui, "Pick a folder; the cube photos are searched for below it, however many folders down they are. A cube folder is a folder whose name contains the string below (cube_crops by default) and that holds photos named like DC26AB002_A12.png (specimen id, cube letter, slice). If no folder name contains the string, the folders that hold cube photos are listed and a string is suggested. The photos are only read: they are decoded into memory, nothing is written.");
+                info_icon(ui, "Pick a folder; the cube photos are searched for below it, however many folders down they are. A cube folder is a folder whose name contains the string below (cube_crops by default) and that holds photos named like DC26AB002_A12.png (specimen id, cube letter, slice). PNG, TIFF and JPG / JPEG photos are read (EXIF rotation is applied); HEIC / HEIF is not supported because it needs the libheif C library, so convert those photos to PNG or JPG first (one cube in several formats: PNG, then TIFF, then JPG is used). If no folder name contains the string, the folders that hold cube photos are listed and a string is suggested. The photos are only read: they are decoded into memory, nothing is written.");
             });
             ui.horizontal(|ui| {
                 choose = ui.add(egui::Button::new("Choose folder ...").min_size(Vec2::new(170.0, 34.0))).clicked();
@@ -404,7 +428,7 @@ impl App {
                 let (list, from_content) = if self.cv.found.is_empty() { (&self.cv.by_content, true) } else { (&self.cv.found, false) };
                 if list.is_empty() {
                     ui.label(RichText::new("No folder with cube photos was found below this folder.").color(Color32::from_rgb(214, 90, 90)).strong());
-                    ui.label(RichText::new("The photos are named like DC26AB002_A12.png. Choose a folder above the cube folder.").weak().small());
+                    ui.label(RichText::new("The photos are named like DC26AB002_A12.png (.png, .tif, .tiff, .jpg and .jpeg are read; HEIC is not: convert those photos to PNG or JPG first). Choose a folder above the cube folder.").weak().small());
                 } else {
                     if from_content {
                         ui.label(RichText::new(format!("No folder name contains \u{201c}{}\u{201d}. These folders hold cube photos:", needle.trim())).color(Color32::from_rgb(214, 150, 40)).strong());
@@ -535,4 +559,40 @@ impl App {
 
 fn use_sugg_button(ui: &mut Ui, s: &str) -> bool {
     ui.add(egui::Button::new(format!("Search for \u{201c}{s}\u{201d} instead")).min_size(Vec2::new(0.0, 32.0))).clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn png_tiff_jpg_and_jpeg_are_photos_heic_is_not() {
+        for (n, ok) in [("a.png", true), ("a.PNG", true), ("a.tif", true), ("a.TIFF", true), ("a.jpg", true), ("a.JPEG", true), ("a.heic", false), ("a.txt", false)] {
+            assert_eq!(photo_rank(Path::new(n)).is_some(), ok, "{n}");
+        }
+    }
+
+    #[test]
+    fn one_photo_per_cube_in_the_preferred_format_and_every_format_decodes() {
+        let dir = std::env::temp_dir().join(format!("cv-photos-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = image::RgbImage::from_pixel(8, 6, image::Rgb([200, 30, 30]));
+        for n in ["DC26AB999_A1.jpg", "DC26AB999_A1.png", "DC26AB999_B1.JPEG", "DC26AB999_A2.tiff", "DC26AB999_C3.heic"] {
+            if n.ends_with("heic") {
+                std::fs::write(dir.join(n), b"x").unwrap();
+            } else {
+                img.save(dir.join(n)).unwrap();
+            }
+        }
+        let mut got = photos_in(&dir);
+        got.sort_by(|a, b| (a.1, a.2).cmp(&(b.1, b.2)));
+        let names: Vec<String> = got.iter().map(|g| g.3.file_name().unwrap().to_string_lossy().to_string()).collect();
+        assert_eq!(names, ["DC26AB999_A1.png", "DC26AB999_A2.tiff", "DC26AB999_B1.JPEG"]);
+        for g in &got {
+            let d = open_photo(&g.3).expect("decodes");
+            assert_eq!((d.width(), d.height()), (8, 6));
+        }
+        assert_eq!(scan(&dir, "").1.first().map(|f| f.n), Some(3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
