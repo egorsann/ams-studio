@@ -148,6 +148,19 @@ impl View {
     }
 }
 
+/// Zooms and pans so that `area` (screen coordinates, as drawn at the current zoom and offset) fills the pane, with a
+/// margin of 30 % of its size plus one cube around it, so a small area does not zoom in too far.
+fn zoom_to_area(view: &mut View, area: Rect, inner: Rect, u: f32) {
+    let wide = area.expand2(Vec2::new(0.3 * area.width() + u, 0.3 * area.height() + u));
+    let k = (inner.width() / wide.width()).min(inner.height() / wide.height());
+    let new = (view.zoom * k).clamp(1.0, View::MAX);
+    let k = new / view.zoom;
+    let centre = inner.center() + view.off;
+    // the middle of the area goes to the middle of the pane
+    view.off = -(wide.center() - centre) * k;
+    view.zoom = new;
+}
+
 /// Draws the viewer inside `rect` and returns what the pointer did (click, rubber band, hover text).
 /// `textures` hold the decoded photos; `selected` / `active` are per record of the open file.
 pub fn draw(ui: &mut Ui, rect: Rect, cubes: &[Cube], textures: &HashMap<(u32, char), TextureHandle>, selected: &[bool], active: &[bool], view: &mut View, th: &Theme, specimen: &str) -> PlotOut {
@@ -196,6 +209,15 @@ pub fn draw(ui: &mut Ui, rect: Rect, cubes: &[Cube], textures: &HashMap<(u32, ch
     let cube_rect = |c: &Cube| Rect::from_center_size(Pos2::new(x0 + (c.slice - smin) as f32 * u + u / 2.0, y0 + (yhi - c.y - 0.5) * u), Vec2::splat(side));
 
     let (live, done) = if resp.dragged_by(egui::PointerButton::Middle) { (None, None) } else { band(ui, &resp, "cband") };
+    // Ctrl + drag an area: zoom into it (with room around it) instead of selecting
+    let mut done = done;
+    if let Some(b) = done {
+        if mods.ctrl || mods.command {
+            zoom_to_area(view, b, inner, u);
+            ui.ctx().request_repaint();
+            done = None;
+        }
+    }
     let clip = ui.painter_at(inner);
     let hover = resp.hover_pos().filter(|p| inner.contains(*p));
     let mut hot: Option<usize> = None;
@@ -267,7 +289,6 @@ pub fn draw(ui: &mut Ui, rect: Rect, cubes: &[Cube], textures: &HashMap<(u32, ch
         picked.sort_unstable();
         picked.dedup();
         out.band = Some(picked);
-        out.additive = mods.ctrl || mods.command;
     }
     // row letters at the left, slice numbers along the bottom
     let mut seen: HashSet<(i32, char)> = HashSet::new();
@@ -330,5 +351,24 @@ mod tests {
         let a1 = cubes.iter().find(|c| c.name() == "A1").unwrap();
         assert_eq!(a1.recs, vec![0]);
         assert!(a1.photo.is_some());
+    }
+
+    #[test]
+    fn ctrl_drag_zooms_into_the_area_with_room_around_it() {
+        let inner = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1000.0, 200.0));
+        let mut v = View::default();
+        // a band of 2 x 1 cubes (cube = 20 px) in the middle: zoomed, but not by more than the margin allows
+        let area = Rect::from_center_size(Pos2::new(500.0, 100.0), Vec2::new(40.0, 20.0));
+        zoom_to_area(&mut v, area, inner, 20.0);
+        assert!(v.zoom > 1.0 && v.zoom < 6.0, "zoom {}", v.zoom);
+        // an area off to the right ends up centred: the offset moves the core left
+        let mut v = View::default();
+        let area = Rect::from_center_size(Pos2::new(900.0, 100.0), Vec2::new(100.0, 60.0));
+        zoom_to_area(&mut v, area, inner, 20.0);
+        assert!(v.off.x < -100.0);
+        // the whole pane as the area does not zoom (margins make k < 1, clamped to 1)
+        let mut v = View::default();
+        zoom_to_area(&mut v, inner, inner, 20.0);
+        assert_eq!(v.zoom, 1.0);
     }
 }

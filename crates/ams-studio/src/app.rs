@@ -2241,8 +2241,8 @@ impl App {
                 band = out.band;
             }
         }
-        // the core viewer: a click or a drag over cubes selects their records like a marker does; with Ctrl the cubes
-        // are added to the selection (a band) or switched in or out of it (a click)
+        // the core viewer: a click or a drag over cubes selects their records like a marker does; with Ctrl a click
+        // switches the cube in or out of the selection (Ctrl + drag zooms, in the pane)
         self.cv.rect = core_rect.unwrap_or(Rect::NOTHING);
         if let Some(cr) = core_rect {
             let out = self.cv_pane(ui, cr, th);
@@ -2256,17 +2256,11 @@ impl App {
                     }
                     self.last_band = false;
                 }
-                if let (Some(b), true) = (&out.band, out.additive) {
-                    for &i in b.iter().filter(|&&i| i < n) {
-                        doc.selected[i] = true;
-                    }
-                    self.last_band = true;
-                }
             }
             if out.click.is_some() {
                 click = out.click;
             }
-            if out.band.is_some() && !out.additive {
+            if out.band.is_some() {
                 band = out.band;
             }
         }

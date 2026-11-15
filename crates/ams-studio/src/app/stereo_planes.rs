@@ -170,7 +170,11 @@ impl App {
         self.st_planes
             .iter()
             .filter(|q| q.on && q.applies_to(open_id.as_deref()))
-            .map(|q| PlaneDraw { dip_dir: q.dip_dir, dip: q.dip, color: Color32::from_rgb(q.color[0], q.color[1], q.color[2]), comment: if self.st_plane_comments { q.comment.trim().to_string() } else { String::new() } })
+            .map(|q| {
+                let comment = q.comment.trim().to_string();
+                let name = if comment.is_empty() { format!("plane: dip direction {:.0}\u{b0}, dip {:.0}\u{b0}", q.dip_dir, q.dip) } else { comment.clone() };
+                PlaneDraw { dip_dir: q.dip_dir, dip: q.dip, color: Color32::from_rgb(q.color[0], q.color[1], q.color[2]), name, show_label: self.st_plane_comments && !comment.is_empty() }
+            })
             .collect()
     }
 
@@ -259,7 +263,7 @@ impl App {
         let open_id = self.open_spec_id();
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.st_planes_on, RichText::new("Planes").strong());
-            info_icon(ui, "Planes you measured in the field (a vein, a fault, bedding), drawn as great circles, not poles. They are shown only while the net is in geographic coordinates (G), below the data. The comment is written next to the circle where it reaches its steepest dip. The planes are kept with the data, in the dependency file of the specimen's _geo folder.");
+            info_icon(ui, "Planes you measured in the field (a vein, a fault, bedding), drawn as great circles, not poles. They are shown only while the net is in geographic coordinates (G), below the data. The comment is written small outside the net at one end of the circle (it takes a zoom in to read it); hold Alt over a plane to see its name at any zoom. The planes are kept with the data, in the dependency file of the specimen's _geo folder.");
         });
         let geo = self.coord == ams_core::coords::CoordSys::Geographic;
         if self.st_planes_on && !geo {

@@ -81,6 +81,9 @@ pub(super) struct CoreViewState {
     rows_stale: bool,
     /// Match every specimen of the file tree at once (off: only the selected ones).
     pub fit_all: bool,
+    /// The window has been opened on its own once this session (it is not opened again for every specimen without a
+    /// link; the pane then just says so).
+    pub nagged: bool,
     /// A saved link was seen this session (a cancelled window then leaves the viewer on).
     pub had_link: bool,
     /// Links kept by the first version in the preferences folder (`core_links.json`); moved into the specimen's own
@@ -125,6 +128,7 @@ impl Default for CoreViewState {
             rows: vec![],
             rows_stale: false,
             fit_all: false,
+            nagged: false,
             had_link: false,
             legacy_links: BTreeMap::new(),
             tried: None,
@@ -618,8 +622,12 @@ impl App {
                                 self.cv_load(dir);
                             }
                             None => {
-                                self.cv.note = format!("No cube photos named after {id} were found below the chosen folder.");
-                                self.cv.win = true;
+                                // asked once per session; later specimens without photos only get the hint in the pane
+                                if !self.cv.nagged {
+                                    self.cv.nagged = true;
+                                    self.cv.note = format!("No cube photos named after {id} were found below the chosen folder.");
+                                    self.cv.win = true;
+                                }
                             }
                         }
                     }
@@ -641,7 +649,8 @@ impl App {
                 if !self.cv_try_link() {
                     if self.cv.root.is_some() {
                         self.cv_start_scan(true);
-                    } else {
+                    } else if !self.cv.nagged {
+                        self.cv.nagged = true;
                         self.cv_open_window();
                     }
                 }

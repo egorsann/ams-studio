@@ -24,8 +24,6 @@ pub struct PlotOut {
     pub hover: Option<String>,
     /// Specimen indices inside a rubber band that was just released.
     pub band: Option<Vec<usize>>,
-    /// Ctrl was held: the band adds to the selection instead of replacing it.
-    pub additive: bool,
     /// Ctrl + click on something that stands for these specimens (a cube of the core viewer): switch them in or out of
     /// the selection.
     pub toggle: Option<Vec<usize>>,
@@ -456,7 +454,9 @@ fn draw_axes_ex(ui: &Ui, outer: Rect, x: (f64, f64), y: (f64, f64), xlabel: &str
 }
 
 fn marker(pa: &egui::Painter, c: Pos2, shape: u8, size: f32, fill: Color32, outline: Color32, selected: bool) {
-    let st = Stroke::new(if selected { 2.0 } else { 0.8 }, if selected { Color32::from_rgb(255, 150, 0) } else { outline });
+    // a selected marker is filled bright yellow, with a wider orange border
+    let st = Stroke::new(if selected { 2.6 } else { 0.8 }, if selected { Color32::from_rgb(255, 140, 0) } else { outline });
+    let fill = if selected { Color32::from_rgb(255, 235, 0) } else { fill };
     let s = if selected { size * 1.35 } else { size };
     match shape {
         0 => {
@@ -494,7 +494,41 @@ pub struct PlaneDraw {
     pub dip_dir: f64,
     pub dip: f64,
     pub color: Color32,
-    pub comment: String,
+    /// The name shown on Alt + mouse-over (the comment, or the numbers when there is none).
+    pub name: String,
+    /// Write the name small at one end of the circle, outside the net.
+    pub show_label: bool,
+}
+
+/// The rim end of a plane's great circle that carries its label: the northern one (the eastern one for a plane that
+/// strikes east-west), as unit-circle coordinates.
+pub fn plane_label_end(dip_dir: f64, dip: f64) -> (f64, f64) {
+    let c = plane_circle(dip_dir, dip);
+    let (a, b) = (c[0], c[180]);
+    if (a.1 - b.1).abs() > 1e-6 {
+        if a.1 > b.1 { a } else { b }
+    } else if a.0 > b.0 {
+        a
+    } else {
+        b
+    }
+}
+
+/// Distance from `p` to the polyline, and the nearest point on it.
+fn nearest_on_line(line: &[Pos2], p: Pos2) -> Option<(f32, Pos2)> {
+    let mut best: Option<(f32, Pos2)> = None;
+    for w in line.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let ab = b - a;
+        let len2 = ab.length_sq().max(1e-9);
+        let t = (((p - a).dot(ab)) / len2).clamp(0.0, 1.0);
+        let q = a + ab * t;
+        let d = q.distance(p);
+        if best.map_or(true, |x| d < x.0) {
+            best = Some((d, q));
+        }
+    }
+    best
 }
 
 /// The great circle of a plane in the lower-hemisphere equal-area net, as unit-circle coordinates (x east, y north),
@@ -571,15 +605,33 @@ pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Th
         );
     }
     // planes entered by hand: below everything that follows, so the data always overlay them
+    let mut plane_lines: Vec<Vec<Pos2>> = vec![];
     for pl in &opts.planes {
         let line: Vec<Pos2> = plane_circle(pl.dip_dir, pl.dip).into_iter().map(|(x, y)| Pos2::new(c.x + x as f32 * r, c.y - y as f32 * r)).collect();
-        pa.add(Shape::line(line, egui::epaint::PathStroke::new(2.0, pl.color.gamma_multiply(0.9))));
-        if !pl.comment.is_empty() {
-            let (x, y) = project(pl.dip_dir, pl.dip);
-            let at = Pos2::new(c.x + x as f32 * r, c.y - y as f32 * r);
-            let right = at.x >= c.x;
-            let (anchor, dx) = if right { (Align2::LEFT_BOTTOM, 5.0) } else { (Align2::RIGHT_BOTTOM, -5.0) };
-            pa.text(at + Vec2::new(dx, -3.0), anchor, &pl.comment, FontId::proportional(11.5), pl.color);
+        pa.add(Shape::line(line.clone(), egui::epaint::PathStroke::new(2.0, pl.color.gamma_multiply(0.9))));
+        plane_lines.push(line);
+        if pl.show_label && !pl.name.is_empty() {
+            // small, outside the net at one end of the circle; its size does not follow the zoom, so it takes a zoom
+            // in to read it (Alt + mouse-over names the plane at any zoom)
+            let (ex, ey) = plane_label_end(pl.dip_dir, pl.dip);
+            let (ux, uy) = (ex as f32, -ey as f32);
+            let n = (ux * ux + uy * uy).sqrt().max(1e-6);
+            let (ux, uy) = (ux / n, uy / n);
+            let azimuth = (ex.atan2(ey).to_degrees().rem_euclid(360.0)) as f32;
+            // near N / 90 / 180 / 270 the net's own letters are there: a little further out
+            let near_cardinal = [0.0f32, 90.0, 180.0, 270.0, 360.0].iter().any(|k| (azimuth - k).abs() < 12.0);
+            let off = 5.0 + if near_cardinal { 14.0 } else { 0.0 };
+            let at = Pos2::new(c.x + ux * (r + off), c.y + uy * (r + off));
+            let anchor = if ux > 0.35 {
+                Align2::LEFT_CENTER
+            } else if ux < -0.35 {
+                Align2::RIGHT_CENTER
+            } else if uy < 0.0 {
+                Align2::CENTER_BOTTOM
+            } else {
+                Align2::CENTER_TOP
+            };
+            pa.text(at, anchor, &pl.name, FontId::proportional(8.5), pl.color);
         }
     }
     if opts.foliation {
@@ -699,6 +751,18 @@ pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Th
             labelled = true;
         }
     }
+    // Alt + mouse-over a plane: its name (with many planes the small labels can overlap)
+    if mods.alt && !labelled {
+        if let Some(h) = hover {
+            let best_plane = plane_lines.iter().enumerate().filter_map(|(k, l)| nearest_on_line(l, h).map(|(d, q)| (d, k, q))).min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((d, k, q)) = best_plane.filter(|b| b.0 < 8.0) {
+                let _ = d;
+                label_box(&pa, rect, q, opts.planes[k].name.clone(), th);
+                labelled = true;
+            }
+        }
+    }
+    let _ = labelled;
     if view.is_zoomed() {
         pa.text(
             Pos2::new(rect.max.x - 8.0, rect.max.y - 8.0),
@@ -1192,5 +1256,27 @@ mod plane_tests {
         assert!((c[90].0 - x).abs() < 1e-9 && (c[90].1 - y).abs() < 1e-9);
         // every point of the circle lies in the lower hemisphere net
         assert!(c.iter().all(|(x, y)| (x * x + y * y).sqrt() <= 1.0 + 1e-9));
+    }
+
+    #[test]
+    fn the_label_sits_at_the_northern_rim_end_or_the_eastern_for_an_east_west_plane() {
+        // dip direction 90, dip 60: strike north-south, ends at N and S: the label goes north
+        let (x, y) = plane_label_end(90.0, 60.0);
+        assert!(y > 0.99 && x.abs() < 1e-6);
+        // dip direction 0, dip 40: strikes east-west, ends at E and W: east
+        let (x, y) = plane_label_end(0.0, 40.0);
+        assert!(x > 0.99 && y.abs() < 1e-6);
+        // the point is on the rim
+        let (x, y) = plane_label_end(200.0, 35.0);
+        assert!(((x * x + y * y).sqrt() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_nearest_point_on_a_line_is_found() {
+        let l = [Pos2::new(0.0, 0.0), Pos2::new(10.0, 0.0), Pos2::new(10.0, 10.0)];
+        let (d, q) = nearest_on_line(&l, Pos2::new(4.0, 3.0)).unwrap();
+        assert!((d - 3.0).abs() < 1e-5 && (q.x - 4.0).abs() < 1e-5);
+        let (d, _) = nearest_on_line(&l, Pos2::new(13.0, 5.0)).unwrap();
+        assert!((d - 3.0).abs() < 1e-5);
     }
 }
