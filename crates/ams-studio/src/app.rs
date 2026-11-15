@@ -4,6 +4,7 @@ use crate::plots::{self, AxisCfg, ColorCfg, NetView, Pt, ScatterSpec, StereoOpts
 use ams_core::params::{param_class, param_sd, param_values, N_PARAMS, PARAM_LABELS};
 mod analysis_ui;
 mod dialogs_ui;
+mod owens_file_ui;
 mod specset_ui;
 mod tools_ui;
 use ams_core::coords::{CoordSys, Orientation};
@@ -229,6 +230,31 @@ fn phone_switch(ui: &mut Ui, on: &mut bool) -> egui::Response {
     resp
 }
 
+/// Top row of the Owens window: the classic / new switch and the short notice; true when the switch was flipped.
+fn owens_head(ui: &mut Ui, old: &mut bool, toast: &Option<(String, f64)>, now: f64, accent: Color32) -> bool {
+    let mut switched = false;
+    ui.horizontal(|ui| {
+        let mut new_mode = !*old;
+        if phone_switch(ui, &mut new_mode).on_hover_text("Left: classic Owens of Anisoft 4.2 (a table with one row per specimen).\nRight: new Owens (four values and a row range).").changed() {
+            *old = !new_mode;
+            switched = true;
+        }
+        ui.label(RichText::new(if *old { "Classic Owens" } else { "New Owens" }).strong());
+        ui.label(RichText::new(if *old { "(Anisoft 4.2)" } else { "(one set of values)" }).weak());
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if let Some((msg, t0)) = toast {
+                let age = now - t0;
+                if age < 3.0 {
+                    let fade = (3.0 - age).min(0.5) as f32 / 0.5;
+                    ui.label(RichText::new(msg).small().color(accent.gamma_multiply(fade)));
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+                }
+            }
+        });
+    });
+    switched
+}
+
 /// Drag box for a strike (0-360, k even) or a dip (0-180, k odd).
 fn angle_drag(v: &mut f64, k: usize) -> egui::DragValue<'_> {
     egui::DragValue::new(v).range(if k % 2 == 0 { 0.0..=360.0 } else { 0.0..=180.0 }).speed(0.5).max_decimals(1).suffix(" \u{b0}")
@@ -236,11 +262,14 @@ fn angle_drag(v: &mut f64, k: usize) -> egui::DragValue<'_> {
 
 /// A small "i" in a circle that explains something when hovered.
 fn info_icon(ui: &mut Ui, text: &str) {
-    let s = ui.spacing().interact_size.y * 0.75;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(s), Sense::hover());
+    // small and raised like a superscript; the whole cell around it answers to the pointer
+    let row = ui.spacing().interact_size.y;
+    let s = (row * 0.44).max(9.0);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(s + 5.0, row), Sense::hover());
     let col = if resp.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
-    ui.painter().circle_stroke(rect.center(), s * 0.46, Stroke::new(1.3, col));
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, "i", FontId::proportional(s * 0.62), col);
+    let c = Pos2::new(rect.min.x + 2.5 + s * 0.5, rect.center().y - row * 0.2);
+    ui.painter().circle_stroke(c, s * 0.5, Stroke::new(1.0, col));
+    ui.painter().text(c + Vec2::new(0.0, 0.3), Align2::CENTER_CENTER, "i", FontId::proportional(s * 0.72), col);
     resp.on_hover_text(text);
 }
 
@@ -310,6 +339,8 @@ pub struct App {
     class_of: Vec<Option<usize>>,
     cl: dialogs_ui::ClassState,
     win_owens: bool,
+    /// Owens correction with the values read from a file.
+    of: owens_file_ui::OwensFile,
     /// Owens rows (FS, FD, DS, DD per specimen) and the file as it was before the last rotation.
     owens: Vec<[f64; 4]>,
     /// New-style Owens input: one set of FS / FD / DS / DD and a 1-based first/last row.
@@ -440,6 +471,7 @@ impl App {
             class_of: vec![],
             cl: Default::default(),
             win_owens: false,
+            of: Default::default(),
             owens: vec![],
             owens_one: [0.0; 4],
             owens_range: (1, 1),
@@ -844,6 +876,9 @@ impl App {
             (Modifiers::NONE, Key::F2, Action::DataTable),
             (Modifiers::NONE, Key::F3, Action::Phase(false)),
             (Modifiers::NONE, Key::F4, Action::Phase(true)),
+            // Shift+Q / Shift+E: the previous / next specimen folder (its main file) instead of the sub-specimens
+            (Modifiers::SHIFT, Key::Q, Action::Prev),
+            (Modifiers::SHIFT, Key::E, Action::Next),
             (Modifiers::NONE, Key::Q, Action::StepSpecimen(-1)),
             (Modifiers::NONE, Key::E, Action::StepSpecimen(1)),
             (Modifiers::NONE, Key::W, Action::TogglePhase),
@@ -1882,14 +1917,17 @@ impl App {
             tools_ui::pop_style(ui, 1.4);
             ui.label(RichText::new("Not stored in .ams files. Applied to all specimens of the open file.").weak());
             egui::Grid::new("or").show(ui, |ui| {
-                for (n, v, r) in [
-                    ("Core azimuth", &mut orient.azimuth, 0.0..=360.0),
-                    ("Core dip", &mut orient.dip, -90.0..=90.0),
-                    ("Bedding strike", &mut orient.bed_strike, 0.0..=360.0),
-                    ("Bedding dip", &mut orient.bed_dip, 0.0..=90.0),
-                    ("Paleo declination", &mut orient.paleo_dec, -360.0..=360.0),
+                for (n, v, r, tip) in [
+                    ("Core azimuth", &mut orient.azimuth, 0.0..=360.0, "Compass direction (0-360 deg) the core is drilled towards. With a core dip of 0 every declination gains this value."),
+                    ("Core dip", &mut orient.dip, -90.0..=90.0, "Tilt of the core axis from the vertical, in degrees: the specimen is tilted by this much about its x axis before the azimuth is added."),
+                    ("Bedding strike", &mut orient.bed_strike, 0.0..=360.0, "Strike of the bedding (right-hand rule: it dips to the right of the strike direction), used for tectonic coordinates."),
+                    ("Bedding dip", &mut orient.bed_dip, 0.0..=90.0, "Dip of the bedding below the horizontal (0-90 deg), restored to horizontal in tectonic coordinates."),
+                    ("Paleo declination", &mut orient.paleo_dec, -360.0..=360.0, "Paleo-declination in degrees; paleogeographic coordinates turn the data by minus this value about the vertical."),
                 ] {
-                    ui.label(n);
+                    ui.horizontal(|ui| {
+                        ui.label(n);
+                        info_icon(ui, tip);
+                    });
                     changed |= ui.add(egui::DragValue::new(v).range(r).suffix(" \u{b0}").speed(0.5)).changed();
                     ui.end_row();
                 }
@@ -1937,10 +1975,15 @@ impl App {
         if !self.win_owens {
             return;
         }
-        let Some(doc) = &self.doc else {
+        if self.doc.is_none() {
             self.win_owens = false;
             return;
-        };
+        }
+        if self.of.stage != owens_file_ui::Stage::Manual {
+            self.owens_file_window(ctx);
+            return;
+        }
+        let doc = self.doc.as_ref().unwrap();
         let n = doc.specs.len();
         if self.owens.len() != n {
             self.owens = vec![[0.0; 4]; n];
@@ -1966,6 +2009,8 @@ impl App {
         let toast = self.owens_toast.clone();
         let (mut open, mut copy, mut rotate, mut undo, mut cancel) = (true, false, false, false, false);
         let mut switched = false;
+        let (mut from_file, mut undo_file) = (false, false);
+        let file_last = self.of.last;
         let accent = if dark { Color32::from_rgb(106, 160, 255) } else { Color32::from_rgb(47, 111, 222) };
         const TIPS: [&str; 4] = [
             "FS - field strike.\nCompass direction (0-360 deg) of the strike line of a reference plane (bedding, a vein, a foliation) measured in the field. Right-hand rule: the plane dips to the right when you look along the strike.",
@@ -1978,26 +2023,18 @@ impl App {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
 
             // ---- mode switch (top left) and a short notice on the right
-            ui.horizontal(|ui| {
-                let mut new_mode = !old;
-                if phone_switch(ui, &mut new_mode).on_hover_text("Left: classic Owens of Anisoft 4.2 (a table with one row per specimen).\nRight: new Owens (four values and a row range).").changed() {
-                    old = !new_mode;
-                    switched = true;
-                }
-                ui.label(RichText::new(if old { "Classic Owens" } else { "New Owens" }).strong());
-                ui.label(RichText::new(if old { "(Anisoft 4.2)" } else { "(one set of values)" }).weak());
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if let Some((msg, t0)) = &toast {
-                        let age = now - t0;
-                        if age < 3.0 {
-                            let fade = (3.0 - age).min(0.5) as f32 / 0.5;
-                            ui.label(RichText::new(msg).small().color(accent.gamma_multiply(fade)));
-                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
-                        }
-                    }
-                });
-            });
+            if owens_head(ui, &mut old, &toast, now, accent) {
+                switched = true;
+            }
             ui.separator();
+            // ---- the values can also come from a spreadsheet / csv (second row, always the same place)
+            ui.horizontal(|ui| {
+                from_file = ui.add_sized([210.0, 26.0], egui::Button::new("From file ...")).on_hover_text("Read FS, FD, DS and DD of many specimens from an .xlsx or .csv").clicked();
+                if let Some(l) = file_last {
+                    undo_file = ui.add(egui::Button::new(RichText::new(format!("Undo last correction ({})", if l == owens_file_ui::Scope::Single { "single" } else { "multiple" })).small()).small().fill(Color32::TRANSPARENT).stroke(ui.visuals().widgets.inactive.bg_stroke)).clicked();
+                }
+            });
+            ui.add_space(2.0);
 
             let preview_h = 220.0;
             if !old {
@@ -2105,6 +2142,12 @@ impl App {
                 });
             });
         });
+        if from_file {
+            self.of.stage = owens_file_ui::Stage::Scope;
+        }
+        if undo_file {
+            self.of_undo();
+        }
         if switched {
             let msg = if old { "Classic Owens (Anisoft 4.2): one row of values per specimen" } else { "New Owens: one set of values for a range of rows" };
             self.owens_toast = Some((msg.to_string(), now));
@@ -2142,10 +2185,12 @@ impl App {
                 d.raw = raw;
                 d.specs = specs;
                 self.dirty = true;
+                self.of.last = None;
             }
         }
         if store.is_some() {
             self.owens_undo = store;
+            self.of.last = None;
         }
         if old != self.owens_old {
             self.owens_old = old;

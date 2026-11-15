@@ -298,16 +298,24 @@ impl App {
                 let main = p.file();
                 let has_cur = cur.as_ref().map_or(false, |c| f.files.iter().any(|n| f.dir.join(n) == *c));
                 let title = match p {
-                    Pick::Only(_) | Pick::Match(_) => RichText::new(&f.name),
-                    Pick::None => RichText::new(format!("\u{26a0} {}", f.name)).color(Color32::from_rgb(214, 90, 90)),
-                    Pick::Several(_) => RichText::new(format!("\u{26a0} {}", f.name)).color(Color32::from_rgb(214, 150, 40)),
+                    Pick::Only(_) | Pick::Match(_) => RichText::new(&f.name).strong(),
+                    Pick::None => RichText::new(format!("\u{26a0} {}", f.name)).strong().color(Color32::from_rgb(214, 90, 90)),
+                    Pick::Several(_) => RichText::new(format!("\u{26a0} {}", f.name)).strong().color(Color32::from_rgb(214, 150, 40)),
                 };
                 let id = ui.make_persistent_id(("set-folder", fi, &set.root));
                 egui::CollapsingHeader::new(title).id_salt(id).default_open(open_all || has_cur).show(ui, |ui| {
-                    for (k, n) in f.files.iter().enumerate() {
+                    // the file the identifier picked comes first; the others follow in a darker shade
+                    let mut order: Vec<usize> = (0..f.files.len()).collect();
+                    if let Some(m) = main {
+                        order.retain(|k| *k != m);
+                        order.insert(0, m);
+                    }
+                    let dim = ui.visuals().text_color().gamma_multiply(0.55);
+                    for k in order {
+                        let n = &f.files[k];
                         let path = f.dir.join(n);
                         let is_main = main == Some(k);
-                        let text = if is_main { RichText::new(format!("\u{25cf} {n}")).strong() } else { RichText::new(format!("   {n}")) };
+                        let text = if is_main { RichText::new(format!("\u{25cf} {n}")).strong() } else { RichText::new(format!("   {n}")).color(dim) };
                         let resp = ui.add(egui::Button::selectable(cur.as_ref() == Some(&path), text).frame_when_inactive(false).sense(Sense::click()));
                         if resp.clicked() {
                             open = Some(path);

@@ -58,3 +58,8 @@ cargo run -p ams-core --example validate -- file.ams anisoft_export.csv
 ## Testing the GUI headlessly
 
 See `docs/RECREATING.md` section 5 (Xvfb + xdotool + a fresh `XDG_CONFIG_HOME`). File dialogs cannot be driven that way.
+
+## Headless test hooks
+
+- `ams-studio <folder>` opens the folder as the parent of the specimen folders (the Open Folder of Specimens dialog).
+- `AMS_STUDIO_PICK_FILE=<path>` makes the "Owens from file" file picker return that path instead of opening a dialog, so the flow can be driven on a private X display (Xvfb with `env -u WAYLAND_DISPLAY`, never on the user's desktop).

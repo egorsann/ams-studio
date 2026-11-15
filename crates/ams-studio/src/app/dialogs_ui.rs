@@ -193,9 +193,35 @@ impl App {
             let h = (ui.available_height() - 58.0).max(120.0);
             egui::ScrollArea::both().max_height(h).auto_shrink([false, false]).show(ui, |ui| {
                 egui::Grid::new("edit-grid").striped(true).spacing([8.0, 5.0]).show(ui, |ui| {
-                    let heads = ["#", "Specimen", "Alpha", "Phi", "Fol 1", "Azi", "Dip", "Lin 1", "Trend", "Plunge", "Fol 2", "Azi", "Dip", "Lin 2", "Trend", "Plunge", "OP1", "OP2", "OP3", "OP4"];
-                    for h in heads {
-                        ui.label(RichText::new(h).strong());
+                    let heads: [(&str, &str); 20] = [
+                        ("#", ""),
+                        ("Specimen", "Name of the record (up to 24 characters). It can be renamed here."),
+                        ("Alpha", "Sampling azimuth (0-360 deg): the compass direction the sampling arrow of the specimen points to in the field."),
+                        ("Phi", "Sampling plunge (0-90 deg): how far that arrow points below the horizontal. With Alpha and the orientation parameters it gives the geographic rotation."),
+                        ("Fol 1", "One-character code of foliation #1, as in the GED file."),
+                        ("Azi", "Azimuth of foliation #1 (0-360 deg)."),
+                        ("Dip", "Dip of foliation #1 (0-90 deg)."),
+                        ("Lin 1", "One-character code of lineation #1, as in the GED file."),
+                        ("Trend", "Trend of lineation #1 (0-360 deg)."),
+                        ("Plunge", "Plunge of lineation #1 (0-90 deg)."),
+                        ("Fol 2", "One-character code of foliation #2."),
+                        ("Azi", "Azimuth of foliation #2 (0-360 deg)."),
+                        ("Dip", "Dip of foliation #2 (0-90 deg)."),
+                        ("Lin 2", "One-character code of lineation #2."),
+                        ("Trend", "Trend of lineation #2 (0-360 deg)."),
+                        ("Plunge", "Plunge of lineation #2 (0-90 deg)."),
+                        ("OP1", "Orientation parameter 1: clock position of the sampling arrow (3, 6, 9 or 12); it turns the specimen about its own axis in steps of 90 deg."),
+                        ("OP2", "Orientation parameter 2: 0 when Phi is measured from the horizontal, 90 when it is measured from the vertical."),
+                        ("OP3", "Orientation parameter 3: second clock position (3, 6, 9 or 12); it turns the result about the vertical in steps of 90 deg."),
+                        ("OP4", "Orientation parameter 4: how the foliation angles are given (0 or 90). It does not change the geographic rotation."),
+                    ];
+                    for (h, tip) in heads {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(h).strong());
+                            if !tip.is_empty() {
+                                super::info_icon(ui, tip);
+                            }
+                        });
                     }
                     ui.end_row();
                     for (i, r) in st.rows.iter_mut().enumerate() {

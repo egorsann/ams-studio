@@ -138,6 +138,15 @@ pub fn put_phase(rec: &mut [u8], base: usize, km: f64, t: &Mat3) {
     }
 }
 
+/// Rotates both tensors of one 640-byte record by `r` (`R T R^T`) and writes them back; Km, standard deviations and
+/// F-tests are unchanged by a rotation.
+pub fn rotate_record(rec: &mut [u8], r: &Mat3) {
+    for base in [OFF_KRE, OFF_KIM] {
+        let ph = parse_phase(rec, base);
+        put_phase(rec, base, ph.km, &crate::tensor::rotate_tensor(&ph.tensor, r));
+    }
+}
+
 pub fn parse(bytes: &[u8]) -> Result<Vec<Specimen>, AmsError> {
     if bytes.is_empty() {
         return Err(AmsError::Empty);
@@ -223,6 +232,24 @@ mod tests {
         let ax = s[0].inphase.axes();
         assert!(ax.k_norm[0] > ax.k_norm[1] && ax.k_norm[1] > ax.k_norm[2]);
         assert!(((ax.k_norm[0] + ax.k_norm[1] + ax.k_norm[2]) / 3.0 - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rotating_a_record_in_place_equals_rotating_its_tensors() {
+        let mut b = build_record("ZZ01-A1", &demo_phase(1e-3), &demo_phase(1e-5), 400.0, 1220.0);
+        let before = parse(&b).unwrap().remove(0);
+        let r = crate::coords::owens_rotation(30.0, 20.0, 45.0, 10.0);
+        rotate_record(&mut b, &r);
+        let after = parse(&b).unwrap().remove(0);
+        let want = crate::tensor::rotate_tensor(&before.inphase.tensor, &r);
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!((after.inphase.tensor[i][j] - want[i][j]).abs() < 1e-6);
+            }
+        }
+        assert_eq!(after.name, "ZZ01-A1");
+        assert!((after.inphase.km - before.inphase.km).abs() < 1e-9);
+        assert!((after.outphase.axes().k_norm[0] - before.outphase.axes().k_norm[0]).abs() < 1e-5);
     }
 
     #[test]

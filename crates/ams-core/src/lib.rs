@@ -6,6 +6,7 @@ pub mod export;
 pub mod ged;
 pub mod import;
 pub mod orient;
+pub mod owens_table;
 pub mod params;
 pub mod specset;
 pub mod stats;
