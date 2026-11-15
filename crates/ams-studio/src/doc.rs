@@ -1,6 +1,6 @@
 //! The open document: specimens, which of them are active/selected, and folder navigation.
 
-use ams_core::ams::{self, Axes, Specimen, NAME_LEN, OFF_NAME, RECORD_LEN};
+use ams_core::ams::{self, put_phase, Axes, Specimen, NAME_LEN, OFF_KIM, OFF_KRE, OFF_NAME, RECORD_LEN};
 use ams_core::coords::{CoordSys, Orientation};
 use ams_core::tensor::{rotate_tensor, Mat3};
 use std::path::{Path, PathBuf};
@@ -72,6 +72,18 @@ impl Doc {
             out.extend_from_slice(&self.raw[i * RECORD_LEN..(i + 1) * RECORD_LEN]);
         }
         out
+    }
+
+    /// Rotates the tensors of specimen `i` (both phases) by `r`, in the records too, so a saved file carries them.
+    /// Km, the standard deviations and the F-tests are unchanged by a rotation.
+    pub fn rotate_specimen(&mut self, i: usize, r: &Mat3) {
+        let rec = &mut self.raw[i * RECORD_LEN..(i + 1) * RECORD_LEN];
+        let s = &mut self.specs[i];
+        for (ph, base) in [(&mut s.inphase, OFF_KRE), (&mut s.outphase, OFF_KIM)] {
+            ph.tensor = rotate_tensor(&ph.tensor, r);
+            put_phase(rec, base, ph.km, &ph.tensor);
+        }
+        self.modified = true;
     }
 
     pub fn rename(&mut self, i: usize, name: &str) {
@@ -154,6 +166,26 @@ mod tests {
         assert_eq!(re.len(), 1);
         assert_eq!(re[0].name, "ZZ01-X9");
         assert!((re[0].inphase.km - 1e-3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rotation_reaches_the_records() {
+        let (_d, p) = tmp_doc();
+        let mut doc = Doc::open(&p).unwrap();
+        let r = ams_core::coords::owens_rotation(30.0, 20.0, 10.0, 15.0);
+        doc.rotate_specimen(1, &r);
+        assert!(doc.modified);
+        let again = ams::parse(&doc.raw).unwrap();
+        let (a, b) = (again[1].inphase.axes(), doc.specs[1].inphase.axes());
+        for k in 0..3 {
+            assert!((a.k_norm[k] - b.k_norm[k]).abs() < 1e-5);
+        }
+        assert!((a.dec_inc[0].0 - b.dec_inc[0].0).abs() < 0.05);
+        // the first specimen and Km are untouched; the eigenvalues survive the rotation
+        let first = ams::parse(&doc.raw).unwrap();
+        assert!((first[0].inphase.tensor[0][0] - 1.2e-3).abs() < 1e-8);
+        assert!((first[1].inphase.km - 1e-3).abs() < 1e-9);
+        assert!((first[1].inphase.axes().k_raw[0] - 1.2e-3).abs() < 1e-7);
     }
 
     #[test]

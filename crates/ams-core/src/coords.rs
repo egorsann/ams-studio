@@ -83,6 +83,32 @@ impl Orientation {
     }
 }
 
+/// Rotation of Anisoft 4.2's "Specimen to Geographic Rotation (Owen's method)" (Edit > Spec to Geo (Owens)).
+///
+/// `fs`/`fd` are strike and dip of a plane in the field, `ds`/`dd` strike and dip of the same plane on the
+/// drilling table (degrees). Rebuilt from the original's behaviour: it was driven with made-up tensors and
+/// the formula below reproduces every result to the 0.1 degree the dialog prints, including strikes and dips
+/// that are not physically sensible. The original's P1..P4 boxes make no difference to the result.
+///
+/// In north-east-down axes (x north, y east, z down) with `Rz(a)` adding `a` to the declination:
+/// `R = Rz(fs) Rx(fd) Rz(-ds) Rx(-dd) Rz(ds')`, where `tan ds' = tan ds * cos dd`.
+/// Returned in this crate's axes (x east, y north, z down), to be applied as `R T R^T` / `R v`.
+pub fn owens_rotation(fs: f64, fd: f64, ds: f64, dd: f64) -> Mat3 {
+    fn rz(deg: f64) -> Mat3 {
+        let (s, c) = deg.to_radians().sin_cos();
+        [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]
+    }
+    let ds_r = ds.to_radians();
+    let ds_p = (ds_r.sin() * dd.to_radians().cos()).atan2(ds_r.cos()).to_degrees();
+    let mut r = rz(fs);
+    for m in [rot_x(fd), rz(-ds), rot_x(-dd), rz(ds_p)] {
+        r = mat_mul(&r, &m);
+    }
+    // north-east-down -> east-north-down: conjugate with the x/y swap
+    const P: Mat3 = [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+    mat_mul(&mat_mul(&P, &r), &P)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +135,43 @@ mod tests {
     fn specimen_is_identity() {
         let v = mat_vec(&Orientation { azimuth: 77.0, dip: 12.0, ..Default::default() }.rotation(CoordSys::Specimen), [0.3, 0.4, 0.5]);
         assert_eq!(v, [0.3, 0.4, 0.5]);
+    }
+    #[test]
+    fn owens_matches_anisoft_4_2() {
+        // Made-up mean tensor axes in specimen coordinates (dec, inc), and what Anisoft 4.2 printed
+        // after rotating them with (FS, FD, DS, DD).
+        let spec = [(24.3, 1.3), (294.2, 4.0), (132.8, 85.8)];
+        let cases: [([f64; 4], [(f64, f64); 3]); 8] = [
+            ([0.0, 0.0, 0.0, 0.0], [(24.3, 1.3), (294.2, 4.0), (132.8, 85.8)]),
+            ([0.0, 0.0, 0.0, 30.0], [(202.0, 10.7), (298.5, 31.0), (95.2, 56.8)]),
+            ([0.0, 0.0, 45.0, 30.0], [(197.2, 25.7), (295.0, 15.7), (53.3, 59.3)]),
+            ([0.0, 0.0, 135.0, 30.0], [(209.9, 7.0), (116.6, 24.7), (314.7, 64.2)]),
+            ([123.0, 75.0, 200.0, 55.0], [(94.4, 8.6), (351.5, 55.8), (190.1, 32.8)]),
+            ([250.0, 20.0, 330.0, 85.0], [(107.9, 9.4), (223.7, 69.1), (14.7, 18.4)]),
+            ([45.0, 100.0, 60.0, 30.0], [(71.5, 21.7), (227.4, 66.5), (338.0, 8.7)]),
+            ([310.0, 60.0, 15.0, 130.0], [(129.0, 26.1), (273.3, 58.9), (31.1, 15.7)]),
+        ];
+        for (a, want) in cases {
+            let r = owens_rotation(a[0], a[1], a[2], a[3]);
+            for (s, w) in spec.iter().zip(want.iter()) {
+                let got = mat_vec(&r, from_dec_inc(s.0, s.1));
+                let want = from_dec_inc(w.0, w.1);
+                let ang = dot(got, want).abs().clamp(0.0, 1.0).acos().to_degrees();
+                assert!(ang < 0.25, "{a:?}: {s:?} -> off by {ang:.2} degrees");
+            }
+        }
+    }
+
+    #[test]
+    fn owens_is_a_proper_rotation() {
+        let r = owens_rotation(123.0, 75.0, 200.0, 55.0);
+        let i = mat_mul(&r, &crate::tensor::transpose(&r));
+        for a in 0..3 {
+            for b in 0..3 {
+                assert!((i[a][b] - if a == b { 1.0 } else { 0.0 }).abs() < 1e-12);
+            }
+        }
+        let det = r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1]) - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0]) + r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0]);
+        assert!((det - 1.0).abs() < 1e-12);
     }
 }

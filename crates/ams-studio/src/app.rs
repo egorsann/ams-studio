@@ -38,6 +38,7 @@ pub enum Action {
     Tool(&'static str),
     Factors,
     OrientParams,
+    Owens,
     Colors,
     About,
     ToggleBrowser,
@@ -179,6 +180,7 @@ const W_COLORS: usize = 4;
 const W_FACTORS: usize = 5;
 const W_ABOUT: usize = 6;
 const W_EDIT: usize = 7;
+const W_OWENS: usize = 13;
 
 struct ShotJob {
     copy: bool,
@@ -236,6 +238,10 @@ pub struct App {
     win_factors: bool,
     win_about: bool,
     win_edit: bool,
+    win_owens: bool,
+    /// Owens rows (FS, FD, DS, DD per specimen) and the file as it was before the last rotation.
+    owens: Vec<[f64; 4]>,
+    owens_undo: Option<(Vec<u8>, Vec<ams_core::ams::Specimen>)>,
     ana: analysis_ui::AnaState,
     edit_name: String,
     info: Option<String>,
@@ -345,6 +351,9 @@ impl App {
             win_factors: false,
             win_about: false,
             win_edit: false,
+            win_owens: false,
+            owens: vec![],
+            owens_undo: None,
             ana: Default::default(),
             edit_name: String::new(),
             info: None,
@@ -585,6 +594,15 @@ impl App {
                     } else {
                         self.info = Some("Select exactly one specimen to edit its name.".into());
                     }
+                }
+            }
+            Action::Owens => {
+                if let Some(d) = &self.doc {
+                    if self.owens.len() != d.specs.len() {
+                        self.owens = vec![[0.0; 4]; d.specs.len()];
+                        self.owens_undo = None;
+                    }
+                    self.open_win(W_OWENS);
                 }
             }
             Action::SetClasses => self.info = Some("Data classes are not implemented yet. Colour-coding by Km, P, Pj or T is available in the Specimens pane.".into()),
@@ -867,6 +885,8 @@ impl eframe::App for App {
                 ui.menu_button("Edit", |ui| {
                     if item(ui, "Edit Data", "F1", has) { actions.push(Action::EditData) }
                     if item(ui, "Set Data Classes", "Ctrl+F1", has) { actions.push(Action::SetClasses) }
+                    ui.separator();
+                    if item(ui, "Spec to Geo (Owens)", "", has) { actions.push(Action::Owens) }
                     ui.separator();
                     if item(ui, "Invert Selection", "Shift+Ins", has) { actions.push(Action::InvertSel) }
                     if item(ui, "Disregard Selected Record(s)", "Shift+Del", has) { actions.push(Action::Disregard) }
@@ -1621,6 +1641,7 @@ impl App {
             W_FACTORS => self.win_factors = true,
             W_ABOUT => self.win_about = true,
             W_EDIT => self.win_edit = true,
+            W_OWENS => self.win_owens = true,
             _ => {}
         }
     }
@@ -1742,10 +1763,90 @@ impl App {
         }
         self.win_edit = open;
 
+        self.owens_window(ctx);
         self.table_window(ctx);
         self.group_window(ctx);
         self.contour_window(ctx);
         self.tool_windows(ctx);
+    }
+
+    /// Edit > Spec to Geo (Owens): per specimen, strike/dip of a plane in the field and of the same plane
+    /// on the drilling table; rotates the data of the open file (cumulatively, like the original).
+    fn owens_window(&mut self, ctx: &egui::Context) {
+        if !self.win_owens {
+            return;
+        }
+        let Some(doc) = &self.doc else {
+            self.win_owens = false;
+            return;
+        };
+        if self.owens.len() != doc.specs.len() {
+            self.owens = vec![[0.0; 4]; doc.specs.len()];
+        }
+        let names: Vec<String> = doc.specs.iter().map(|s| s.name.clone()).collect();
+        let mut rows = std::mem::take(&mut self.owens);
+        let can_undo = self.owens_undo.is_some();
+        let (mut open, mut copy, mut rotate, mut undo, mut cancel) = (true, false, false, false, false);
+        self.base_window(ctx, "Specimen to Geographic Rotation (Owens' method)", W_OWENS, Vec2::new(620.0, 700.0)).open(&mut open).resizable(true).show(ctx, |ui| {
+            tools_ui::pop_style(ui, 1.3);
+            ui.label("FS / FD: strike and dip of a plane in the field.  DS / DD: strike and dip of the same plane on the drilling table.");
+            ui.label(RichText::new("Strikes by the right-hand rule. The rotation is applied to the data of the open file (both phases) and is cumulative.").weak());
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical().max_height(ui.available_height() - 70.0).show(ui, |ui| {
+                egui::Grid::new("owens-grid").striped(true).show(ui, |ui| {
+                    for h in ["Name", "FS", "FD", "DS", "DD"] {
+                        ui.label(RichText::new(h).strong());
+                    }
+                    ui.end_row();
+                    for (n, row) in names.iter().zip(rows.iter_mut()) {
+                        ui.label(n);
+                        for (k, v) in row.iter_mut().enumerate() {
+                            let r = if k % 2 == 0 { 0.0..=360.0 } else { 0.0..=180.0 };
+                            ui.add(egui::DragValue::new(v).range(r).speed(0.5).max_decimals(1).suffix(" \u{b0}"));
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                copy = ui.button("Copy 1st row to all").clicked();
+                rotate = ui.button("Rotate").clicked();
+                ui.add_enabled_ui(can_undo, |ui| undo = ui.button("Undo last rotation").clicked());
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if copy {
+            if let Some(first) = rows.first().copied() {
+                rows.iter_mut().for_each(|r| *r = first);
+            }
+        }
+        let mut store = None;
+        if rotate {
+            if let Some(d) = &mut self.doc {
+                if rows.iter().any(|r| *r != [0.0; 4]) {
+                    store = Some((d.raw.clone(), d.specs.clone()));
+                }
+                for (i, r) in rows.iter().enumerate().filter(|(_, r)| **r != [0.0; 4]) {
+                    let rot = ams_core::coords::owens_rotation(r[0], r[1], r[2], r[3]);
+                    d.rotate_specimen(i, &rot);
+                }
+                rows.iter_mut().for_each(|r| *r = [0.0; 4]);
+                self.dirty = true;
+            }
+        }
+        if undo {
+            if let (Some(d), Some((raw, specs))) = (&mut self.doc, self.owens_undo.take()) {
+                d.raw = raw;
+                d.specs = specs;
+                self.dirty = true;
+            }
+        }
+        if store.is_some() {
+            self.owens_undo = store;
+        }
+        self.owens = rows;
+        self.win_owens = open && !cancel && !rotate;
     }
 
     fn table_window(&mut self, ctx: &egui::Context) {

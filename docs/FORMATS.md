@@ -37,6 +37,21 @@ Rules that cost time to find:
 - Duplicate specimen names occur (stale records from corrections); no internal way to tell which is current.
 - Saving a subset (Save Active Records As, Append Selected Records) copies whole 640-byte records, so nothing is lost.
 
+## `.ran` (Anisoft 4.2 / older AGICO binary, read only for reference)
+
+Decoded from files made up for the purpose; the original Anisoft 6 cannot write it. A 64-byte header (a backslash, then spaces, the text `6  0  6  0` at offset 0x30) followed by 64-byte records:
+
+| offset | content |
+|---|---|
+| 0 | name, 12 bytes, space padded |
+| 12 | 4 zero bytes |
+| 16 | Km, float32, in units of 1e-6 |
+| 20 | six float32: Txx, Tyy, Tzz, Txy, Tyz, Txz, trace-normalised, axes x north, y east, z down |
+| 44 | `SS` |
+| 52 | `00` |
+
+Anisoft 4.2 reads `.ran`, older text `.ams` and a few others, and rejects Safyr7 `.ams` files. AMS Studio does not read or write `.ran`; its *Spec to Geo (Owens)* works on `.ams` directly.
+
 ## `.ged` (GED Editor output)
 
 CRLF text, every line padded with spaces to 62 characters.

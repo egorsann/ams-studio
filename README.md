@@ -41,7 +41,7 @@ Everything below is in the program today.
 - **Group Statistics** (F9) with the original's colour-coded tables and a stereonet with data points, mean-tensor axes, **Jelinek confidence ellipses**, optional great-circle planes and a **bootstrap cloud**; display toggles for everything.
 - **Contour Plot** (F12) for K1, K2, K3: continuous or discrete levels in the axis colour, adjustable smoothing, contour lines, data points, eigenvectors with their eigenvalue table, colour scale.
 - **Tools menu**, all five windows: **GED Editor** (read/write `.ged` files), **Tensor Addition / Subtraction** (pair two files by specimen name, add or subtract tensors, save), **Fabric Overprint** (mix two fabrics, simulate the series), **Intersection Toolbox** (two lineations to a plane, two foliations to a lineation, with the net drawn), **Deform AMS** (grain-population model with seven strain types, step by step).
-- **Edit** (rename specimens, invert / disregard / restore / clear selection), **Save Active Records As**, **Append Selected Records Into** (records are copied byte for byte), **Export CSV** (in- and out-of-phase in one file), **Export Selection (CSV)**.
+- **Edit** (rename specimens, invert / disregard / restore / clear selection), **Spec to Geo (Owens)** (see below), **Save Active Records As**, **Append Selected Records Into** (records are copied byte for byte), **Export CSV** (in- and out-of-phase in one file), **Export Selection (CSV)**.
 - **Graphics**: copy to the clipboard or save PNGs of the plots you tick under *Export graphics*.
 
 ### Screenshots
@@ -82,10 +82,11 @@ Each check is reproducible: `cargo run -p ams-core --example validate` and `--ex
 Honest list of the gaps:
 
 - **Per-specimen orientation.** The original takes geographic, paleo and tectonic coordinates from orientation values stored in each `.ams` record (written by *Edit Data* from a `.ged` file). Here the G / P / T views use the global values in *Settings > Orientation Parameters*, which is only an approximation. The geographic and paleo rules are decoded (see [`docs/ORIGINAL_BEHAVIOUR.md`](docs/ORIGINAL_BEHAVIOUR.md)); the tectonic rule is not.
+- **Spec to Geo (Owens)** is not in Anisoft 6, only in Anisoft 4.2 (which needs old `.ran` files). *Edit > Spec to Geo (Owens)* gives it for `.ams` files: for each specimen enter strike and dip of a plane in the field (FS / FD) and strike and dip of the same plane on the drilling table (DS / DD), *Copy 1st row to all*, *Rotate*. The tensors of the open file (both phases) are rotated, cumulatively like the original, and *Save Active Records As* writes them; *Undo last rotation* takes the last one back. The rotation was rebuilt by driving Anisoft 4.2 with made-up tensors: 16 runs agree to the 0.1 degree the original prints (details in [`docs/ORIGINAL_BEHAVIOUR.md`](docs/ORIGINAL_BEHAVIOUR.md)).
 - **Bootstrap ellipses** are this program's own method (500 resamples, 95 % region) and differ from the original's.
 - **Contour density** is very close to the original (colour-scale maxima within about 3 %) but not identical.
 - **Not exact:** the E12 / E23 / E13 confidence angles are computed from the stored standard deviations and match the original to about 5 % (it uses the full covariance, which the files do not contain). The stereonet's *Foliation* / *Lineation* options need `.ged` data and are not available.
-- **Not implemented:** import of `.asc` / `.ran` files, *Set Data Classes*, Paleo-Horizontal / Paleo-Vertical, and the contour inputs *Foliation Pole* / *Lineation* (they need the orientation data above). Their menu items are present so the layout matches.
+- **Not implemented:** import of `.asc` / `.ran` files (the `.ran` layout is documented in `docs/FORMATS.md`), *Set Data Classes*, Paleo-Horizontal / Paleo-Vertical, and the contour inputs *Foliation Pole* / *Lineation* (they need the orientation data above). Their menu items are present so the layout matches.
 - Deform AMS starts from the isotropic grain population; the original starts from the fabric of the open data.
 
 ## Run it
