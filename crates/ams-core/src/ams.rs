@@ -59,6 +59,8 @@ pub struct Specimen {
     pub freq_hz: f64,
     pub instrument: String,
     pub volume_cm3: f64,
+    /// Orientation stored in the record (written by Edit Data), if any.
+    pub orient: Option<crate::orient::RecOrient>,
     pub inphase: Phase,
     pub outphase: Phase,
 }
@@ -151,6 +153,7 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Specimen>, AmsError> {
             freq_hz: f32_at(rec, OFF_FREQ),
             instrument: text_at(rec, OFF_INSTRUMENT, 8),
             volume_cm3: f32_at(rec, OFF_VOLUME),
+            orient: crate::orient::read(rec),
             inphase: parse_phase(rec, OFF_KRE),
             outphase: parse_phase(rec, OFF_KIM),
         })
@@ -164,14 +167,19 @@ pub fn read_file(path: &std::path::Path) -> Result<Vec<Specimen>, Box<dyn std::e
 /// Build one 640-byte record. Used by the tests and the demo-data generator;
 /// it writes only the fields this crate reads.
 pub fn build_record(name: &str, phase_in: &Phase, phase_out: &Phase, field: f32, freq: f32) -> Vec<u8> {
+    build_record_with(name, phase_in, phase_out, field, freq, "DEMO")
+}
+
+/// Like [`build_record`] with the instrument text of the record given.
+pub fn build_record_with(name: &str, phase_in: &Phase, phase_out: &Phase, field: f32, freq: f32, instrument: &str) -> Vec<u8> {
     let mut r = vec![0u8; RECORD_LEN];
     for (i, b) in name.bytes().take(NAME_LEN).enumerate() {
         r[OFF_NAME + i] = b;
     }
     r[OFF_FIELD..OFF_FIELD + 4].copy_from_slice(&field.to_le_bytes());
     r[OFF_FREQ..OFF_FREQ + 4].copy_from_slice(&freq.to_le_bytes());
-    for (i, b) in b"DEMO".iter().enumerate() {
-        r[OFF_INSTRUMENT + i] = *b;
+    for (i, b) in instrument.bytes().take(8).enumerate() {
+        r[OFF_INSTRUMENT + i] = b;
     }
     r[OFF_VOLUME..OFF_VOLUME + 4].copy_from_slice(&10.0f32.to_le_bytes());
     for (base, p) in [(OFF_KRE, phase_in), (OFF_KIM, phase_out)] {

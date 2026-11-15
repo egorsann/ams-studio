@@ -59,6 +59,11 @@ impl Doc {
             .iter()
             .map(|s| {
                 let ph = if out_of_phase { &s.outphase } else { &s.inphase };
+                // geographic coordinates come from the orientation stored in the record when it has one
+                let r = match (cs, &s.orient) {
+                    (CoordSys::Geographic, Some(ro)) => ams_core::orient::geo_rotation(ro),
+                    _ => r,
+                };
                 let tensor = rotate_tensor(&ph.tensor, &r);
                 Derived { km: ph.km, axes: Axes::from_tensor(&tensor), tensor }
             })
@@ -84,6 +89,20 @@ impl Doc {
             put_phase(rec, base, ph.km, &ph.tensor);
         }
         self.modified = true;
+    }
+
+    /// Applies the Edit Data table: names and the orientation of every record (`None` clears it).
+    pub fn apply_edit(&mut self, rows: Vec<(String, Option<ams_core::orient::RecOrient>)>) {
+        for (i, (name, o)) in rows.into_iter().enumerate().take(self.specs.len()) {
+            if name.trim() != self.specs[i].name {
+                self.rename(i, &name);
+            }
+            if self.specs[i].orient != o {
+                ams_core::orient::write(&mut self.raw[i * RECORD_LEN..(i + 1) * RECORD_LEN], o.as_ref());
+                self.specs[i].orient = o;
+                self.modified = true;
+            }
+        }
     }
 
     pub fn rename(&mut self, i: usize, name: &str) {
@@ -166,6 +185,25 @@ mod tests {
         assert_eq!(re.len(), 1);
         assert_eq!(re[0].name, "ZZ01-X9");
         assert!((re[0].inphase.km - 1e-3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn edit_data_writes_orientation_and_names() {
+        let (_d, p) = tmp_doc();
+        let mut doc = Doc::open(&p).unwrap();
+        assert!(doc.specs[0].orient.is_none());
+        let o = ams_core::orient::RecOrient { op: [9, 90, 3, 90], alpha: 41.0, phi: 31.0, fol_code: ['7', '5'], fol: [(61.0, 21.0), (151.0, 44.0)], ..Default::default() };
+        doc.apply_edit(vec![("ZZ01-A1".into(), Some(o.clone())), ("ZZ01-X2".into(), None)]);
+        assert!(doc.modified);
+        let again = ams::parse(&doc.raw).unwrap();
+        assert_eq!(again[0].orient, Some(o));
+        assert_eq!(again[1].name, "ZZ01-X2");
+        assert!(again[1].orient.is_none());
+        // the geographic view now uses the record's own rotation
+        let d = doc.derive(false, CoordSys::Geographic, &Orientation::default());
+        let s = doc.derive(false, CoordSys::Specimen, &Orientation::default());
+        assert!((d[0].axes.dec_inc[0].0 - s[0].axes.dec_inc[0].0).abs() > 1.0);
+        assert!((d[1].axes.dec_inc[0].0 - s[1].axes.dec_inc[0].0).abs() < 1e-9);
     }
 
     #[test]

@@ -15,7 +15,12 @@ Fixed **640-byte records, no file header**; record count = file size / 640. All 
 | 82, 84, 86, 88 | 2 each | int16 orientation parameters OP1..OP4 (default 6, 0, 6, 0) |
 | 90 | 2 | int16 `-1` when the record carries GED orientation data |
 | 92, 96 | 4 each | sampling azimuth alpha and plunge phi (float32) |
-| 100.. | | ASCII foliation/lineation codes and the foliation/lineation angles (float32); layout partly decoded: save a record from the original's Edit Data with distinct values in every cell and byte-diff it against the unedited file (`cmp -l`) |
+| 100 | 4 | foliation #1 code, space, foliation #2 code, space (ASCII) |
+| 108, 112 | 4 each | azimuth of foliation #1, #2 (float32) |
+| 124, 128 | 4 each | dip of foliation #1, #2 (float32) |
+| 140 | 4 | lineation #1 code, space, lineation #2 code, space (ASCII) |
+| 148, 152 | 4 each | trend of lineation #1, #2 (float32) |
+| 164, 168 | 4 each | plunge of lineation #1, #2 (float32) |
 | 180 | 144 | **in-phase block** |
 | 324 | 144 | **out-of-phase block** (identical layout) |
 
@@ -50,7 +55,7 @@ Decoded from files made up for the purpose; the original Anisoft 6 cannot write 
 | 44 | `SS` |
 | 52 | `00` |
 
-Anisoft 4.2 reads `.ran`, older text `.ams` and a few others, and rejects Safyr7 `.ams` files. AMS Studio does not read or write `.ran`; its *Spec to Geo (Owens)* works on `.ams` directly.
+Anisoft 4.2 reads `.ran`, older text `.ams` and a few others, and rejects Safyr7 `.ams` files. AMS Studio imports `.ran` (File > Import Data File(s); no out-of-phase data, standard deviations or F-tests come with it) but does not write it; its *Spec to Geo (Owens)* works on `.ams` directly.
 
 ## `.ged` (GED Editor output)
 

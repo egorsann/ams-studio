@@ -96,11 +96,13 @@ pub struct ColorCfg {
     pub log: bool,
     /// 0 rainbow, 1 shades, 2 grayscales
     pub palette: u8,
+    /// Colour by the data classes of the file instead of a parameter.
+    pub by_class: bool,
 }
 
 impl Default for ColorCfg {
     fn default() -> Self {
-        ColorCfg { on: false, param: 0, auto: true, min: 0.0, max: 1.0, log: false, palette: 0 }
+        ColorCfg { on: false, param: 0, auto: true, min: 0.0, max: 1.0, log: false, palette: 0, by_class: false }
     }
 }
 
@@ -150,7 +152,7 @@ pub fn color_bar(ui: &Ui, rect: Rect, cfg: &ColorCfg, range: (f64, f64), th: &Th
         let (x0, x1) = (bar.min.x + bar.width() * s as f32 / n as f32, bar.min.x + bar.width() * (s + 1) as f32 / n as f32 + 0.6);
         pa.rect_filled(Rect::from_min_max(Pos2::new(x0, bar.min.y), Pos2::new(x1, bar.max.y)), 0.0, palette_color(cfg.palette, s as f64 / (n - 1) as f64));
     }
-    pa.rect_stroke(bar, 0.0, Stroke::new(1.0, th.ink()), egui::StrokeKind::Outside);
+    pa.rect_stroke(bar, 0.0, Stroke::new(1.0, th.line()), egui::StrokeKind::Outside);
     let f = FontId::proportional(10.5);
     let txt = |v: f64| {
         let v = if cfg.log { 10f64.powf(v) } else { v };
@@ -170,13 +172,33 @@ pub struct Theme {
 
 impl Theme {
     pub fn ink(&self) -> Color32 {
-        if self.dark { Color32::from_gray(220) } else { Color32::from_gray(30) }
+        if self.dark { Color32::from_rgb(230, 232, 235) } else { Color32::from_gray(30) }
     }
     pub fn faint(&self) -> Color32 {
-        if self.dark { Color32::from_gray(90) } else { Color32::from_gray(190) }
+        if self.dark { Color32::from_rgb(111, 119, 130) } else { Color32::from_gray(190) }
     }
     pub fn canvas(&self) -> Color32 {
-        if self.dark { Color32::from_gray(24) } else { Color32::WHITE }
+        if self.dark { Color32::from_rgb(17, 19, 23) } else { Color32::WHITE }
+    }
+}
+
+impl Theme {
+    /// Axis frames, ticks and the net circle: softer than the text on the dark background.
+    pub fn line(&self) -> Color32 {
+        if self.dark { Color32::from_rgb(138, 146, 158) } else { Color32::from_gray(30) }
+    }
+    /// Thin outline around markers.
+    pub fn edge(&self) -> Color32 {
+        if self.dark { Color32::from_rgb(14, 16, 20) } else { Color32::from_gray(30) }
+    }
+    /// Colour-coded markers are a little softer on the dark background.
+    pub fn soft(&self, c: Color32) -> Color32 {
+        if !self.dark {
+            return c;
+        }
+        let lum = 0.3 * c.r() as f32 + 0.59 * c.g() as f32 + 0.11 * c.b() as f32;
+        let m = |x: u8| ((x as f32 * 0.78 + lum * 0.22) * 0.93 + 14.0).min(255.0) as u8;
+        Color32::from_rgb(m(c.r()), m(c.g()), m(c.b()))
     }
 }
 
@@ -288,7 +310,7 @@ fn draw_axes(ui: &Ui, outer: Rect, x: (f64, f64), y: (f64, f64), xlabel: &str, y
     if xlog {
         log_ticks(&pa, x.0, x.1, |v, major, label| {
             let s = f.to_screen(v, y.0);
-            pa.line_segment([Pos2::new(s.x, plot.max.y), Pos2::new(s.x, plot.max.y + if major { 5.0 } else { 3.0 })], Stroke::new(1.0, th.ink()));
+            pa.line_segment([Pos2::new(s.x, plot.max.y), Pos2::new(s.x, plot.max.y + if major { 5.0 } else { 3.0 })], Stroke::new(1.0, th.line()));
             pa.line_segment([Pos2::new(s.x, plot.min.y), Pos2::new(s.x, plot.max.y)], Stroke::new(0.5, th.faint().gamma_multiply(if major { 0.5 } else { 0.25 })));
             if let Some(l) = label {
                 pa.text(Pos2::new(s.x, plot.max.y + 7.0), Align2::CENTER_TOP, l, font.clone(), th.ink());
@@ -298,7 +320,7 @@ fn draw_axes(ui: &Ui, outer: Rect, x: (f64, f64), y: (f64, f64), xlabel: &str, y
         let (xt, xd) = nice_ticks(x.0, x.1, (plot.width() / 70.0) as usize);
         for v in xt {
             let s = f.to_screen(v, y.0);
-            pa.line_segment([Pos2::new(s.x, plot.max.y), Pos2::new(s.x, plot.max.y + 4.0)], Stroke::new(1.0, th.ink()));
+            pa.line_segment([Pos2::new(s.x, plot.max.y), Pos2::new(s.x, plot.max.y + 4.0)], Stroke::new(1.0, th.line()));
             pa.line_segment([Pos2::new(s.x, plot.min.y), Pos2::new(s.x, plot.max.y)], Stroke::new(0.5, th.faint().gamma_multiply(0.5)));
             pa.text(Pos2::new(s.x, plot.max.y + 6.0), Align2::CENTER_TOP, format!("{v:.xd$}"), font.clone(), th.ink());
         }
@@ -306,7 +328,7 @@ fn draw_axes(ui: &Ui, outer: Rect, x: (f64, f64), y: (f64, f64), xlabel: &str, y
     if ylog {
         log_ticks(&pa, y.0, y.1, |v, major, label| {
             let s = f.to_screen(x.0, v);
-            pa.line_segment([Pos2::new(plot.min.x - if major { 5.0 } else { 3.0 }, s.y), Pos2::new(plot.min.x, s.y)], Stroke::new(1.0, th.ink()));
+            pa.line_segment([Pos2::new(plot.min.x - if major { 5.0 } else { 3.0 }, s.y), Pos2::new(plot.min.x, s.y)], Stroke::new(1.0, th.line()));
             pa.line_segment([Pos2::new(plot.min.x, s.y), Pos2::new(plot.max.x, s.y)], Stroke::new(0.5, th.faint().gamma_multiply(if major { 0.5 } else { 0.25 })));
             if let Some(l) = label {
                 pa.text(Pos2::new(plot.min.x - 7.0, s.y), Align2::RIGHT_CENTER, l, font.clone(), th.ink());
@@ -316,12 +338,12 @@ fn draw_axes(ui: &Ui, outer: Rect, x: (f64, f64), y: (f64, f64), xlabel: &str, y
         let (yt, yd) = nice_ticks(y.0, y.1, (plot.height() / 36.0) as usize);
         for v in yt {
             let s = f.to_screen(x.0, v);
-            pa.line_segment([Pos2::new(plot.min.x - 4.0, s.y), Pos2::new(plot.min.x, s.y)], Stroke::new(1.0, th.ink()));
+            pa.line_segment([Pos2::new(plot.min.x - 4.0, s.y), Pos2::new(plot.min.x, s.y)], Stroke::new(1.0, th.line()));
             pa.line_segment([Pos2::new(plot.min.x, s.y), Pos2::new(plot.max.x, s.y)], Stroke::new(0.5, th.faint().gamma_multiply(0.5)));
             pa.text(Pos2::new(plot.min.x - 7.0, s.y), Align2::RIGHT_CENTER, format!("{v:.yd$}"), font.clone(), th.ink());
         }
     }
-    pa.rect_stroke(plot, 2.0, Stroke::new(1.0, th.ink()), egui::StrokeKind::Inside);
+    pa.rect_stroke(plot, 2.0, Stroke::new(1.0, th.line()), egui::StrokeKind::Inside);
     pa.text(Pos2::new(plot.center().x, outer.max.y - 6.0), Align2::CENTER_BOTTOM, xlabel, FontId::proportional(12.5), th.ink());
     pa.text(Pos2::new(outer.min.x + 8.0, plot.center().y), Align2::CENTER_CENTER, ylabel, FontId::proportional(12.5), th.ink());
     f
@@ -367,7 +389,7 @@ pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Th
     let r = (rect.width().min(rect.height()) / 2.0 - 26.0).max(20.0);
     let c = rect.center();
     pa.circle_filled(c, r, th.canvas());
-    pa.circle_stroke(c, r, Stroke::new(1.2, th.ink()));
+    pa.circle_stroke(c, r, Stroke::new(1.2, th.line()));
     // tick marks every 10 deg along the N-S and E-W diameters, like the original net
     for deg in (10..90).step_by(10) {
         let (x, _) = project(90.0, deg as f64);
@@ -376,12 +398,12 @@ pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Th
             for (dx, dy) in [(1.0f32, 0.0f32), (0.0, 1.0)] {
                 let q = Pos2::new(c.x + s * dx * rr, c.y - s * dy * rr);
                 let (tx, ty) = (dy * 3.0, dx * 3.0);
-                pa.line_segment([Pos2::new(q.x - tx, q.y - ty), Pos2::new(q.x + tx, q.y + ty)], Stroke::new(1.0, th.ink()));
+                pa.line_segment([Pos2::new(q.x - tx, q.y - ty), Pos2::new(q.x + tx, q.y + ty)], Stroke::new(1.0, th.line()));
             }
         }
     }
-    pa.line_segment([Pos2::new(c.x - 4.0, c.y), Pos2::new(c.x + 4.0, c.y)], Stroke::new(1.0, th.ink()));
-    pa.line_segment([Pos2::new(c.x, c.y - 4.0), Pos2::new(c.x, c.y + 4.0)], Stroke::new(1.0, th.ink()));
+    pa.line_segment([Pos2::new(c.x - 4.0, c.y), Pos2::new(c.x + 4.0, c.y)], Stroke::new(1.0, th.line()));
+    pa.line_segment([Pos2::new(c.x, c.y - 4.0), Pos2::new(c.x, c.y + 4.0)], Stroke::new(1.0, th.line()));
     let f = FontId::proportional(11.0);
     pa.text(Pos2::new(c.x, c.y - r - 3.0), Align2::CENTER_BOTTOM, "N", f.clone(), th.ink());
     pa.text(Pos2::new(c.x + r + 4.0, c.y), Align2::LEFT_CENTER, "90", f.clone(), th.ink());
@@ -452,9 +474,9 @@ pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Th
                 }
                 let (x, y) = project(p.di[a].0, p.di[a].1);
                 let s = Pos2::new(c.x + x as f32 * r, c.y - y as f32 * r);
-                let fill = p.color.unwrap_or(th.k_colors[a]);
+                let fill = p.color.map(|c| th.soft(c)).unwrap_or(th.k_colors[a]);
                 if opts.data || p.selected {
-                    marker(&pa, s, a as u8, opts.size, fill, th.ink(), p.selected);
+                    marker(&pa, s, a as u8, opts.size, fill, th.edge(), p.selected);
                 }
                 if !mask[a] {
                     continue;
@@ -476,7 +498,7 @@ pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Th
     if opts.legend {
         for (a, name) in ["K1", "K2", "K3"].iter().enumerate() {
             let y = rect.max.y - 54.0 + a as f32 * 15.0 + 8.0;
-            marker(&pa, Pos2::new(rect.min.x + 18.0, y), a as u8, 4.0, th.k_colors[a], th.ink(), false);
+            marker(&pa, Pos2::new(rect.min.x + 18.0, y), a as u8, 4.0, th.k_colors[a], th.edge(), false);
             pa.text(Pos2::new(rect.min.x + 32.0, y), Align2::LEFT_CENTER, *name, f.clone(), th.ink());
         }
     }
@@ -584,7 +606,7 @@ pub fn histogram(ui: &mut Ui, rect: Rect, pts: &[Pt], bins: usize, cfg: &AxisCfg
         let x0 = lo + i as f64 * w;
         let r = Rect::from_min_max(f.to_screen(x0, *n as f64), f.to_screen(x0 + w, 0.0));
         pa.rect_filled(r, 0.0, th.accent.gamma_multiply(0.75));
-        pa.rect_stroke(r, 0.0, Stroke::new(1.0, th.ink()), egui::StrokeKind::Inside);
+        pa.rect_stroke(r, 0.0, Stroke::new(1.0, th.line()), egui::StrokeKind::Inside);
         if resp.hover_pos().map_or(false, |h| r.contains(h)) {
             let mid = x0 + w / 2.0;
             let shown = if cfg.log { 10f64.powf(mid) } else { mid / scale };
@@ -623,7 +645,7 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
     }
     let clip = ui.painter_at(f.plot);
     if spec.zero_line && !spec.y.log && yr.0 < 0.0 && yr.1 > 0.0 {
-        clip.line_segment([f.to_screen(xr.0, 0.0), f.to_screen(xr.1, 0.0)], Stroke::new(1.2, th.ink()));
+        clip.line_segment([f.to_screen(xr.0, 0.0), f.to_screen(xr.1, 0.0)], Stroke::new(1.2, th.line()));
     }
     if spec.diagonal {
         // y = x in data units: valid when both axes use the same transformation
@@ -649,9 +671,9 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
             if spec.conf && !spec.y.log && (9..=11).contains(&spec.y.param) {
                 let sd = pts[*i].sds[spec.y.param - 9] * 10f64.powi(-yexp);
                 let (a, b) = (f.to_screen(*x, y - sd), f.to_screen(*x, y + sd));
-                clip.line_segment([a, b], Stroke::new(1.0, th.ink()));
+                clip.line_segment([a, b], Stroke::new(1.0, th.line()));
             }
-            marker(&clip, s, 2, size, pts[*i].color.unwrap_or(th.accent), th.ink(), pts[*i].selected);
+            marker(&clip, s, 2, size, pts[*i].color.map(|c| th.soft(c)).unwrap_or(th.accent), th.edge(), pts[*i].selected);
             if let Some(b) = done {
                 if b.contains(s) {
                     inside.push(pts[*i].idx);

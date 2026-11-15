@@ -3,6 +3,7 @@ use crate::icons::{self, Icon};
 use crate::plots::{self, AxisCfg, ColorCfg, Pt, ScatterSpec, StereoOpts, Theme};
 use ams_core::params::{param_class, param_sd, param_values, N_PARAMS, PARAM_LABELS};
 mod analysis_ui;
+mod dialogs_ui;
 mod tools_ui;
 use ams_core::coords::{CoordSys, Orientation};
 use ams_core::export;
@@ -71,9 +72,13 @@ impl PartialEq for AxisCfg {
 }
 impl PartialEq for ColorCfg {
     fn eq(&self, o: &Self) -> bool {
-        self.on == o.on && self.param == o.param && self.auto == o.auto && self.min == o.min && self.max == o.max && self.log == o.log && self.palette == o.palette
+        self.on == o.on && self.param == o.param && self.auto == o.auto && self.min == o.min && self.max == o.max && self.log == o.log && self.palette == o.palette && self.by_class == o.by_class
     }
 }
+
+/// K1 / K2 / K3 marker colours: strong ones on white, softer ones on the dark blue-grey.
+const LIGHT_K: [Color32; 3] = [Color32::from_rgb(220, 30, 30), Color32::from_rgb(30, 170, 60), Color32::from_rgb(30, 60, 220)];
+const DARK_K: [Color32; 3] = [Color32::from_rgb(222, 112, 118), Color32::from_rgb(104, 196, 140), Color32::from_rgb(120, 160, 238)];
 
 fn class_color(class: u8, dark: bool) -> Option<Color32> {
     let c = match class {
@@ -154,12 +159,18 @@ fn axis_ui(ui: &mut Ui, title: &str, id: &str, cfg: &mut AxisCfg, dark: bool) {
 fn color_ui(ui: &mut Ui, id: &str, c: &mut ColorCfg, dark: bool) {
     ui.checkbox(&mut c.on, RichText::new("Color-coding").strong());
     ui.add_enabled_ui(c.on, |ui| {
-        param_combo(ui, id, &mut c.param, dark);
-        range_fields(ui, &mut c.auto, &mut c.min, &mut c.max, &mut c.log, id);
         ui.horizontal(|ui| {
-            ui.radio_value(&mut c.palette, 0, "Rainbow");
-            ui.radio_value(&mut c.palette, 1, "Shades");
-            ui.radio_value(&mut c.palette, 2, "Grayscales");
+            ui.radio_value(&mut c.by_class, false, "Parameter");
+            ui.radio_value(&mut c.by_class, true, "Data Classes").on_hover_text("Colour by the classes set in Edit > Set Data Classes");
+        });
+        ui.add_enabled_ui(!c.by_class, |ui| {
+            param_combo(ui, id, &mut c.param, dark);
+            range_fields(ui, &mut c.auto, &mut c.min, &mut c.max, &mut c.log, id);
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut c.palette, 0, "Rainbow");
+                ui.radio_value(&mut c.palette, 1, "Shades");
+                ui.radio_value(&mut c.palette, 2, "Grayscales");
+            });
         });
     });
 }
@@ -181,11 +192,43 @@ const W_FACTORS: usize = 5;
 const W_ABOUT: usize = 6;
 const W_EDIT: usize = 7;
 const W_OWENS: usize = 13;
+const W_CLASSES: usize = 14;
 
 struct ShotJob {
     copy: bool,
     base: Option<PathBuf>,
     rects: Vec<(&'static str, Rect)>,
+}
+
+/// A switch like the ones on a phone: a rounded track with a knob that slides to the right when on.
+fn phone_switch(ui: &mut Ui, on: &mut bool) -> egui::Response {
+    let size = Vec2::new(46.0, 25.0);
+    let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    let t = ui.ctx().animate_bool_responsive(resp.id, *on);
+    let dark = ui.visuals().dark_mode;
+    let on_col = if dark { Color32::from_rgb(106, 160, 255) } else { Color32::from_rgb(47, 111, 222) };
+    let off_col = if dark { Color32::from_rgb(58, 64, 76) } else { Color32::from_rgb(190, 196, 206) };
+    let track = off_col.lerp_to_gamma(on_col, t);
+    let r = rect.height() / 2.0;
+    ui.painter().rect_filled(rect, r, track);
+    let x = egui::lerp((rect.min.x + r)..=(rect.max.x - r), t);
+    let c = Pos2::new(x, rect.center().y);
+    ui.painter().circle_filled(c + Vec2::new(0.0, 1.0), r - 2.5, Color32::from_black_alpha(50));
+    ui.painter().circle_filled(c, r - 2.5, Color32::WHITE);
+    if resp.hovered() {
+        ui.painter().rect_stroke(rect, r, Stroke::new(1.0, on_col.gamma_multiply(0.7)), StrokeKind::Outside);
+    }
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, *on, ""));
+    resp
+}
+
+/// Drag box for a strike (0-360, k even) or a dip (0-180, k odd).
+fn angle_drag(v: &mut f64, k: usize) -> egui::DragValue<'_> {
+    egui::DragValue::new(v).range(if k % 2 == 0 { 0.0..=360.0 } else { 0.0..=180.0 }).speed(0.5).max_decimals(1).suffix(" \u{b0}")
 }
 
 /// A small "i" in a circle that explains something when hovered.
@@ -238,6 +281,8 @@ pub struct App {
     pane_settings: [bool; 4],
     filter: usize,
     k_colors: [Color32; 3],
+    /// The K1/K2/K3 marker colours of the theme that is not shown right now (dark mode has softer ones).
+    k_other: [Color32; 3],
     dark: bool,
 
     win_table: bool,
@@ -248,6 +293,12 @@ pub struct App {
     win_factors: bool,
     win_about: bool,
     win_edit: bool,
+    win_classes: bool,
+    edit: dialogs_ui::EditState,
+    /// Data classes of the open file: definitions and, per specimen, an index into them.
+    classes: Vec<dialogs_ui::ClassDef>,
+    class_of: Vec<Option<usize>>,
+    cl: dialogs_ui::ClassState,
     win_owens: bool,
     /// Owens rows (FS, FD, DS, DD per specimen) and the file as it was before the last rotation.
     owens: Vec<[f64; 4]>,
@@ -256,9 +307,10 @@ pub struct App {
     owens_range: (usize, usize),
     /// Old style = the per-row table of Anisoft 4.2.
     owens_old: bool,
+    /// Short notice next to the Owens toggle: (text, time it appeared).
+    owens_toast: Option<(String, f64)>,
     owens_undo: Option<(Vec<u8>, Vec<ams_core::ams::Specimen>)>,
     ana: analysis_ui::AnaState,
-    edit_name: String,
     info: Option<String>,
     hover: [String; 4],
     last_anchor: Option<usize>,
@@ -356,7 +408,8 @@ impl App {
             list_h: 0.0,
             pane_settings: [false; 4],
             filter: 0,
-            k_colors: [Color32::from_rgb(220, 30, 30), Color32::from_rgb(30, 170, 60), Color32::from_rgb(30, 60, 220)],
+            k_colors: LIGHT_K,
+            k_other: DARK_K,
             dark: false,
             win_table: false,
             win_group: false,
@@ -366,14 +419,19 @@ impl App {
             win_factors: false,
             win_about: false,
             win_edit: false,
+            win_classes: false,
+            edit: Default::default(),
+            classes: vec![],
+            class_of: vec![],
+            cl: Default::default(),
             win_owens: false,
             owens: vec![],
             owens_one: [0.0; 4],
             owens_range: (1, 1),
-            owens_old: false,
+            owens_old: true,
+            owens_toast: None,
             owens_undo: None,
             ana: Default::default(),
-            edit_name: String::new(),
             info: None,
             hover: Default::default(),
             last_anchor: None,
@@ -386,6 +444,9 @@ impl App {
             last_title: String::new(),
         };
         app.load_state();
+        if app.dark {
+            std::mem::swap(&mut app.k_colors, &mut app.k_other);
+        }
         apply_style(&cc.egui_ctx, app.dark);
         if let Some(p) = open {
             app.open_path(p);
@@ -410,7 +471,7 @@ impl App {
                     cur[usize::from(k == "win_h")] = x.clamp(760.0, 8000.0);
                 }
                 "maximized" => self.win_max = v == "1",
-                "owens_old" => self.owens_old = v == "1",
+                "owens_new" => self.owens_old = v != "1",
                 "browser" => self.browser_open = v != "0",
                 "hfrac" => self.hfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
                 "vfrac" => self.vfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
@@ -427,7 +488,7 @@ impl App {
         let _ = std::fs::write(
             p,
             format!(
-                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nlogkm={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_old={}\n",
+                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nlogkm={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\n",
                 self.browser_dir.display(),
                 self.dark as u8,
                 self.browser_open as u8,
@@ -440,7 +501,7 @@ impl App {
                 self.win_size.map_or(1280.0, |s| s[0]),
                 self.win_size.map_or(820.0, |s| s[1]),
                 self.win_max as u8,
-                self.owens_old as u8
+                (!self.owens_old) as u8
             ),
         );
     }
@@ -452,6 +513,8 @@ impl App {
                     self.browser_dir = parent.to_path_buf();
                 }
                 self.doc = Some(d);
+                self.classes.clear();
+                self.class_of.clear();
                 self.dirty = true;
                 // recompute now: the rest of this frame (plots, table) indexes `derived` per specimen
                 self.refresh();
@@ -463,7 +526,7 @@ impl App {
     }
 
     fn theme(&self) -> Theme {
-        Theme { dark: self.dark, k_colors: self.k_colors, accent: Color32::from_rgb(59, 130, 246) }
+        Theme { dark: self.dark, k_colors: self.k_colors, accent: if self.dark { Color32::from_rgb(106, 160, 255) } else { Color32::from_rgb(59, 130, 246) } }
     }
 
     fn refresh(&mut self) {
@@ -505,9 +568,14 @@ impl App {
     }
 
     /// Copy of the points coloured according to `cfg`, and the colour range when colouring is on.
-    fn colorized(pts: &[Pt], cfg: &ColorCfg) -> (Vec<Pt>, Option<(f64, f64)>) {
+    fn colorized(pts: &[Pt], cfg: &ColorCfg, classes: &[Option<Color32>]) -> (Vec<Pt>, Option<(f64, f64)>) {
         if !cfg.on {
             return (pts.to_vec(), None);
+        }
+        if cfg.by_class {
+            // class colours; specimens without a class keep the default marker colour
+            let out = pts.iter().map(|p| Pt { color: classes.get(p.idx).copied().flatten(), ..p.clone() }).collect();
+            return (out, None);
         }
         let k = cfg.param.min(N_PARAMS - 1);
         let range = cfg.range(pts.iter().map(|p| p.vals[k]));
@@ -543,7 +611,7 @@ impl App {
                     self.open_path(p);
                 }
             }
-            Action::Import => self.info = Some("Import Data File(s) is not implemented yet: this version reads Safyr7 .ams files only.".into()),
+            Action::Import => self.import_files(),
             Action::SaveActive => {
                 if let Some(d) = &self.doc {
                     let name = d.path.file_stem().map(|s| format!("{}_active.ams", s.to_string_lossy())).unwrap_or("active.ams".into());
@@ -605,17 +673,7 @@ impl App {
                 self.dirty = true;
             }
             Action::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            Action::EditData => {
-                if let Some(d) = &self.doc {
-                    let sel: Vec<usize> = (0..d.specs.len()).filter(|&i| d.selected[i]).collect();
-                    if sel.len() == 1 {
-                        self.edit_name = d.specs[sel[0]].name.clone();
-                        self.open_win(W_EDIT);
-                    } else {
-                        self.info = Some("Select exactly one specimen to edit its name.".into());
-                    }
-                }
-            }
+            Action::EditData => self.open_edit_data(),
             Action::Owens => {
                 if let Some(d) = &self.doc {
                     if self.owens.len() != d.specs.len() {
@@ -626,7 +684,7 @@ impl App {
                     self.open_win(W_OWENS);
                 }
             }
-            Action::SetClasses => self.info = Some("Data classes are not implemented yet. Colour-coding by Km, P, Pj or T is available in the Specimens pane.".into()),
+            Action::SetClasses => self.open_classes(),
             Action::InvertSel => {
                 if let Some(d) = &mut self.doc {
                     for s in d.selected.iter_mut() {
@@ -727,6 +785,7 @@ impl App {
             }
             Action::ToggleTheme => {
                 self.dark = !self.dark;
+                std::mem::swap(&mut self.k_colors, &mut self.k_other);
                 apply_style(ctx, self.dark);
                 self.save_state();
             }
@@ -783,10 +842,11 @@ impl App {
     }
 }
 
+/// The dark theme follows TX Studio: a charcoal with a faint blue cast, never black.
 pub fn apply_style(ctx: &egui::Context, dark: bool) {
     let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
-    let accent = Color32::from_rgb(59, 130, 246);
-    v.selection.bg_fill = accent.gamma_multiply(if dark { 0.55 } else { 0.35 });
+    let accent = if dark { Color32::from_rgb(106, 160, 255) } else { Color32::from_rgb(59, 130, 246) };
+    v.selection.bg_fill = if dark { Color32::from_rgb(34, 58, 104) } else { accent.gamma_multiply(0.35) };
     v.selection.stroke = Stroke::new(1.0, accent);
     v.hyperlink_color = accent;
     let r = CornerRadius::same(6);
@@ -796,7 +856,34 @@ pub fn apply_style(ctx: &egui::Context, dark: bool) {
     v.widgets.active.corner_radius = r;
     v.window_corner_radius = CornerRadius::same(10);
     v.menu_corner_radius = CornerRadius::same(8);
-    if !dark {
+    if dark {
+        let c = |h: u32| Color32::from_rgb((h >> 16) as u8, (h >> 8) as u8, h as u8);
+        v.panel_fill = c(0x16181d);
+        v.window_fill = c(0x171a1f);
+        v.window_stroke = Stroke::new(1.0, c(0x333842));
+        v.extreme_bg_color = c(0x111317);
+        v.faint_bg_color = c(0x1b1e24);
+        v.code_bg_color = c(0x1e2228);
+        v.widgets.noninteractive.bg_fill = c(0x171a1f);
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, c(0x262a31));
+        v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, c(0xd9dce1));
+        v.widgets.inactive.bg_fill = c(0x1e2228);
+        v.widgets.inactive.weak_bg_fill = c(0x1e2228);
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, c(0x2b3039));
+        v.widgets.inactive.fg_stroke = Stroke::new(1.0, c(0xd9dce1));
+        v.widgets.hovered.bg_fill = c(0x262a31);
+        v.widgets.hovered.weak_bg_fill = c(0x262a31);
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0, c(0x36508a));
+        v.widgets.hovered.fg_stroke = Stroke::new(1.0, c(0xf0f2f5));
+        v.widgets.active.bg_fill = c(0x333842);
+        v.widgets.active.weak_bg_fill = c(0x333842);
+        v.widgets.active.bg_stroke = Stroke::new(1.0, accent);
+        v.widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+        v.widgets.open.bg_fill = c(0x262a31);
+        v.widgets.open.weak_bg_fill = c(0x262a31);
+        v.popup_shadow.color = Color32::from_black_alpha(90);
+        v.window_shadow.color = Color32::from_black_alpha(90);
+    } else {
         v.panel_fill = Color32::from_rgb(244, 246, 249);
     }
     ctx.set_visuals(v);
@@ -992,8 +1079,8 @@ impl eframe::App for App {
                     if tool(ui, Icon::Coord(ch), tip, has, self.coord == cs, d) { actions.push(Action::Coord(cs)) }
                 }
                 sep(ui);
-                tool(ui, Icon::PaleoH, "Paleo-Horizontal (not implemented yet)", false, false, d);
-                tool(ui, Icon::PaleoV, "Paleo-Vertical (not implemented yet)", false, false, d);
+                tool(ui, Icon::PaleoH, "Paleo-Horizontal: unavailable, the original's paleo / tectonic rules are only partly decoded (see docs/ORIGINAL_BEHAVIOUR.md, section 13)", false, false, d);
+                tool(ui, Icon::PaleoV, "Paleo-Vertical: unavailable, the original's paleo / tectonic rules are only partly decoded (see docs/ORIGINAL_BEHAVIOUR.md, section 13)", false, false, d);
                 sep(ui);
                 egui::ComboBox::from_id_salt("tb_filter").width(110.0).selected_text(["All active", "Selected only"][self.filter]).show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.filter, 0, "All active");
@@ -1196,6 +1283,18 @@ impl App {
             }
         }
         ui.separator();
+        let row_cols: Vec<Option<Color32>> = match &self.doc {
+            Some(d) if self.color_master.on => {
+                let th = self.theme();
+                let (cp, _) = Self::colorized(&self.points(), &self.color_master, &self.class_colors());
+                let mut v = vec![None; d.specs.len()];
+                for p in cp {
+                    v[p.idx] = p.color.map(|c| th.soft(c));
+                }
+                v
+            }
+            _ => vec![],
+        };
         let Some(doc) = &mut self.doc else {
             ui.label(RichText::new("No file open.\nOpen one with Ctrl+O or pick it in the file browser.").weak());
             return;
@@ -1228,6 +1327,11 @@ impl App {
                 let i = order[pos];
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), Sense::click_and_drag());
                 paint_row(ui, rect, doc.selected[i], resp.hovered(), doc.active[i], dark);
+                if let Some(c) = row_cols.get(i).copied().flatten() {
+                    // colour-coding of the list: a chip at the left edge of the row
+                    let chip = egui::Rect::from_min_max(rect.min + Vec2::new(1.0, 2.0), egui::Pos2::new(rect.min.x + 6.0, rect.max.y - 2.0));
+                    ui.painter().rect_filled(chip, 2.0, if doc.active[i] { c } else { c.gamma_multiply(0.35) });
+                }
                 row_text(ui, rect, 8.0, &doc.specs[i].name, doc.active[i], dark);
                 if resp.drag_started() {
                     started = Some(pos);
@@ -1310,6 +1414,7 @@ impl App {
         };
         let rects = [tl, tr, bl, br];
         let names = ["Stereonet", "N vs Kmean", "P vs Kmean", "T vs P"];
+        let class_cols = self.class_colors();
         let mut overlay_gs: Option<ams_core::stats::GroupStats> = None;
         if self.st_overlay.mean || self.st_overlay.boot {
             let idx: Vec<usize> = pts.iter().map(|p| p.idx).collect();
@@ -1319,7 +1424,7 @@ impl App {
         }
         for i in 0..4 {
             let mut body = self.pane_frame(ui, rects[i], i, names[i], th);
-            let (cpts, crange) = if i == 1 { (pts.clone(), None) } else { Self::colorized(&pts, &self.color[i]) };
+            let (cpts, crange) = if i == 1 { (pts.clone(), None) } else { Self::colorized(&pts, &self.color[i], &class_cols) };
             let show_bar = i != 1 && crange.is_some() && (i == 0 || self.sc[i - 2].legend);
             if show_bar {
                 let bar = Rect::from_min_max(Pos2::new(body.min.x, body.max.y - 30.0), body.max);
@@ -1376,7 +1481,7 @@ impl App {
     /// Draws a pane card with its header (collapse arrow, hover text, "Export graphics") and returns the plot rect.
     fn pane_frame(&mut self, ui: &mut Ui, rect: Rect, i: usize, name: &str, th: &Theme) -> Rect {
         let visuals = ui.visuals().clone();
-        ui.painter().rect(rect, 8.0, visuals.extreme_bg_color.gamma_multiply(if th.dark { 0.6 } else { 1.0 }).linear_multiply(1.0), Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color), StrokeKind::Inside);
+        ui.painter().rect(rect, 8.0, if th.dark { th.canvas() } else { visuals.extreme_bg_color }, Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color), StrokeKind::Inside);
         let header = Rect::from_min_size(rect.min + Vec2::new(6.0, 4.0), Vec2::new(rect.width() - 12.0, 24.0));
         let mut child = ui.new_child(UiBuilder::new().max_rect(header).layout(Layout::left_to_right(Align::Center)));
         let arrow = if self.pane_settings[i] { "▾" } else { "▸" };
@@ -1458,7 +1563,7 @@ impl App {
                                     ui.checkbox(&mut self.st_overlay.boot_conf, "Conf. ellipses");
                                 });
                             });
-                            ui.add_enabled(false, egui::Checkbox::new(&mut false, "Foliation / Lineation (needs .ged data)"));
+                            ui.add_enabled(false, egui::Checkbox::new(&mut false, "Foliation / Lineation (display rules not decoded yet)"));
                             ui.separator();
                             ui.horizontal(|ui| {
                                 ui.checkbox(&mut self.st_caption, "Caption");
@@ -1612,6 +1717,8 @@ impl App {
     /// Replace the open document (used by tools that build data in memory).
     fn set_doc(&mut self, d: Doc) {
         self.doc = Some(d);
+        self.classes.clear();
+        self.class_of.clear();
         self.dirty = true;
         self.refresh();
         self.last_anchor = None;
@@ -1663,6 +1770,7 @@ impl App {
             W_ABOUT => self.win_about = true,
             W_EDIT => self.win_edit = true,
             W_OWENS => self.win_owens = true,
+            W_CLASSES => self.win_classes = true,
             _ => {}
         }
     }
@@ -1764,26 +1872,8 @@ impl App {
         self.k_colors = kc;
         self.win_colors = open;
 
-        let mut open = self.win_edit;
-        let mut name = self.edit_name.clone();
-        let mut apply = false;
-        self.base_window(ctx, "Edit Data", W_EDIT, Vec2::new(600.0, 260.0)).open(&mut open).resizable(false).show(ctx, |ui| {
-            tools_ui::pop_style(ui, 1.4);
-            ui.label("Specimen name (up to 24 characters):");
-            ui.text_edit_singleline(&mut name);
-            apply = ui.button("Apply").clicked();
-        });
-        self.edit_name = name;
-        if apply {
-            if let Some(d) = &mut self.doc {
-                if let Some(i) = (0..d.specs.len()).find(|&i| d.selected[i]) {
-                    d.rename(i, &self.edit_name);
-                }
-            }
-            open = false;
-        }
-        self.win_edit = open;
-
+        self.edit_data_window(ctx);
+        self.classes_window(ctx);
         self.owens_window(ctx);
         self.table_window(ctx);
         self.group_window(ctx);
@@ -1792,8 +1882,8 @@ impl App {
     }
 
     /// Edit > Spec to Geo (Owens): strike/dip of a plane in the field and of the same plane on the drilling
-    /// table. New style: one set of four values for a range of rows (first..last, the whole file by default).
-    /// Old style: the per-row table of Anisoft 4.2. Rotates the data of the open file (cumulatively, like the original).
+    /// table. Classic (default): the per-row table of Anisoft 4.2. New: one set of four values for a range of rows
+    /// (the whole file by default). Rotates the data of the open file (cumulatively, like the original).
     fn owens_window(&mut self, ctx: &egui::Context) {
         if !self.win_owens {
             return;
@@ -1807,6 +1897,7 @@ impl App {
             self.owens = vec![[0.0; 4]; n];
         }
         let out_phase = self.out_phase;
+        let dark = self.dark;
         let preview: Vec<(String, f64, [(f64, f64); 3])> = doc
             .specs
             .iter()
@@ -1822,89 +1913,131 @@ impl App {
         last = last.clamp(first, n.max(1));
         let mut old = self.owens_old;
         let can_undo = self.owens_undo.is_some();
+        let now = ctx.input(|i| i.time);
+        let toast = self.owens_toast.clone();
         let (mut open, mut copy, mut rotate, mut undo, mut cancel) = (true, false, false, false, false);
+        let mut switched = false;
+        let accent = if dark { Color32::from_rgb(106, 160, 255) } else { Color32::from_rgb(47, 111, 222) };
         const TIPS: [&str; 4] = [
             "FS - field strike.\nCompass direction (0-360 deg) of the strike line of a reference plane (bedding, a vein, a foliation) measured in the field. Right-hand rule: the plane dips to the right when you look along the strike.",
             "FD - field dip.\nDip angle of that same plane in the field, measured down from the horizontal (0-90 deg).",
             "DS - strike on the drilling table.\nStrike of the same plane on the hand specimen while it lies on the drilling table, before the core was drilled out. Same right-hand rule.",
             "DD - dip on the drilling table.\nDip angle of that same plane on the hand specimen as it lies on the drilling table (0-90 deg).",
         ];
-        self.base_window(ctx, "Specimen to Geographic Rotation (Owens' method)", W_OWENS, Vec2::new(660.0, 760.0)).open(&mut open).resizable(true).show(ctx, |ui| {
+        self.base_window(ctx, "Specimen to Geographic Rotation (Owens' method)", W_OWENS, Vec2::new(700.0, 780.0)).open(&mut open).resizable(true).show(ctx, |ui| {
             tools_ui::pop_style(ui, 1.3);
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+
+            // ---- mode switch (top left) and a short notice on the right
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Input").strong());
-                ui.selectable_value(&mut old, false, "New: one set of values");
-                ui.selectable_value(&mut old, true, "Old: table per row (Anisoft 4.2)");
-                info_icon(ui, "New: enter FS, FD, DS and DD once and choose the rows they apply to (the whole file by default).\nOld: the table of Anisoft 4.2, one set of values per row with 'Copy 1st row to all'. Both give the same rotation.");
-            });
-            ui.add_space(4.0);
-            let preview_h = 210.0;
-            if !old {
-                ui.horizontal(|ui| {
-                    for (k, name) in ["FS", "FD", "DS", "DD"].iter().enumerate() {
-                        ui.label(RichText::new(*name).strong());
-                        let r = if k % 2 == 0 { 0.0..=360.0 } else { 0.0..=180.0 };
-                        ui.add(egui::DragValue::new(&mut one[k]).range(r).speed(0.5).max_decimals(1).suffix(" \u{b0}"));
-                        info_icon(ui, TIPS[k]);
-                        ui.add_space(8.0);
+                let mut new_mode = !old;
+                if phone_switch(ui, &mut new_mode).on_hover_text("Left: classic Owens of Anisoft 4.2 (a table with one row per specimen).\nRight: new Owens (four values and a row range).").changed() {
+                    old = !new_mode;
+                    switched = true;
+                }
+                ui.label(RichText::new(if old { "Classic Owens" } else { "New Owens" }).strong());
+                ui.label(RichText::new(if old { "(Anisoft 4.2)" } else { "(one set of values)" }).weak());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if let Some((msg, t0)) = &toast {
+                        let age = now - t0;
+                        if age < 3.0 {
+                            let fade = (3.0 - age).min(0.5) as f32 / 0.5;
+                            ui.label(RichText::new(msg).small().color(accent.gamma_multiply(fade)));
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+                        }
                     }
                 });
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("First row").strong());
-                    ui.add(egui::DragValue::new(&mut first).range(1..=n.max(1)).speed(0.2));
-                    ui.label(RichText::new(format!("(first of {n})")).weak());
-                    info_icon(ui, "First row: the first row the rotation is applied to (row numbers as in the list below). Preset to row 1, the first row of the file.");
-                    ui.add_space(12.0);
-                    ui.label(RichText::new("Last row").strong());
-                    ui.add(egui::DragValue::new(&mut last).range(first..=n.max(1)).speed(0.2));
-                    ui.label(RichText::new(format!("(last = {n})")).weak());
-                    info_icon(ui, "Last row: the last row the rotation is applied to. Preset to the last row of the file, so the whole file is rotated (all of its sub-specimens). Narrow the range to rotate only part of it.");
+            });
+            ui.separator();
+
+            let preview_h = 220.0;
+            if !old {
+                // ---- new: four values, then the rows they apply to
+                ui.columns(2, |cols| {
+                    for (c, (title, ks)) in [("Plane in the field", [0usize, 1]), ("Same plane on the drilling table", [2, 3])].into_iter().enumerate() {
+                        egui::Frame::group(cols[c].style()).show(&mut cols[c], |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(RichText::new(title).strong());
+                            for k in ks {
+                                ui.horizontal(|ui| {
+                                    ui.add_sized([34.0, 20.0], egui::Label::new(RichText::new(["FS", "FD", "DS", "DD"][k]).strong()));
+                                    ui.add(angle_drag(&mut one[k], k));
+                                    info_icon(ui, TIPS[k]);
+                                    ui.label(RichText::new(["strike", "dip", "strike", "dip"][k]).weak().small());
+                                });
+                            }
+                        });
+                    }
                 });
-                ui.label(RichText::new(format!("{} of {n} rows will be rotated.", last - first + 1)).weak());
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Rotate rows").strong());
+                        info_icon(ui, "The rows the four values are applied to, numbered as in the list at the bottom. Preset to the whole file, i.e. all of its sub-specimens.");
+                        ui.add_space(10.0);
+                        ui.label("from the first row");
+                        ui.add(egui::DragValue::new(&mut first).range(1..=n.max(1)).speed(0.2));
+                        info_icon(ui, "First row: the first row the rotation is applied to. Preset to row 1, the first row of the file.");
+                        ui.add_space(6.0);
+                        ui.label("to the last row");
+                        ui.add(egui::DragValue::new(&mut last).range(first..=n.max(1)).speed(0.2));
+                        info_icon(ui, "Last row: the last row the rotation is applied to. Preset to the last row of the file, so the whole file is rotated. Narrow the range to rotate only part of it.");
+                    });
+                    ui.label(RichText::new(format!("Row {first} (first of {n}) to row {last} (last is {n}): {} of {n} rows will be rotated.", last - first + 1)).weak().small());
+                });
             } else {
-                ui.label(RichText::new("FS / FD: strike and dip of a plane in the field.  DS / DD: strike and dip of the same plane on the drilling table.").weak());
-                let h = (ui.available_height() - preview_h - 70.0).max(100.0);
-                egui::ScrollArea::vertical().id_salt("owens-table").max_height(h).show(ui, |ui| {
-                    egui::Grid::new("owens-grid").striped(true).show(ui, |ui| {
-                        ui.label(RichText::new("#").strong());
-                        ui.label(RichText::new("Name").strong());
-                        for (k, hd) in ["FS", "FD", "DS", "DD"].iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(*hd).strong());
-                                info_icon(ui, TIPS[k]);
-                            });
-                        }
-                        ui.end_row();
-                        for (i, row) in rows.iter_mut().enumerate() {
-                            ui.label(RichText::new((i + 1).to_string()).weak());
-                            ui.label(&preview[i].0);
-                            for (k, v) in row.iter_mut().enumerate() {
-                                let r = if k % 2 == 0 { 0.0..=360.0 } else { 0.0..=180.0 };
-                                ui.add(egui::DragValue::new(v).range(r).speed(0.5).max_decimals(1).suffix(" \u{b0}"));
+                // ---- classic: one row of values per specimen
+                let h = (ui.available_height() - preview_h - 90.0).max(110.0);
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new("FS / FD: strike and dip of a plane in the field.   DS / DD: strike and dip of the same plane on the drilling table.").weak().small());
+                    egui::ScrollArea::vertical().id_salt("owens-table").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
+                        egui::Grid::new("owens-grid").striped(true).num_columns(6).min_col_width(96.0).spacing([14.0, 6.0]).show(ui, |ui| {
+                            ui.label(RichText::new("#").strong());
+                            ui.label(RichText::new("Name").strong());
+                            for (k, hd) in ["FS", "FD", "DS", "DD"].iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(*hd).strong());
+                                    info_icon(ui, TIPS[k]);
+                                });
                             }
                             ui.end_row();
-                        }
+                            for (i, row) in rows.iter_mut().enumerate() {
+                                ui.label(RichText::new((i + 1).to_string()).weak());
+                                ui.label(&preview[i].0);
+                                for (k, v) in row.iter_mut().enumerate() {
+                                    ui.add(angle_drag(v, k));
+                                }
+                                ui.end_row();
+                            }
+                        });
                     });
                 });
             }
-            ui.add_space(6.0);
+
+            // ---- actions: Rotate (bold, filled) and a small Undo on the left, Cancel on the right
             ui.horizontal(|ui| {
+                let go = egui::Button::new(RichText::new("Rotate").strong().color(Color32::WHITE)).fill(if dark { Color32::from_rgb(52, 104, 200) } else { Color32::from_rgb(47, 111, 222) }).min_size(Vec2::new(110.0, 0.0));
+                rotate = ui.add(go).on_hover_text("Rotate the data of the open file").clicked();
+                let u = egui::Button::new(RichText::new("Undo last rotation").small()).small().fill(Color32::TRANSPARENT).stroke(ui.visuals().widgets.inactive.bg_stroke);
+                undo = ui.add_enabled(can_undo, u).clicked();
                 if old {
-                    copy = ui.button("Copy 1st row to all").clicked();
+                    copy = ui.add(egui::Button::new(RichText::new("Copy 1st row to all").small()).small().fill(Color32::TRANSPARENT).stroke(ui.visuals().widgets.inactive.bg_stroke)).clicked();
                 }
-                rotate = ui.button("Rotate").clicked();
-                ui.add_enabled_ui(can_undo, |ui| undo = ui.button("Undo last rotation").clicked());
-                cancel = ui.button("Cancel").clicked();
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    cancel = ui.button("Cancel").clicked();
+                });
             });
             ui.label(RichText::new("The rotation is applied to the data of the open file (both phases) and is cumulative.").weak().small());
             ui.separator();
+
+            // ---- preview of the whole file at the very bottom
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Data of this file").strong());
-                ui.label(RichText::new(if out_phase { "(out-of-phase, specimen coordinates)" } else { "(in-phase, specimen coordinates)" }).weak().small());
+                ui.label(RichText::new(if out_phase { "out-of-phase, specimen coordinates" } else { "in-phase, specimen coordinates" }).weak().small());
             });
             egui::ScrollArea::vertical().id_salt("owens-preview").auto_shrink([false, false]).show(ui, |ui| {
-                egui::Grid::new("owens-preview-grid").striped(true).show(ui, |ui| {
+                egui::Grid::new("owens-preview-grid").striped(true).num_columns(6).min_col_width(96.0).spacing([16.0, 4.0]).show(ui, |ui| {
                     for hd in ["#", "Name", "Km", "K1 Dec / Inc", "K2 Dec / Inc", "K3 Dec / Inc"] {
                         ui.label(RichText::new(hd).strong());
                     }
@@ -1923,6 +2056,10 @@ impl App {
                 });
             });
         });
+        if switched {
+            let msg = if old { "Classic Owens (Anisoft 4.2): one row of values per specimen" } else { "New Owens: one set of values for a range of rows" };
+            self.owens_toast = Some((msg.to_string(), now));
+        }
         if copy {
             if let Some(first_row) = rows.first().copied() {
                 rows.iter_mut().for_each(|r| *r = first_row);
