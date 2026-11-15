@@ -4,8 +4,9 @@
 
 use super::{info_icon, tools_ui, App, W_CORE};
 use ams_core::core::{offset_for, slice_of, top_surface_lhr, Arrow, CoreSetup, Face};
+use egui::{Pos2, Sense, Shape, Stroke};
 use ams_core::georot::GeoRot;
-use egui::{Align, Color32, Layout, RichText, Vec2};
+use egui::{Align, Align2, Color32, FontId, Layout, RichText, Vec2};
 
 pub(super) struct CoreState {
     pub setup: CoreSetup,
@@ -59,30 +60,19 @@ impl App {
             ui.spacing_mut().item_spacing = Vec2::new(12.0, 12.0);
             ui.spacing_mut().button_padding = Vec2::new(12.0, 6.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Built for cubes cut from drill core").strong().size(19.0));
-                info_icon(ui, "The cubes are turned into geographic coordinates with the Owens construction applied to the top of the core: the end of the core is a surface whose normal is the hole axis, entered as a left-hand-rule surface (strike = dip direction + 90, dip = 90 - plunge). The answers about the arrow and the orientation line decide how the cube sits in the core. The same rotation as the AMS dashboard (BOREHOLE_CONFIGS): with the defaults the results agree with it to 0.001 degrees.");
+                ui.label(RichText::new("Built for cubes cut from halved drill core").strong().size(19.0));
+                info_icon(ui, "The cubes are turned into geographic coordinates with the Owens construction applied to the top of the core: the end of the core is a surface whose normal is the hole axis, entered as a left-hand-rule surface (strike = dip direction + 90, dip = 90 - plunge). The blue arrow and the orientation line (BOH mark) decide how the cube sits in the core. The same rotation as the AMS dashboard (BOREHOLE_CONFIGS): with the defaults the results agree with it to 0.001 degrees.");
             });
             ui.separator();
 
-            // 1. the face that holds the arrow
-            ui.label(RichText::new("Which face of the cube holds the arrow?").strong());
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("core-face").selected_text(st.setup.face.name()).width(360.0).show_ui(ui, |ui| {
-                    for f in Face::ALL {
-                        ui.selectable_value(&mut st.setup.face, f, f.name());
-                    }
-                });
-                info_icon(ui, "The arrow drawn on the cube is the alignment mark for the Kappabridge holder: it fixes the cube's specimen axes. This is the face of the cube, named by where it looked in the core, that carries the arrow. Default: the face that looked up the hole. The cube's z axis points into the cube through this face.");
+            // the face and the direction of the arrow are not asked: halved core always has them the same way
+            st.setup.face = Face::UpHole;
+            st.setup.arrow = Arrow::Right;
+            ui.horizontal_wrapped(|ui| {
+                ui.label("This tool was built for halved core. It always assumes that the face of each cube that points up the hole is the one that carries the blue arrow, and that the arrow points to the right when you look at that face from outside.");
+                info_icon(ui, "The blue arrow drawn on the cube is the alignment mark for the Kappabridge holder: it fixes the cube's specimen axes (x along the arrow, z into the cube through the up-hole face). For halved core this is always the face that looked up the hole, with the arrow to the right as seen from outside, which is what the AMS dashboard assumes; other faces and directions are not offered.");
             });
-
-            // 2. the direction of the arrow
-            ui.label(RichText::new("Which way does the arrow point (looking at that face from outside)?").strong());
-            ui.horizontal(|ui| {
-                for a in Arrow::ALL {
-                    ui.radio_value(&mut st.setup.arrow, a, a.name());
-                }
-                info_icon(ui, "Seen from outside the cube, looking at the face that holds the arrow. On the up-hole and down-hole faces 'up' is towards the top of the core; on the side faces 'up' is towards the top of the hole. Default: right. The cube's x axis is the direction of the arrow.");
-            });
+            ui.separator();
 
             // 3. the drill hole
             ui.label(RichText::new("Drill hole survey").strong());
@@ -101,10 +91,12 @@ impl App {
             });
 
             // 4. the orientation line
-            ui.label(RichText::new("Offset of the orientation line from the arrow mark on the front surface").strong());
+            ui.label(RichText::new("BOH offset: where is the BOH mark relative to the blue arrow?").strong());
+            core_sketches(ui);
             ui.horizontal(|ui| {
+                ui.label("BOH offset to enter");
                 ui.add(egui::DragValue::new(&mut st.setup.offset).range(0.0..=360.0).speed(0.5).max_decimals(1).suffix(" \u{b0}"));
-                info_icon(ui, "The clockwise turn, looking down the hole, that brings the orientation line (the line along the core that marks the bottom of the hole) to the bottom, measured from the arrow mark (the alignment mark for the Kappabridge holder). This is the BOH_ROTA of the AMS dashboard; enter the turn, not the position of the line. 0 when the arrow mark is the bottom of the hole.\nThe offsets and everything else of the drill core reorientation are kept in a dependency file, <specimen folder>_geo_dependancy.json, that Save as .ams creates in the destination (_geo) folder.");
+                info_icon(ui, "The clockwise turn, looking down the hole, that brings the orientation line (the line along the core that marks the bottom of the hole, the BOH mark) to the blue arrow. This is the BOH_ROTA of the AMS dashboard; enter the turn, not the position of the line: a BOH mark that lies a° to the left of the arrow (looking down the hole) is 360 - a, one that lies a° to the right is a, and 0 when the arrow is on the BOH mark.\nThe offsets and everything else of the drill core reorientation are kept in a dependency file, <specimen folder>_geo_dependancy.json, that Save as .ams creates in the destination (_geo) folder.");
             });
 
             // 4b. separate offsets for intervals of the core (only when ticked)
@@ -147,7 +139,7 @@ impl App {
             }
 
             // 5. the rows
-            ui.label(RichText::new("Rotate rows").strong());
+            ui.label(RichText::new("Rows that will be rotated").strong());
             ui.horizontal(|ui| {
                 ui.label("from the first row");
                 ui.add(egui::DragValue::new(&mut st.first).range(1..=n).speed(0.2));
@@ -186,6 +178,54 @@ impl App {
         self.core = st;
         self.win_core = open && !cancel;
     }
+}
+
+/// Three small cross-sections of the halved core, seen looking down the hole with the flat cut face on top: the blue
+/// arrow (a line down the middle of the cut face to the bottom of the core), the BOH mark (yellow, on the round
+/// surface) to the left of it, to the right of it and on it, and the angle to enter for each.
+fn core_sketches(ui: &mut egui::Ui) {
+    let ink = ui.visuals().text_color();
+    let weak = ui.visuals().weak_text_color();
+    let blue = Color32::from_rgb(0, 170, 230);
+    let red = Color32::from_rgb(225, 70, 55);
+    let yellow = Color32::from_rgb(255, 215, 0);
+    let w = ((ui.available_width() - 24.0) / 3.0).clamp(150.0, 230.0);
+    let h = 168.0;
+    let cases: [(&str, f32, &str); 3] = [
+        ("BOH mark to the left of the arrow", -1.0, "enter 360\u{b0} \u{2212} angle\n(4\u{b0} left: enter 356\u{b0})"),
+        ("BOH mark to the right of the arrow", 1.0, "enter the angle\n(4\u{b0} right: enter 4\u{b0})"),
+        ("BOH mark on the arrow", 0.0, "enter 0\u{b0}"),
+    ];
+    ui.horizontal(|ui| {
+        for (title, side, caption) in cases {
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+            let pa = ui.painter_at(rect);
+            pa.text(Pos2::new(rect.center().x, rect.top() + 2.0), Align2::CENTER_TOP, title, FontId::proportional(12.0), ink);
+            let r = (w * 0.33).min(62.0);
+            let c = Pos2::new(rect.center().x, rect.top() + 30.0);
+            // the halved core: flat cut face on top, the round surface below
+            let outline = Stroke::new(2.0, ink);
+            pa.line_segment([Pos2::new(c.x - r, c.y), Pos2::new(c.x + r, c.y)], outline);
+            let arc: Vec<Pos2> = (0..=48).map(|k| { let a = std::f32::consts::PI * k as f32 / 48.0; Pos2::new(c.x + r * a.cos(), c.y + r * a.sin()) }).collect();
+            pa.add(Shape::line(arc, outline));
+            // the blue arrow: down the middle of the cut face to the bottom of the core
+            pa.line_segment([c, Pos2::new(c.x, c.y + r)], Stroke::new(3.5, blue));
+            // the BOH mark, 28 degrees off in the sketch (the real offsets are a few degrees)
+            let phi = 28.0f32.to_radians() * side.abs();
+            let at = |rad: f32| Pos2::new(c.x + side * rad * phi.sin(), c.y + rad * phi.cos());
+            if side != 0.0 {
+                pa.line_segment([c, at(r)], Stroke::new(1.6, red));
+                let ang: Vec<Pos2> = (0..=16).map(|k| { let a = phi * k as f32 / 16.0; Pos2::new(c.x + side * 0.55 * r * a.sin(), c.y + 0.55 * r * a.cos()) }).collect();
+                pa.add(Shape::line(ang, Stroke::new(1.6, red)));
+                pa.text(Pos2::new(c.x + side * 0.30 * r, c.y + 0.92 * r + 12.0), Align2::CENTER_CENTER, "angle", FontId::proportional(11.5), red);
+            }
+            let dot = at(r);
+            pa.circle_filled(dot, 5.5, yellow);
+            pa.circle_stroke(dot, 5.5, Stroke::new(1.0, Color32::from_rgb(120, 100, 0)));
+            pa.text(Pos2::new(rect.center().x, c.y + r + 24.0), Align2::CENTER_TOP, caption, FontId::proportional(12.0), weak);
+        }
+    });
+    ui.label(RichText::new("Cross-section of the halved core, looking down the hole, flat cut face on top (angles exaggerated). Blue line = the blue arrow, yellow dot = the BOH mark, the line along the core that marks the bottom of the hole.").weak().small());
 }
 
 /// The reorientation of every record of `rows` (0-based): each record gets the offset of the interval that holds its
