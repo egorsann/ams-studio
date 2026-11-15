@@ -333,6 +333,9 @@ pub struct App {
     win_factors: bool,
     win_about: bool,
     win_edit: bool,
+    /// Folder set and file of the last session, restored at start.
+    restore_root: Option<PathBuf>,
+    restore_file: Option<PathBuf>,
     /// The file the browser tree last showed as current (to scroll to it when it changes).
     tree_cur: Option<PathBuf>,
     win_recomb: bool,
@@ -474,6 +477,8 @@ impl App {
             win_factors: false,
             win_about: false,
             win_edit: false,
+            restore_root: None,
+            restore_file: None,
             tree_cur: None,
             win_recomb: false,
             rc: Default::default(),
@@ -514,6 +519,15 @@ impl App {
             std::mem::swap(&mut app.k_colors, &mut app.k_other);
         }
         apply_style(&cc.egui_ctx, app.dark);
+        if open.is_none() {
+            // like TX Studio: start where the last session ended
+            if let Some(root) = app.restore_root.take() {
+                let f = app.restore_file.take();
+                app.restore_set(&cc.egui_ctx, root, f);
+            } else if let Some(f) = app.restore_file.take() {
+                app.open_path(f);
+            }
+        }
         if let Some(p) = open {
             if p.is_dir() {
                 // a folder on the command line is treated as the parent of the specimen folders
@@ -544,6 +558,8 @@ impl App {
                 "maximized" => self.win_max = v == "1",
                 "owens_new" => self.owens_old = v != "1",
                 "set_ident" => self.last_ident = v.to_string(),
+                "set_root" if Path::new(v).is_dir() => self.restore_root = Some(PathBuf::from(v)),
+                "last_file" if Path::new(v).is_file() => self.restore_file = Some(PathBuf::from(v)),
                 "browser" => self.browser_open = v != "0",
                 "hfrac" => self.hfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
                 "vfrac" => self.vfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
@@ -560,7 +576,7 @@ impl App {
         let _ = std::fs::write(
             p,
             format!(
-                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nlogkm={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\n",
+                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nlogkm={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\n",
                 self.browser_dir.display(),
                 self.dark as u8,
                 self.browser_open as u8,
@@ -574,7 +590,9 @@ impl App {
                 self.win_size.map_or(820.0, |s| s[1]),
                 self.win_max as u8,
                 (!self.owens_old) as u8,
-                self.last_ident.replace(['\n', '\r'], "")
+                self.last_ident.replace(['\n', '\r'], ""),
+                self.set.as_ref().map(|s| s.root.display().to_string()).unwrap_or_default(),
+                self.doc.as_ref().filter(|d| !d.synthetic).map(|d| d.path.display().to_string()).unwrap_or_default()
             ),
         );
     }
@@ -1998,6 +2016,7 @@ impl App {
         self.specset_window(ctx);
         self.edit_data_window(ctx);
         self.classes_window(ctx);
+        self.poll_restore(ctx);
         self.recombine_window(ctx);
         self.volume_window(ctx);
         self.owens_window(ctx);

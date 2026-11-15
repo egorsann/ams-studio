@@ -39,6 +39,8 @@ pub(super) struct SetDialog {
     pub rx: Option<Receiver<Vec<SpecFolder>>>,
     /// The string was typed by the user, not detected.
     pub typed: bool,
+    /// The scan is the silent restore of the folder that was open last time.
+    pub restore: bool,
 }
 
 impl SetDialog {
@@ -71,6 +73,62 @@ impl App {
         });
         self.sd = SetDialog { scanning: true, root, rx: Some(rx), ..Default::default() };
         self.open_win(W_SET);
+    }
+
+    /// Opens the folder set that was open when the program was closed, without asking: the folders are scanned in
+    /// the background and the identifier used last is applied. The dialog only appears if nothing matches.
+    pub(super) fn restore_set(&mut self, ctx: &egui::Context, root: PathBuf, file: Option<PathBuf>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (r2, c2) = (root.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(specset::scan(&r2));
+            c2.request_repaint();
+        });
+        self.sd = SetDialog { scanning: true, root, rx: Some(rx), restore: true, ..Default::default() };
+        self.restore_file = file;
+    }
+
+    /// Called every frame: finishes the silent restore when the scan is done.
+    pub(super) fn poll_restore(&mut self, ctx: &egui::Context) {
+        if !self.sd.restore {
+            return;
+        }
+        let Some(rx) = &self.sd.rx else { return };
+        let folders = match rx.try_recv() {
+            Ok(f) => f,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(150));
+                return;
+            }
+            Err(_) => {
+                self.sd = SetDialog::default();
+                return;
+            }
+        };
+        let root = self.sd.root.clone();
+        self.sd = SetDialog::default();
+        if folders.is_empty() {
+            return; // the folder is gone or empty: start as usual
+        }
+        let det = specset::detect(&folders, Some(&self.last_ident));
+        let ident = det.ident.clone().unwrap_or_default();
+        let picks = specset::matches(&folders, &ident);
+        let matched = picks.iter().filter(|p| p.file().is_some()).count();
+        if matched == 0 {
+            // nothing to go by: let the user choose, as when opening the folder by hand
+            self.sd = SetDialog { root, ident, picks, detection: Some(det), folders, ..Default::default() };
+            self.open_win(W_SET);
+            return;
+        }
+        let set = SpecSet { root: root.clone(), folders, ident, picks };
+        let mains = set.mains();
+        let file = self.restore_file.take().filter(|p| p.is_file()).or_else(|| mains.first().cloned());
+        self.browser_dir = root;
+        self.set = Some(set);
+        if let Some(p) = file {
+            self.open_path(p);
+        }
+        self.save_state();
     }
 
     /// Reads the folders of the open set again (after files were moved or written) with the same identifier.
@@ -368,6 +426,7 @@ impl App {
         }
         if close {
             self.set = None;
+            self.save_state();
         }
         if let Some(p) = open {
             self.open_path(p);
