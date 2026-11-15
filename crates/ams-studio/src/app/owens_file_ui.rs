@@ -59,6 +59,10 @@ pub(super) struct OwensFile {
     pub last: Option<Scope>,
     /// The rotations that were pending before the last multiple correction (for Undo).
     pub undo_pending: Option<std::collections::HashMap<PathBuf, Vec<Option<ams_core::tensor::Mat3>>>>,
+    /// The edited files that were kept aside, as they were before the last multiple correction.
+    pub undo_stash: Vec<(PathBuf, Vec<u8>, Vec<ams::Specimen>)>,
+    /// The open file was one of the targets of the last multiple correction.
+    pub open_rotated: bool,
 }
 
 impl Scope {
@@ -242,6 +246,8 @@ impl App {
             }
             Scope::Multiple => {
                 self.of.undo_pending = Some(self.pending.clone());
+                self.of.undo_stash = self.stash.iter().map(|(p, d)| (p.clone(), d.raw.clone(), d.specs.clone())).collect();
+                self.of.open_rotated = false;
                 let open_path = self.doc.as_ref().filter(|d| !d.synthetic).map(|d| d.path.clone());
                 let (mut files, mut recs) = (0, 0);
                 let targets: Vec<(PathBuf, usize, Vec<(usize, ams_core::tensor::Mat3)>)> = self.of.plan.iter().filter_map(|t| t.path.clone().map(|p| (p, t.records.len(), mats(t)))).filter(|(_, _, j)| !j.is_empty()).collect();
@@ -250,6 +256,7 @@ impl App {
                     files += 1;
                     if open_path.as_ref() == Some(&path) {
                         self.rotate_doc(&jobs); // the open file is rotated on screen too
+                        self.of.open_rotated = true;
                     } else {
                         self.add_pending(&path, n, &jobs);
                     }
@@ -268,12 +275,18 @@ impl App {
                 self.of.msg = "The last correction of this file was undone.".into();
             }
             Some(Scope::Multiple) => {
+                if self.of.open_rotated {
+                    self.undo_doc_rotation();
+                    self.of.open_rotated = false;
+                }
                 if let Some(p) = self.of.undo_pending.take() {
                     self.pending = p;
                 }
-                // show the open file as it is without the undone rotations
-                if let Some(path) = self.doc.as_ref().filter(|d| !d.synthetic).map(|d| d.path.clone()) {
-                    self.open_path(path);
+                for (path, raw, specs) in std::mem::take(&mut self.of.undo_stash) {
+                    if let Some(d) = self.stash.get_mut(&path) {
+                        d.raw = raw;
+                        d.specs = specs;
+                    }
                 }
                 self.of.msg = "The last multiple correction was undone: the rotations were taken back.".into();
             }

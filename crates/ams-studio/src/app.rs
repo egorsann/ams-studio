@@ -343,6 +343,10 @@ pub struct App {
     win_factors: bool,
     win_about: bool,
     win_edit: bool,
+    /// Files that were edited and left again without saving: kept so that nothing is lost while browsing.
+    stash: std::collections::HashMap<PathBuf, Doc>,
+    /// Volume information (shape, date) of files whose volume was set but not saved yet.
+    vol_pending: std::collections::HashMap<PathBuf, doc::VolInfo>,
     win_export: bool,
     ex: export_ui::ExportState,
     /// Files selected in the browser tree (Shift: range, Ctrl: single) and the anchor of a range.
@@ -496,6 +500,8 @@ impl App {
             win_factors: false,
             win_about: false,
             win_edit: false,
+            stash: Default::default(),
+            vol_pending: Default::default(),
             win_export: false,
             ex: Default::default(),
             tree_sel: vec![],
@@ -622,6 +628,30 @@ impl App {
         );
     }
 
+    /// Keeps the open file with its edits (rotation, deleted records, names, volume ...) while another is opened.
+    fn stash_current(&mut self) {
+        if self.doc.as_ref().map_or(false, |d| d.modified && !d.synthetic) {
+            if let Some(d) = self.doc.take() {
+                self.stash.insert(d.path.clone(), d);
+            }
+        }
+    }
+
+    /// Every file with edits that are not saved: the open one, the stashed ones and those with only a held rotation.
+    pub(super) fn edited_files(&self) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = vec![];
+        if let Some(d) = self.doc.as_ref().filter(|d| d.modified && !d.synthetic) {
+            v.push(d.path.clone());
+        }
+        for k in self.stash.keys().chain(self.pending.keys()) {
+            if !v.contains(k) {
+                v.push(k.clone());
+            }
+        }
+        v.sort();
+        v
+    }
+
     /// Rotates records of the open file now and remembers the rotation for the file: it is applied again when the
     /// file is opened later and used by Export as .ams. Nothing is written.
     pub(super) fn rotate_doc(&mut self, jobs: &[(usize, ams_core::tensor::Mat3)]) {
@@ -648,6 +678,14 @@ impl App {
 
     /// Adds rotations to the pending ones of a file (a later one acts after an earlier one).
     pub(super) fn add_pending(&mut self, path: &Path, n: usize, jobs: &[(usize, ams_core::tensor::Mat3)]) {
+        if let Some(d) = self.stash.get_mut(path) {
+            for (i, r) in jobs {
+                if *i < d.specs.len() {
+                    d.rotate_specimen(*i, r);
+                }
+            }
+            return;
+        }
         let v = self.pending.entry(path.to_path_buf()).or_insert_with(|| vec![None; n]);
         v.resize(n, None);
         for (i, r) in jobs {
@@ -661,10 +699,23 @@ impl App {
     }
 
     fn open_path(&mut self, p: PathBuf) {
-        match Doc::open(&p) {
+        // the file that is open now stays as it is, with its edits, until it is saved
+        if self.doc.as_ref().map_or(false, |d| d.path == p && !d.synthetic && d.modified) {
+            return;
+        }
+        self.stash_current();
+        let restored = self.stash.remove(&p);
+        let opened = match restored {
+            Some(d) => Ok(d),
+            None => Doc::open(&p),
+        };
+        let fresh = !self.stash.contains_key(&p);
+        match opened {
             Ok(mut d) => {
-                // rotations that were made earlier but not saved are applied again
-                if let Some(v) = self.pending.get(&p) {
+                // rotations that were made earlier but not saved are applied (a restored file has them already)
+                let apply_pending = d.raw.len() > 0 && !d.modified;
+                let _ = fresh;
+                if let (true, Some(v)) = (apply_pending, self.pending.get(&p)) {
                     for (i, r) in v.iter().enumerate() {
                         if let (Some(r), true) = (r, i < d.specs.len()) {
                             d.rotate_specimen(i, r);
@@ -775,7 +826,12 @@ impl App {
             }
             Action::Reload => {
                 if let Some(d) = self.doc.as_ref().filter(|d| !d.synthetic) {
+                    // reloading throws the edits of this file away
                     let p = d.path.clone();
+                    self.stash.remove(&p);
+                    self.pending.remove(&p);
+                    self.vol_pending.remove(&p);
+                    self.doc.as_mut().unwrap().modified = false;
                     self.open_path(p);
                 }
             }
@@ -837,6 +893,7 @@ impl App {
                 }
             }
             Action::Close => {
+                self.stash_current();
                 self.doc = None;
                 self.dirty = true;
             }
@@ -866,12 +923,16 @@ impl App {
                         if d.selected[i] {
                             d.active[i] = false;
                             d.selected[i] = false;
+                            d.modified = true;
                         }
                     }
                 }
             }
             Action::RestoreAll => {
                 if let Some(d) = &mut self.doc {
+                    if d.active.iter().any(|a| !*a) {
+                        d.modified = true;
+                    }
                     d.active.iter_mut().for_each(|a| *a = true);
                 }
             }
@@ -1165,7 +1226,7 @@ impl eframe::App for App {
                     ui.separator();
                     if item(ui, "Save Active Records As", "Ctrl+S", has) { actions.push(Action::SaveActive) }
                     if item(ui, "Append Selected Records Into", "Ctrl+A", has) { actions.push(Action::AppendSel) }
-                    if item(ui, "Export as .ams ...", "Ctrl+Shift+S", has) { actions.push(Action::ExportAms) }
+                    if item(ui, "Save as .ams (selected or edited files) ...", "Ctrl+Shift+S", has) { actions.push(Action::ExportAms) }
                     if item(ui, "Export Data File (CSV, in- and out-of-phase)", "Ctrl+E", has) { actions.push(Action::ExportCsv) }
                     if item(ui, "Export Selection (CSV, in- and out-of-phase)", "Ctrl+Shift+E", has) { actions.push(Action::ExportSelection) }
                     ui.separator();
@@ -1924,6 +1985,7 @@ impl App {
 
     /// Replace the open document (used by tools that build data in memory).
     fn set_doc(&mut self, d: Doc) {
+        self.stash_current();
         self.doc = Some(d);
         self.classes.clear();
         self.class_of.clear();

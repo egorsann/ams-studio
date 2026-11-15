@@ -1,6 +1,6 @@
-//! File > Export as .ams: writes the selected files of the browser (or the open file) with their rotations into a
-//! `_geo` folder inside each specimen folder, as `<name>_geo.ams`. The source files stay where they are.
-//! Rotating (Edit > Spec to Geo (Owens)) never writes anything; this is where the result is saved.
+//! File > Save as .ams: writes either the selected files of the browser (the open file by default) or every edited
+//! file into a `_geo` folder inside each specimen folder, as `<name>_geo.ams`. The source files stay where they are.
+//! Edits (rotations, deleted records, names, volume ...) are never written by themselves; this is where they are saved.
 
 use super::{tools_ui, App, W_EXPORT};
 use crate::doc;
@@ -30,6 +30,8 @@ pub(super) struct ExOp {
     pub len: u64,
     pub backup: Option<Vec<u8>>,
     pub new_dir: Option<PathBuf>,
+    /// The volume json written next to the file, if any.
+    pub json: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -37,6 +39,8 @@ pub(super) struct ExportState {
     pub rows: Vec<ExRow>,
     pub overwrite: bool,
     pub unchanged_too: bool,
+    /// 0: the selected files (the open one by default), 1: every edited file
+    pub scope: usize,
     pub ops: Vec<ExOp>,
     pub msg: String,
 }
@@ -48,27 +52,37 @@ pub(super) fn geo_path(src: &Path) -> PathBuf {
 }
 
 impl App {
-    /// Collects the files to export: the selection in the browser, else the open file.
-    pub(super) fn open_export(&mut self) {
+    /// The files of scope 0: the selection in the browser, else the open file.
+    fn selected_or_open(&self) -> Vec<PathBuf> {
         let mut files: Vec<PathBuf> = self.tree_sel.clone();
         if files.is_empty() {
             if let Some(d) = self.doc.as_ref().filter(|d| !d.synthetic) {
                 files.push(d.path.clone());
             }
         }
-        if files.is_empty() {
+        files
+    }
+
+    pub(super) fn open_export(&mut self) {
+        if self.selected_or_open().is_empty() && self.edited_files().is_empty() {
             self.info = Some("Select files in the file browser (or open a file) first.\nA data set without a file behind it is saved with File > Save Active Records As.".into());
             return;
         }
+        self.ex.scope = if self.selected_or_open().is_empty() { 1 } else { 0 };
+        self.ex.msg.clear();
+        self.build_rows();
+        self.open_win(W_EXPORT);
+    }
+
+    /// The rows for the chosen scope, with what each file would do.
+    fn build_rows(&mut self) {
+        let files = if self.ex.scope == 0 { self.selected_or_open() } else { self.edited_files() };
         let open_path = self.doc.as_ref().filter(|d| !d.synthetic).map(|d| (d.path.clone(), d.modified));
         self.ex.rows = files
             .into_iter()
             .map(|src| {
                 let out = geo_path(&src);
-                let changed = match &open_path {
-                    Some((p, modified)) if *p == src => *modified || self.pending.contains_key(&src),
-                    _ => self.pending.contains_key(&src),
-                };
+                let changed = self.pending.contains_key(&src) || self.stash.contains_key(&src) || open_path.as_ref().map_or(false, |(p, m)| *p == src && *m);
                 let status = if !changed {
                     Status::Unchanged
                 } else if out.exists() {
@@ -79,13 +93,14 @@ impl App {
                 ExRow { src, out, status }
             })
             .collect();
-        self.ex.msg.clear();
-        self.open_win(W_EXPORT);
     }
 
-    /// Bytes to write for a source file: the open file as it is now (active records), any other with its rotations.
+    /// Bytes to write for a source file: the open or an edited file as it is now (active records), any other with its rotations.
     fn export_bytes(&self, src: &Path) -> Option<Vec<u8>> {
         if let Some(d) = self.doc.as_ref().filter(|d| !d.synthetic && d.path == src) {
+            return Some(d.records((0..d.specs.len()).filter(|&i| d.active[i])));
+        }
+        if let Some(d) = self.stash.get(src) {
             return Some(d.records((0..d.specs.len()).filter(|&i| d.active[i])));
         }
         let mut bytes = std::fs::read(src).ok()?;
@@ -127,7 +142,11 @@ impl App {
             }
             let backup = if out.exists() { std::fs::read(&out).ok() } else { None };
             match std::fs::write(&out, &bytes) {
-                Ok(()) => ops.push(ExOp { src, out, len: bytes.len() as u64, backup, new_dir }),
+                Ok(()) => {
+                    // the volume information that was entered for the file is stored next to the saved file
+                    let json = self.vol_pending.get(&src).and_then(|info| doc::write_volume_json(&out, info, bytes.len() / RECORD_LEN).ok());
+                    ops.push(ExOp { src, out, len: bytes.len() as u64, backup, new_dir, json });
+                }
                 Err(e) => failed.push(format!("{}: {e}", out.display())),
             }
         }
@@ -136,28 +155,14 @@ impl App {
             self.exported.insert(o.src.clone());
         }
         self.ex.ops = ops;
-        self.ex.msg = format!("Exported {n} file(s) into _geo folders{}{}.", if skipped > 0 { format!("; {skipped} skipped") } else { String::new() }, if failed.is_empty() { String::new() } else { format!("; failed: {}", failed.join(", ")) });
+        self.ex.msg = format!("Saved {n} file(s) into _geo folders{}{}.", if skipped > 0 { format!("; {skipped} skipped") } else { String::new() }, if failed.is_empty() { String::new() } else { format!("; failed: {}", failed.join(", ")) });
         self.refresh_set();
         self.open_export_refresh();
     }
 
     /// Re-reads the status of the rows (after an export or an undo).
     fn open_export_refresh(&mut self) {
-        let srcs: Vec<PathBuf> = self.ex.rows.iter().map(|r| r.src.clone()).collect();
-        let msg = std::mem::take(&mut self.ex.msg);
-        let ops = std::mem::take(&mut self.ex.ops);
-        let (ow, ut) = (self.ex.overwrite, self.ex.unchanged_too);
-        self.tree_sel_backup(&srcs);
-        self.ex.ops = ops;
-        self.ex.msg = msg;
-        self.ex.overwrite = ow;
-        self.ex.unchanged_too = ut;
-    }
-
-    fn tree_sel_backup(&mut self, srcs: &[PathBuf]) {
-        let saved = std::mem::replace(&mut self.tree_sel, srcs.to_vec());
-        self.open_export();
-        self.tree_sel = saved;
+        self.build_rows();
     }
 
     fn undo_export(&mut self) {
@@ -172,6 +177,9 @@ impl App {
                     }
                 }
             }
+            if let Some(j) = &op.json {
+                let _ = std::fs::remove_file(j);
+            }
             if let Some(d) = &op.new_dir {
                 let _ = std::fs::remove_dir(d);
             }
@@ -179,7 +187,7 @@ impl App {
         }
         self.refresh_set();
         self.open_export_refresh();
-        self.ex.msg = format!("The last export was undone: {removed} file(s) removed, {restored} earlier file(s) put back.");
+        self.ex.msg = format!("The last save was undone: {removed} file(s) removed, {restored} earlier file(s) put back.");
     }
 
     pub(super) fn export_window(&mut self, ctx: &egui::Context) {
@@ -196,15 +204,22 @@ impl App {
         let n_exists = ex.rows.iter().filter(|r| matches!(r.status, Status::Exists(_))).count();
         let n_unchanged = ex.rows.iter().filter(|r| r.status == Status::Unchanged).count();
         let n_go = n_new + if ex.overwrite { n_exists } else { 0 } + if ex.unchanged_too { n_unchanged } else { 0 };
-        let (mut open, mut go, mut undo, mut close) = (true, false, false, false);
+        let (mut open, mut go, mut undo, mut close, mut rebuild) = (true, false, false, false, false);
+        let n_sel = self.selected_or_open().len();
+        let n_edit = self.edited_files().len();
         let rel = |p: &Path| -> String {
             root.as_ref().and_then(|r| p.strip_prefix(r).ok()).map(|x| x.display().to_string()).unwrap_or_else(|| p.display().to_string())
         };
-        self.base_window(ctx, "Export as .ams", W_EXPORT, Vec2::new(820.0, 560.0)).open(&mut open).resizable(true).show(ctx, |ui| {
+        self.base_window(ctx, "Save as .ams", W_EXPORT, Vec2::new(820.0, 560.0)).open(&mut open).resizable(true).show(ctx, |ui| {
             tools_ui::pop_style(ui, 1.2);
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-            ui.label("The selected files are written with their rotations. In each specimen folder a sub-folder  _geo  is made (if it is not there) and the file goes into it as  <name>_geo.ams. The source files stay where they are.");
-            ui.label(RichText::new("Rotating never saves anything; this is where the rotated data set is written.").weak().small());
+            ui.label(RichText::new("Which files should be saved?").strong());
+            ui.horizontal(|ui| {
+                rebuild |= ui.radio_value(&mut ex.scope, 0, format!("The selected files only ({n_sel})")).on_hover_text("The open file, or the files selected in the file browser with Shift (range) and Ctrl (single)").changed();
+                rebuild |= ui.radio_value(&mut ex.scope, 1, format!("Every edited file ({n_edit})")).on_hover_text("Every file with changes that are not saved: rotations, deleted records, names, volume").changed();
+            });
+            ui.label("Each file is written as  <name>_geo.ams  into a sub-folder  _geo  of its specimen folder (made if it is not there). The source files stay where they are.");
+            ui.label(RichText::new("Nothing is saved by editing: rotations, deleted records and the like only live in memory until they are saved here.").weak().small());
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let h = (ui.available_height() - 150.0).max(120.0);
@@ -229,16 +244,16 @@ impl App {
                 });
             });
             if n_exists > 0 {
-                ui.checkbox(&mut ex.overwrite, format!("Overwrite the {n_exists} file(s) that exist already")).on_hover_text("The files that are replaced are kept in memory, so Undo last export brings them back while the program stays open.");
+                ui.checkbox(&mut ex.overwrite, format!("Overwrite the {n_exists} file(s) that exist already")).on_hover_text("The files that are replaced are kept in memory, so Undo last save brings them back while the program stays open.");
             }
             if n_unchanged > 0 {
                 ui.checkbox(&mut ex.unchanged_too, format!("Also export the {n_unchanged} file(s) without a rotation"));
             }
             ui.horizontal(|ui| {
-                let b = egui::Button::new(RichText::new(format!("Export {n_go} file(s)")).strong().color(Color32::WHITE)).fill(if dark { Color32::from_rgb(52, 104, 200) } else { Color32::from_rgb(47, 111, 222) }).min_size(Vec2::new(150.0, 0.0));
+                let b = egui::Button::new(RichText::new(format!("Save {n_go} file(s)")).strong().color(Color32::WHITE)).fill(if dark { Color32::from_rgb(52, 104, 200) } else { Color32::from_rgb(47, 111, 222) }).min_size(Vec2::new(150.0, 0.0));
                 go = ui.add_enabled(n_go > 0, b).clicked();
                 if !ex.ops.is_empty() {
-                    undo = ui.add(egui::Button::new(RichText::new("Undo last export").small()).small().fill(Color32::TRANSPARENT).stroke(ui.visuals().widgets.inactive.bg_stroke)).clicked();
+                    undo = ui.add(egui::Button::new(RichText::new("Undo last save").small()).small().fill(Color32::TRANSPARENT).stroke(ui.visuals().widgets.inactive.bg_stroke)).clicked();
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     close = ui.button("Close").clicked();
@@ -249,6 +264,9 @@ impl App {
             }
         });
         self.ex = ex;
+        if rebuild {
+            self.build_rows();
+        }
         if go {
             self.do_export();
         }

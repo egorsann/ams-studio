@@ -354,7 +354,7 @@ impl App {
             close = ui.small_button("Close set").on_hover_text("Back to the plain folder browser").clicked();
         });
         ui.horizontal(|ui| {
-            export = ui.small_button("Export as .ams ...").on_hover_text("Write the selected files (or the open file) with their rotations into _geo folders").clicked();
+            export = ui.small_button("Save as .ams ...").on_hover_text("Save the selected files (the open one by default) or every edited file into _geo folders").clicked();
             let n_sel = self.tree_sel.len();
             let n_rot = self.pending.len();
             ui.label(RichText::new(format!("{n_sel} selected{}", if n_rot > 0 { format!(" \u{b7} {n_rot} rotated") } else { String::new() })).small().weak());
@@ -426,7 +426,9 @@ impl App {
                             ui.painter().rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill.gamma_multiply(0.6));
                         }
                         // rotated but not saved (\u{21bb}) / exported with its rotation (\u{2713})
-                        let mark = if self.exported.contains(&path) && self.pending.contains_key(&path) { Some(("\u{2713}", Color32::from_rgb(70, 170, 90), "Rotated and exported to _geo")) } else if self.pending.contains_key(&path) { Some(("\u{21bb}", Color32::from_rgb(214, 150, 40), "Rotated in memory, not saved: select it and use Export as .ams")) } else { None };
+                        let edited = self.pending.contains_key(&path) || self.stash.contains_key(&path) || (is_cur && self.doc.as_ref().map_or(false, |d| d.modified));
+                        let rotated = self.pending.contains_key(&path);
+                        let mark = if edited && self.exported.contains(&path) { Some(("\u{2713}", Color32::from_rgb(70, 170, 90), "Edits saved to _geo")) } else if rotated { Some(("\u{21bb}", Color32::from_rgb(214, 150, 40), "Rotated, not saved: select it and use Save as .ams")) } else if edited { Some(("\u{270e}", Color32::from_rgb(214, 150, 40), "Edited, not saved: select it and use Save as .ams")) } else { None };
                         if let Some((sym, col, _)) = mark {
                             ui.painter().text(egui::Pos2::new(rect.max.x - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, sym, egui::FontId::proportional(14.0), col);
                         }

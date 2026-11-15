@@ -34,7 +34,7 @@ const SHAPES: [&str; 2] = ["cubic", "cylindrical"];
 impl App {
     /// Reads the json next to the open file (called when a file is opened).
     pub(super) fn load_volume_info(&mut self) {
-        self.vol.info = self.doc.as_ref().filter(|d| !d.synthetic).and_then(|d| doc::read_volume_json(&d.path));
+        self.vol.info = self.doc.as_ref().filter(|d| !d.synthetic).and_then(|d| self.vol_pending.get(&d.path).cloned().or_else(|| doc::read_volume_json(&d.path)));
     }
 
     /// What is known about the volume of the open file, for the menu's hover text and the window.
@@ -94,13 +94,13 @@ impl App {
                 ui.label(RichText::new(format!("Apply {} cm\u{b3} ({}) to this file?", st.volume, SHAPES[st.shape])).strong());
                 ui.label(format!("The volume is written into the records of the open .ams file; use File > Save Active Records As afterwards to keep it in a file."));
                 if has_path {
-                    ui.label(format!("An .ams file has no place for the sample shape, so the shape, the volume and today's date are stored in a .json file in the same folder as the .ams file:"));
+                    ui.label("An .ams file has no place for the sample shape. The shape, the volume and today's date are kept with the file and written to a .json file next to the saved .ams file when you save it (File > Save as .ams); nothing is written to disk now. For the original file that would be:");
                     ui.label(RichText::new(json_path.display().to_string()).monospace().small());
                 } else {
                     ui.label(RichText::new("This data set has no file behind it yet, so the shape cannot be stored next to it.").color(Color32::from_rgb(214, 150, 40)));
                 }
                 ui.horizontal(|ui| {
-                    let go = egui::Button::new(RichText::new(if has_path { "Store and apply" } else { "Apply" }).strong().color(Color32::WHITE)).fill(if dark { Color32::from_rgb(52, 104, 200) } else { Color32::from_rgb(47, 111, 222) }).min_size(Vec2::new(130.0, 0.0));
+                    let go = egui::Button::new(RichText::new(if has_path { "Apply to the file" } else { "Apply" }).strong().color(Color32::WHITE)).fill(if dark { Color32::from_rgb(52, 104, 200) } else { Color32::from_rgb(47, 111, 222) }).min_size(Vec2::new(130.0, 0.0));
                     store = ui.add(go).clicked();
                     back = ui.button("Back").clicked();
                 });
@@ -157,13 +157,9 @@ impl App {
                 let mut msg = format!("{} cm\u{b3} written into the {} records.", volume, d.specs.len());
                 if has_path {
                     let info = VolInfo { volume_cm3: volume, shape, applied: doc::today() };
-                    match doc::write_volume_json(&d.path, &info, d.specs.len()) {
-                        Ok(p) => {
-                            msg += &format!(" Shape and date stored in {}.", p.display());
-                            st.info = Some(info);
-                        }
-                        Err(e) => msg += &format!(" The json file could not be written: {e}"),
-                    }
+                    self.vol_pending.insert(d.path.clone(), info.clone());
+                    msg += " Shape and date are kept in memory and written next to the file when you save it.";
+                    st.info = Some(info);
                 }
                 st.msg = msg;
             }
