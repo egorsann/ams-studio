@@ -143,7 +143,13 @@ pub fn volume_json_path(ams: &Path) -> PathBuf {
 
 /// Today's date as `YYYY-MM-DD` (UTC).
 pub fn today() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    fmt_time(std::time::SystemTime::now())[..10].to_string()
+}
+
+/// `YYYY-MM-DD HH:MM` (UTC) of a time.
+pub fn fmt_time(t: std::time::SystemTime) -> String {
+    let secs = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let (h, mi) = (secs.rem_euclid(86400) / 3600, secs.rem_euclid(3600) / 60);
     let z = secs.div_euclid(86400) + 719468;
     let era = z.div_euclid(146097);
     let doe = z.rem_euclid(146097);
@@ -153,7 +159,7 @@ pub fn today() -> String {
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    format!("{:04}-{:02}-{:02}", if m <= 2 { y + 1 } else { y }, m, d)
+    format!("{:04}-{:02}-{:02} {:02}:{:02}", if m <= 2 { y + 1 } else { y }, m, d, h, mi)
 }
 
 pub fn write_volume_json(ams: &Path, info: &VolInfo, n_records: usize) -> std::io::Result<PathBuf> {
