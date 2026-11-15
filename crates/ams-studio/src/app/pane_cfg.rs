@@ -26,6 +26,10 @@ pub(super) struct PaneCfg {
     pub zero: bool,
     /// How a bar or box plot forms its groups.
     pub group: GroupBy,
+    /// The top right pane as a polar plot (T as the angle, Pj as the radius) instead of the plot type above.
+    pub polar: bool,
+    /// The radius of the polar plot is logarithmic.
+    pub polar_log: bool,
 }
 
 impl PaneCfg {
@@ -46,6 +50,8 @@ impl PaneCfg {
             legend: true,
             zero: false,
             group: GroupBy::Classes,
+            polar: false,
+            polar_log: false,
         };
         if k == 2 {
             c.x = AxisCfg::new(p);
@@ -62,15 +68,15 @@ impl PaneCfg {
         let a = |a: &AxisCfg| format!("{}:{}:{}:{}:{}", a.param, a.auto as u8, a.min, a.max, a.log as u8);
         let kind = XyKind::ALL.iter().position(|k| *k == self.kind).unwrap_or(0);
         format!(
-            "{kind}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-            a(&self.hist), a(&self.x), a(&self.y), self.bins, self.sel_only as u8, self.diag as u8, self.conf as u8, self.connect as u8, self.legend as u8, self.zero as u8, (self.group == GroupBy::Sample) as u8
+            "{kind}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            a(&self.hist), a(&self.x), a(&self.y), self.bins, self.sel_only as u8, self.diag as u8, self.conf as u8, self.connect as u8, self.legend as u8, self.zero as u8, (self.group == GroupBy::Sample) as u8, self.polar as u8, self.polar_log as u8
         )
     }
 
     fn from_line(s: &str) -> Option<PaneCfg> {
         let f: Vec<&str> = s.trim().split('|').collect();
-        // 11 fields: written before the group-by choice existed
-        if f.len() != 11 && f.len() != 12 {
+        // 11 fields: written before the group-by choice existed; 12: before the polar plot
+        if f.len() != 11 && f.len() != 12 && f.len() != 14 {
             return None;
         }
         let axis = |t: &str| -> Option<AxisCfg> {
@@ -99,6 +105,8 @@ impl PaneCfg {
             legend: flag(f[9]),
             zero: flag(f[10]),
             group: if f.get(11).map_or(false, |t| flag(t)) { GroupBy::Sample } else { GroupBy::Classes },
+            polar: f.get(12).map_or(false, |t| flag(t)),
+            polar_log: f.get(13).map_or(false, |t| flag(t)),
         })
     }
 }
@@ -274,8 +282,12 @@ impl App {
 
     /// The titles of the four panes (they follow what the plots show).
     pub(super) fn pane_names(&self) -> [String; 4] {
+        let pj = if self.use_p { "P" } else { "Pj" };
         let name = |k: usize| {
             let c = self.cfg(k);
+            if k == 0 && c.polar {
+                return format!("T vs {pj} (polar)");
+            }
             match c.kind {
                 XyKind::Histogram => format!("N vs {}", c.hist.label()),
                 XyKind::Scatter => format!("{} vs {}", c.y.label(), c.x.label()),
@@ -300,6 +312,8 @@ mod tests {
         c.y.min = -0.25;
         c.bins = 7;
         c.sel_only = true;
+        c.polar = true;
+        c.polar_log = true;
         let back = PaneCfg::from_line(&c.to_line()).unwrap();
         assert!(back == c);
         assert!(PaneCfg::from_line("garbage").is_none());

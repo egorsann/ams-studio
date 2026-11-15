@@ -992,6 +992,141 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
     out
 }
 
+/// The rings of the polar plot: the Pj (or P) values to label (above 1) and the radius, in plot units (Pj - 1, or log10
+/// of Pj when `log`), of the outer arc, which is the first ring at or beyond the largest value.
+pub fn polar_scale(max_pj: f64, log: bool) -> (Vec<f64>, f64) {
+    let max_pj = if max_pj.is_finite() { max_pj.max(1.0) } else { 1.0 };
+    if log {
+        const LADDER: [f64; 18] = [1.01, 1.02, 1.05, 1.1, 1.2, 1.5, 2.0, 3.0, 5.0, 10.0, 20.0, 30.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 10000.0];
+        let top = LADDER.iter().copied().find(|v| *v >= max_pj * (1.0 - 1e-9)).unwrap_or_else(|| 10f64.powf(max_pj.log10().ceil()));
+        let rmax = top.log10();
+        // rings from the corner outwards, none closer than 8 % of the radius to the one before (the outer ring stays)
+        let mut ticks: Vec<f64> = vec![];
+        let mut last = 0.0;
+        for v in LADDER.iter().copied().filter(|v| *v <= top * (1.0 + 1e-9)) {
+            if (v.log10() - last) / rmax >= 0.08 || (v - top).abs() < 1e-9 {
+                if (v - top).abs() < 1e-9 && (v.log10() - last) / rmax < 0.08 {
+                    ticks.pop();
+                }
+                ticks.push(v);
+                last = v.log10();
+            }
+        }
+        (ticks, rmax)
+    } else {
+        const STEPS: [f64; 14] = [0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0];
+        let range = (max_pj - 1.0).max(0.01);
+        let step = STEPS.iter().copied().find(|s| range / s <= 8.0).unwrap_or(1000.0);
+        let n = ((range / step) - 1e-9).ceil().max(1.0) as usize;
+        ((1..=n).map(|k| 1.0 + k as f64 * step).collect(), n as f64 * step)
+    }
+}
+
+/// The T / Pj plot as it is usually shown in publications: a wedge of +-45 degrees, T as the angle (T = +1, oblate,
+/// at the top end; T = -1, prolate, at the bottom end; T = 0 along the horizontal axis) and Pj (or P) as the radius
+/// starting at 1 in the corner, linear or logarithmic.
+pub fn polar(ui: &mut Ui, rect: Rect, pts: &[Pt], p_param: usize, log: bool, size: f32, th: &Theme, salt: &str) -> PlotOut {
+    let pname = if p_param == 3 { "P" } else { "Pj" };
+    // (index, T, Pj): both have to be defined
+    let vals: Vec<(usize, f64, f64)> = pts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            let (t, v) = (p.vals[5], p.vals[p_param]);
+            (t.is_finite() && v.is_finite() && v > 0.0).then(|| (i, t.clamp(-1.0, 1.0), v.max(1.0)))
+        })
+        .collect();
+    let (ticks, rmax) = polar_scale(vals.iter().map(|v| v.2).fold(1.0, f64::max), log);
+    let rad = |v: f64| if log { v.log10() } else { v - 1.0 };
+    let pa = ui.painter_at(rect);
+    let resp = ui.interact(rect, ui.scope_id().with(salt), Sense::click_and_drag());
+    // the wedge: the T = 0 axis is horizontal, the corner on the left; room left for the Pj labels, right for the T = 0 label
+    let (lm, rm, tm, bm) = (34.0f32, 96.0f32, 20.0f32, 20.0f32);
+    let (aw, ah) = (rect.width() - lm - rm, rect.height() - tm - bm);
+    let big = aw.min(ah / (2.0 * std::f32::consts::FRAC_1_SQRT_2)).max(30.0);
+    let o = Pos2::new(rect.min.x + lm + (aw - big).max(0.0) / 2.0, rect.center().y);
+    let at = |t: f64, r: f64| -> Pos2 {
+        let (s, c) = (t * std::f64::consts::FRAC_PI_4).sin_cos();
+        Pos2::new(o.x + (r / rmax) as f32 * big * c as f32, o.y - (r / rmax) as f32 * big * s as f32)
+    };
+    let arc = |r: f64| -> Vec<Pos2> { (0..=40).map(|k| at(-1.0 + 2.0 * k as f64 / 40.0, r)).collect() };
+    let grid = Stroke::new(1.0, th.faint().gamma_multiply(0.7));
+    for t in &ticks {
+        if (rad(*t) - rmax).abs() > 1e-9 {
+            pa.add(Shape::line(arc(rad(*t)), grid));
+        }
+    }
+    let frame = Stroke::new(1.2, th.line());
+    pa.add(Shape::line(arc(rmax), frame));
+    pa.line_segment([o, at(1.0, rmax)], frame);
+    pa.line_segment([o, at(-1.0, rmax)], frame);
+    // T = 0: the baseline
+    pa.line_segment([o, at(0.0, rmax)], Stroke::new(1.8, th.ink()));
+    // ticks on the arc at T = -1, -0.5, 0, 0.5, 1
+    for t in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+        let (p, q) = (at(t, rmax), at(t, rmax * 1.0));
+        let (s, c) = (t * std::f64::consts::FRAC_PI_4).sin_cos();
+        let out = Vec2::new(c as f32, -s as f32) * 5.0;
+        pa.line_segment([p, q + out], frame);
+    }
+    let f = FontId::proportional(11.0);
+    // beside the ends of the arc, so they stay clear of the Pj labels along the lower edge
+    pa.text(at(1.0, rmax) + Vec2::new(8.0, -2.0), Align2::LEFT_BOTTOM, "T = +1 (Oblate)", f.clone(), th.ink());
+    pa.text(at(-1.0, rmax) + Vec2::new(8.0, 2.0), Align2::LEFT_TOP, "T = -1 (Prolate)", f.clone(), th.ink());
+    pa.text(at(0.0, rmax) + Vec2::new(10.0, 0.0), Align2::LEFT_CENTER, "T = 0\n(Sphere)", f.clone(), th.ink());
+    // the Pj values along the lower edge, 1 at the corner
+    let label = |v: f64| if v < 10.0 { format!("{v:.2}") } else if v < 100.0 { format!("{v:.1}") } else { format!("{v:.0}") };
+    pa.text(o + Vec2::new(-5.0, 3.0), Align2::RIGHT_TOP, label(1.0), f.clone(), th.faint());
+    for t in &ticks {
+        let q = at(-1.0, rad(*t));
+        pa.text(q + Vec2::new(-5.0, 3.0), Align2::RIGHT_TOP, label(*t), f.clone(), th.faint());
+    }
+    pa.text(Pos2::new(rect.min.x + 8.0, rect.min.y + 6.0), Align2::LEFT_TOP, format!("T angle, {pname} radius{}", if log { " (log)" } else { "" }), f.clone(), th.faint());
+
+    let (live, done) = if resp.dragged_by(egui::PointerButton::Middle) { (None, None) } else { band(ui, &resp, "band") };
+    let hover = resp.hover_pos();
+    let mut inside: Vec<usize> = vec![];
+    let mut best: Option<(f32, usize, Pos2)> = None;
+    for pass in [false, true] {
+        for (i, t, v) in vals.iter().filter(|(i, _, _)| pts[*i].selected == pass) {
+            let s = at(*t, rad(*v));
+            marker(&pa, s, 2, size, pts[*i].color.map(|c| th.soft(c)).unwrap_or(th.accent), th.edge(), pts[*i].selected);
+            if let Some(b) = done {
+                if b.contains(s) {
+                    inside.push(pts[*i].idx);
+                }
+            }
+            if let Some(h) = hover {
+                let d = s.distance(h);
+                if d < 9.0 && best.map_or(true, |b| d < b.0) {
+                    best = Some((d, *i, s));
+                }
+            }
+        }
+    }
+    let mut out = PlotOut::default();
+    if let Some(l) = live {
+        paint_band(ui, rect, l, th);
+    }
+    if done.is_some() {
+        out.band = Some(inside);
+    }
+    if vals.is_empty() {
+        pa.text(o + Vec2::new(big / 2.0, 0.0), Align2::CENTER_CENTER, "No specimens to show", FontId::proportional(13.0), th.faint());
+    }
+    if let Some((_, i, s)) = best {
+        let p = &pts[i];
+        out.hover = Some(format!("{}   T = {:.4}   {} = {:.4}", p.name, p.vals[5], pname, p.vals[p_param]));
+        if ui.input(|i| i.modifiers.alt) {
+            label_box(&pa, rect, s, p.name.clone(), th);
+        }
+        if resp.clicked() {
+            out.click = Some(p.idx);
+        }
+    }
+    out
+}
+
 /// Which plot the top right pane draws.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum XyKind {
@@ -1234,6 +1369,30 @@ fn base_radius(rect: Rect) -> f32 {
 /// Centre and radius of the net drawn by [`stereonet`] inside `rect` for a zoom / pan state.
 pub fn net_geometry(rect: Rect, view: &NetView) -> (Pos2, f32) {
     (rect.center() + view.off, base_radius(rect) * view.zoom)
+}
+
+#[cfg(test)]
+mod polar_tests {
+    use super::*;
+
+    #[test]
+    fn the_rings_cover_the_largest_value() {
+        let (ticks, rmax) = polar_scale(1.79, false);
+        assert!(ticks.len() >= 4 && ticks.len() <= 9, "{ticks:?}");
+        assert!((rmax - (ticks.last().unwrap() - 1.0)).abs() < 1e-9 && rmax >= 0.79);
+        // a nearly isotropic specimen still gets a few rings
+        let (t, r) = polar_scale(1.04, false);
+        assert!(t.len() >= 2 && r >= 0.04, "{t:?} {r}");
+        // logarithmic: rings at round Pj values, the outer one at or beyond the maximum
+        let (t, r) = polar_scale(3.06, true);
+        assert!(t.contains(&2.0) && t.contains(&3.0) && (r - 5f64.log10()).abs() < 1e-9, "{t:?} {r}");
+        // a wide range does not crowd the corner: rings keep their distance
+        let (t, r) = polar_scale(1500.0, true);
+        assert!(t.windows(2).all(|w| (w[1].log10() - w[0].log10()) / r >= 0.079) && *t.last().unwrap() == 10000.0, "{t:?}");
+        // nothing defined: no panic, one ring
+        let (t, r) = polar_scale(f64::NAN, false);
+        assert!(!t.is_empty() && r > 0.0);
+    }
 }
 
 #[cfg(test)]

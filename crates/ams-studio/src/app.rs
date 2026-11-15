@@ -400,6 +400,9 @@ pub struct App {
     /// Planes entered by hand, drawn as great circles in the geographic net (stereonet options > Planes).
     st_planes: Vec<stereo_planes::StPlane>,
     st_planes_on: bool,
+    /// While the out-of-phase data are shown, its toolbar button gets a fat red outline (View menu switches it on again).
+    oop_highlight: bool,
+    oop_hint_rect: Rect,
     st_plane_comments: bool,
     /// How planes are typed in: 0 strike with the left-hand rule (default), 1 strike with the right-hand rule, 2 dip direction.
     st_plane_conv: u8,
@@ -591,6 +594,8 @@ impl App {
             st_legend: true,
             st_planes: vec![],
             st_planes_on: true,
+            oop_highlight: true,
+            oop_hint_rect: Rect::NOTHING,
             st_plane_comments: true,
             st_plane_conv: 0,
             planes_for: None,
@@ -736,6 +741,7 @@ impl App {
                 "core_needle" if !v.trim().is_empty() => self.cv.needle = v.to_string(),
                 "core_fit_all" => self.cv.fit_all = v == "1",
                 "st_planes" => self.st_planes_on = v != "0",
+                "oop_highlight" => self.oop_highlight = v != "0",
                 "st_plane_comments" => self.st_plane_comments = v != "0",
                 "st_plane_conv" => self.st_plane_conv = v.parse().unwrap_or(0u8).min(2),
                 "st_plane_new_spec" => self.st_plane_new_spec = v == "1",
@@ -755,7 +761,7 @@ impl App {
         let _ = std::fs::write(
             p,
             format!(
-                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nuse_p={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\ncore_on={}\ncore_root={}\ncore_needle={}\ncore_frac={}\ncore_fit_all={}\nst_planes={}\nst_plane_comments={}\nst_plane_conv={}\nst_plane_new_spec={}\n",
+                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nuse_p={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\ncore_on={}\ncore_root={}\ncore_needle={}\ncore_frac={}\ncore_fit_all={}\nst_planes={}\nst_plane_comments={}\nst_plane_conv={}\nst_plane_new_spec={}\noop_highlight={}\n",
                 self.browser_dir.display(),
                 self.dark as u8,
                 self.browser_open as u8,
@@ -780,7 +786,8 @@ impl App {
                 self.st_planes_on as u8,
                 self.st_plane_comments as u8,
                 self.st_plane_conv,
-                self.st_plane_new_spec as u8
+                self.st_plane_new_spec as u8,
+                self.oop_highlight as u8
             ),
         );
     }
@@ -1549,6 +1556,19 @@ fn tool(ui: &mut Ui, icon: Icon, tip: &str, enabled: bool, selected: bool, dark:
     resp.on_hover_text(tip).clicked() && enabled
 }
 
+/// The Out-of-Phase button while the out-of-phase data are shown: bigger, with a fat red outline. Returns the click and
+/// the rectangle of the button.
+fn tool_flagged(ui: &mut Ui, icon: Icon, enabled: bool, dark: bool) -> (bool, Rect) {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(46.0, 36.0), if enabled { Sense::click() } else { Sense::hover() });
+    if ui.is_rect_visible(rect) {
+        let pa = ui.painter();
+        pa.rect_filled(rect, 7.0, ui.visuals().selection.bg_fill);
+        icons::paint(pa, Rect::from_center_size(rect.center(), icons::size() * 1.45), icon, dark);
+        pa.rect_stroke(rect, 7.0, Stroke::new(3.5, Color32::from_rgb(222, 38, 38)), StrokeKind::Inside);
+    }
+    (resp.clicked() && enabled, rect)
+}
+
 fn sep(ui: &mut Ui) {
     ui.add_space(4.0);
     let (r, _) = ui.allocate_exact_size(Vec2::new(1.0, 24.0), Sense::hover());
@@ -1719,6 +1739,9 @@ impl eframe::App for App {
                         }
                     }
                     if item(ui, if self.dark { "Light Theme" } else { "Dark Theme" }, "", true) { actions.push(Action::ToggleTheme) }
+                    if ui.checkbox(&mut self.oop_highlight, "Highlight out-of-phase view").on_hover_text("A fat red outline around the Out-of-Phase button while the out-of-phase data are shown, so you do not forget what you are looking at").changed() {
+                        self.save_state();
+                    }
                     ui.separator();
                     // the four panes back to the Anisoft 6 settings; the undo sits in the same row while it is offered
                     let undo_left = self.reset_undo_left();
@@ -1755,6 +1778,7 @@ impl eframe::App for App {
         });
 
         // ------------------------------------------------------------- toolbar
+        let mut oop_rect = Rect::NOTHING;
         egui::Panel::top("toolbar").show(ui, |ui| {
             let d = self.dark;
             let (prev, next) = self.doc.as_ref().filter(|dc| !dc.synthetic).map(|dc| { let n = self.neighbours_of(&dc.path); (n.0.is_some(), n.1.is_some()) }).unwrap_or((false, false));
@@ -1782,7 +1806,12 @@ impl eframe::App for App {
                 if tool(ui, Icon::DataTable, "Data Table  F2", has, self.win_table, d) { actions.push(Action::DataTable) }
                 sep(ui);
                 if tool(ui, Icon::InPhase, "In-Phase AMS  F3", has, !self.out_phase, d) { actions.push(Action::Phase(false)) }
-                if tool(ui, Icon::OutPhase, "Out-of-Phase AMS  F4", has, self.out_phase, d) { actions.push(Action::Phase(true)) }
+                if self.out_phase && self.oop_highlight {
+                    // out-of-phase data are on screen: a bigger button with a fat red outline (the other tools move right)
+                    let (clicked, r) = tool_flagged(ui, Icon::OutPhase, has, d);
+                    oop_rect = r;
+                    if clicked { actions.push(Action::Phase(true)) }
+                } else if tool(ui, Icon::OutPhase, "Out-of-Phase AMS  F4", has, self.out_phase, d) { actions.push(Action::Phase(true)) }
                 sep(ui);
                 for (ch, cs, tip) in [('S', CoordSys::Specimen, "Specimen Coordinates  F5"), ('G', CoordSys::Geographic, "Geographic Coordinates  F6"), ('P', CoordSys::Paleo, "Paleogeographic Coordinates  F7"), ('T', CoordSys::Tectonic, "Tectonic Coordinates  F8")] {
                     if tool(ui, Icon::Coord(ch), tip, has, self.coord == cs, d) { actions.push(Action::Coord(cs)) }
@@ -1808,6 +1837,34 @@ impl eframe::App for App {
                 if tool(ui, Icon::Contour, "Contour Plot  F12", has, self.win_contour, d) { actions.push(Action::Contour) }
             });
         });
+
+        // hovering the red outline: what it is for, and the way to switch it off (and back on)
+        if self.out_phase && self.oop_highlight && oop_rect.is_positive() {
+            let ctx = ui.ctx().clone();
+            let over = ctx.input(|i| i.pointer.hover_pos()).map_or(false, |p| oop_rect.union(self.oop_hint_rect).contains(p));
+            if over {
+                let mut disable = false;
+                let area = egui::Area::new(egui::Id::unique(("oop-hint", 0))).order(egui::Order::Tooltip).fixed_pos(oop_rect.left_bottom() + Vec2::new(0.0, 6.0)).show(&ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(RichText::new("Out-of-Phase AMS  F4").weak().small());
+                        ui.label(RichText::new("highlighted, so you don't forget what you're looking at :)").strong());
+                        ui.add_space(4.0);
+                        disable = ui.button("disable this feature").clicked();
+                        ui.label(RichText::new("It can be switched on again under View > Highlight out-of-phase view.").weak().small());
+                    });
+                });
+                self.oop_hint_rect = area.response.rect;
+                if disable {
+                    self.oop_highlight = false;
+                    self.oop_hint_rect = Rect::NOTHING;
+                    self.save_state();
+                }
+            } else {
+                self.oop_hint_rect = Rect::NOTHING;
+            }
+        } else {
+            self.oop_hint_rect = Rect::NOTHING;
+        }
 
         // ----------------------------------------------------------- status bar
         egui::Panel::bottom("status").show_separator_line(false).frame(egui::Frame::NONE).show(ui, |ui| {
@@ -2196,7 +2253,7 @@ impl App {
             let mut body = self.pane_frame(ui, rects[i], i, &names[i], th);
             // the settings of the three plot panes (the stereonet has none)
             let cfg: Option<PaneCfg> = (i >= 1).then(|| self.cfg(i - 1).clone());
-            let coloured = i == 0 || cfg.as_ref().map_or(false, |c| matches!(c.kind, XyKind::Scatter | XyKind::Line));
+            let coloured = i == 0 || cfg.as_ref().map_or(false, |c| matches!(c.kind, XyKind::Scatter | XyKind::Line) || (i == 1 && c.polar));
             let (cpts, crange) = if coloured { Self::colorized(&pts, &self.color[i], &class_cols) } else { (pts.clone(), None) };
             let show_bar = coloured && crange.is_some() && (i == 0 || cfg.as_ref().map_or(false, |c| c.legend));
             if show_bar {
@@ -2222,6 +2279,10 @@ impl App {
                     let shown: Vec<Pt> = if c.sel_only { cpts.iter().filter(|p| p.selected).cloned().collect() } else { cpts.clone() };
                     const SALT: [&str; 3] = ["xy_a", "xy_b", "xy_c"];
                     const SALT_BIN: [&str; 3] = ["bn_a", "bn_b", "bn_c"];
+                    // the top right pane can be a polar plot (T angle, Pj radius) whatever its plot type is
+                    if k == 0 && c.polar {
+                        plots::polar(ui, body, &shown, if self.use_p { 3 } else { 4 }, c.polar_log, self.marker, th, "polar")
+                    } else {
                     match c.kind {
                         XyKind::Histogram => plots::histogram(ui, body, &shown, c.bins, &c.hist, th, SALT[k]),
                         XyKind::Scatter | XyKind::Line => {
@@ -2230,6 +2291,7 @@ impl App {
                             plots::scatter(ui, body, &shown, &spec, self.marker, th, &mut self.views[k])
                         }
                         kind => plots::binned_plot(ui, body, &shown, kind, &c.x, &c.y, c.bins, c.group, th, &mut self.views[k], SALT_BIN[k]),
+                    }
                     }
                 }
             };
@@ -2320,9 +2382,10 @@ impl App {
         let txt = if self.hover[i].is_empty() { RichText::new(name).weak() } else { RichText::new(&self.hover[i]) };
         // the title / hover text gives way to the tick boxes on the right
         let c0 = (i >= 1).then(|| self.cfg(i - 1).clone());
-        let has_p = c0.as_ref().map_or(false, |c| [&c.x, &c.y, &c.hist].iter().any(|a| a.param == 3 || a.param == 4));
+        let is_polar = i == 1 && c0.as_ref().map_or(false, |c| c.polar);
+        let has_p = is_polar || c0.as_ref().map_or(false, |c| [&c.x, &c.y, &c.hist].iter().any(|a| a.param == 3 || a.param == 4));
         let has_log = i == 2 && c0.as_ref().map_or(false, |c| matches!(c.kind, XyKind::Scatter | XyKind::Line));
-        let reserved = if i == 0 { 0.0 } else { 118.0 + if has_p { 34.0 } else { 0.0 } + if has_log { 78.0 } else { 0.0 } };
+        let reserved = if i == 0 { 0.0 } else { 118.0 + if has_p { 34.0 } else { 0.0 } + if has_log { 78.0 } else { 0.0 } + if i == 1 { 62.0 + if is_polar { 78.0 } else { 0.0 } } else { 0.0 } };
         child.add_sized([(header.width() - reserved - 34.0).max(40.0), 18.0], egui::Label::new(txt).truncate());
         let mut changed = false;
         let mut p_changed = false;
@@ -2336,6 +2399,21 @@ impl App {
                 }
                 if has_p {
                     p_changed |= ui.checkbox(&mut self.use_p, "P").on_hover_text("Use P instead of Pj (the default) wherever a plot shows it").changed();
+                }
+                if i == 1 {
+                    // the top right pane as a polar plot: T as the angle, Pj as the radius (linear or logarithmic)
+                    let mut pol = c.polar;
+                    if ui.checkbox(&mut pol, "Polar").on_hover_text("Show T (angle) against Pj (radius) as a polar plot, the way it is usually drawn in publications").changed() {
+                        self.cfg_mut(0).polar = pol;
+                        cfg_changed = true;
+                    }
+                    if c.polar {
+                        let mut lg = c.polar_log;
+                        if ui.checkbox(&mut lg, if self.use_p { "Log P" } else { "Log Pj" }).on_hover_text("Logarithmic radius (the corner is Pj = 1)").changed() {
+                            self.cfg_mut(0).polar_log = lg;
+                            cfg_changed = true;
+                        }
+                    }
                 }
                 if has_log {
                     let lab = if c.x.param == 0 { "Log Km" } else { "Log X" };
@@ -2465,6 +2543,9 @@ impl App {
                                     }
                                 });
                             });
+                            if k == 0 && orig.polar {
+                                ui.label(RichText::new("The Polar tick in the pane's header is on: T angle, Pj radius. The plot type below is used again when it is off.").weak().small());
+                            }
                             ui.horizontal(|ui| {
                                 ui.add_enabled(self.doc.as_ref().map_or(false, |d| !d.synthetic), egui::Checkbox::new(&mut spec_tick, "Specimen specific"))
                                     .on_hover_text("Keep this plot's settings for the open file only. Any other file shows the general settings again; untick to forget the file's own.");
