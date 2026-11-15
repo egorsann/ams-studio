@@ -4,6 +4,7 @@
 //! decoded into memory by background threads and appear in their places as they arrive; nothing is written to disk.
 
 use super::core_links::{self, Link};
+use ams_core::depjson;
 use super::{info_icon, tools_ui, App, W_COREVIEW};
 use crate::core_view::{self, Cube};
 use egui::{Align, Color32, ColorImage, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Ui, Vec2};
@@ -80,8 +81,11 @@ pub(super) struct CoreViewState {
     rows_stale: bool,
     /// Match every specimen of the file tree at once (off: only the selected ones).
     pub fit_all: bool,
-    /// The saved links: specimen id -> cube photo folder (`core_links.json`).
-    pub links: BTreeMap<String, Link>,
+    /// A saved link was seen this session (a cancelled window then leaves the viewer on).
+    pub had_link: bool,
+    /// Links kept by the first version in the preferences folder (`core_links.json`); moved into the specimen's own
+    /// dependency file when a specimen uses one.
+    pub legacy_links: BTreeMap<String, PathBuf>,
     /// The file the automatic link / search was last tried for (so a missing link does not retry every frame).
     tried: Option<PathBuf>,
     pub note: String,
@@ -90,6 +94,8 @@ pub(super) struct CoreViewState {
     pub export: bool,
     /// What the pointer was over last (the pane's title).
     pub hover: String,
+    /// Where the pane was drawn this frame (`Rect::NOTHING` when it is off).
+    pub rect: Rect,
 }
 
 impl Default for CoreViewState {
@@ -119,12 +125,14 @@ impl Default for CoreViewState {
             rows: vec![],
             rows_stale: false,
             fit_all: false,
-            links: BTreeMap::new(),
+            had_link: false,
+            legacy_links: BTreeMap::new(),
             tried: None,
             note: String::new(),
             frac: 0.28,
             export: true,
             hover: String::new(),
+            rect: Rect::NOTHING,
         }
     }
 }
@@ -247,7 +255,7 @@ fn scan(root: &Path, needle: &str) -> ScanResult {
 }
 
 /// The specimen id of a file: its name up to the first `_` (`DC26AB002_use.ams` -> `DC26AB002`).
-fn spec_id(path: &Path) -> String {
+pub(super) fn spec_id(path: &Path) -> String {
     let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     stem.split('_').next().unwrap_or("").to_string()
 }
@@ -345,8 +353,35 @@ impl App {
         self.doc.as_ref().filter(|d| !d.synthetic).map(|d| spec_id(&d.path)).unwrap_or_default()
     }
 
-    fn cv_save_links(&self) {
-        let _ = core_links::write(&core_links::path(), &self.cv.links);
+    /// The photo folder linked to a specimen file: from the `core_viewer` section of its dependency file, else from the
+    /// older list in the preferences folder (which is then written into the dependency file).
+    fn cv_saved_dir(&self, file: &Path) -> Option<PathBuf> {
+        let json = depjson::for_source(file);
+        let jdir = json.parent()?;
+        match core_links::read(&json) {
+            Some(l) => l.resolve(jdir),
+            None => {
+                let d = self.cv.legacy_links.get(&spec_id(file))?.clone();
+                if !d.is_dir() {
+                    return None;
+                }
+                let _ = core_links::write(&json, Some(&Link::new(&d, jdir)));
+                Some(d)
+            }
+        }
+    }
+
+    /// Stores (`Some`) or removes (`None`) the link of a specimen file in its dependency file (the `_geo` folder next
+    /// to the specimen's files is made when needed); nothing is written when it is the same already.
+    fn cv_store_link(&mut self, file: &Path, dir: Option<&Path>) {
+        let json = depjson::for_source(file);
+        let jdir = json.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let new = dir.map(|d| Link::new(d, &jdir));
+        if core_links::read(&json) == new {
+            return;
+        }
+        let _ = core_links::write(&json, new.as_ref());
+        self.cv.had_link |= new.is_some();
     }
 
     /// The window with the table, searching at once when a folder is known.
@@ -364,7 +399,7 @@ impl App {
     /// The window was cancelled or closed: when no link exists at all and nothing is shown, the viewer stays off.
     pub(super) fn cv_dismiss(&mut self) {
         self.cv.win = false;
-        if self.cv.dir.is_none() && self.cv.links.is_empty() {
+        if self.cv.dir.is_none() && !self.cv.had_link {
             self.cv.on = false;
         }
     }
@@ -391,10 +426,30 @@ impl App {
         self.save_state();
     }
 
+    /// View > Enable core viewer: always the window with the table; the saved link of the open file shows behind it.
+    pub(super) fn cv_enable(&mut self) {
+        self.cv.on = true;
+        self.cv.note.clear();
+        self.cv.tried = self.doc.as_ref().filter(|d| !d.synthetic).map(|d| d.path.clone());
+        // hiding the viewer drops the decoded photos: they are read again from the saved link
+        if self.cv.dir.is_none() || self.cv.textures.is_empty() {
+            self.cv_try_link();
+        }
+        self.cv_open_window();
+        self.save_state();
+    }
+
+    /// The open file already has a link to its cube photos (the View menu then offers the tick box).
+    pub(super) fn cv_current_has_link(&self) -> bool {
+        let Some(d) = self.doc.as_ref().filter(|d| !d.synthetic) else { return false };
+        core_links::read(&depjson::for_source(&d.path)).is_some() || self.cv.legacy_links.contains_key(&spec_id(&d.path))
+    }
+
     /// Loads the photos of the open specimen from its saved link; false when there is none (or its folder is gone).
     fn cv_try_link(&mut self) -> bool {
-        let id = self.cv_open_id();
-        let Some(dir) = self.cv.links.get(&id).and_then(|l| l.resolve(self.cv.root.as_deref())) else { return false };
+        let Some(file) = self.doc.as_ref().filter(|d| !d.synthetic).map(|d| d.path.clone()) else { return false };
+        let Some(dir) = self.cv_saved_dir(&file) else { return false };
+        self.cv.had_link = true;
         self.cv_load(dir);
         true
     }
@@ -411,7 +466,7 @@ impl App {
     }
 
     /// The specimens (their main files) of the file tree, else the open file.
-    fn cv_files(&self) -> Vec<PathBuf> {
+    pub(super) fn cv_files(&self) -> Vec<PathBuf> {
         let v = self.tree_specimen_files();
         if !v.is_empty() {
             return v;
@@ -435,7 +490,7 @@ impl App {
         self.cv.from_content = self.cv.found.is_empty();
         let mut saved: Vec<Option<PathBuf>> = vec![];
         for p in &files {
-            let dir = self.cv.links.get(&spec_id(p)).and_then(|l| l.resolve(root.as_deref()));
+            let dir = self.cv_saved_dir(p);
             if let Some(d) = &dir {
                 if !list.iter().any(|f| f.dir == *d) {
                     let ph = photos_in(d);
@@ -445,6 +500,7 @@ impl App {
             }
             saved.push(dir);
         }
+        self.cv.had_link |= saved.iter().any(|s| s.is_some());
         let old: HashMap<PathBuf, (bool, Option<Option<PathBuf>>)> = self.cv.rows.drain(..).map(|r| (r.path, (r.on, r.manual))).collect();
         self.cv.rows = files
             .into_iter()
@@ -556,8 +612,9 @@ impl App {
                             Some(k) => {
                                 // an established link: kept for the next time
                                 let dir = self.cv.list[k].dir.clone();
-                                self.cv.links.insert(id, Link::new(&dir, self.cv.root.as_deref()));
-                                self.cv_save_links();
+                                if let Some(file) = self.doc.as_ref().filter(|d| !d.synthetic).map(|d| d.path.clone()) {
+                                    self.cv_store_link(&file, Some(&dir));
+                                }
                                 self.cv_load(dir);
                             }
                             None => {
@@ -761,29 +818,17 @@ impl App {
     /// Keeps the links of the ticked rows (and drops the ones set to "no link"), then shows the open specimen's photos.
     fn cv_link_and_load(&mut self) {
         let sel = self.cv_selection();
-        let root = self.cv.root.clone();
-        let mut changes: Vec<(String, Option<Link>)> = vec![];
+        let mut changes: Vec<(PathBuf, Option<PathBuf>)> = vec![];
         for row in self.cv.rows.iter().filter(|r| r.on) {
             match row_pick(row, &self.cv.list, self.cv.fit_all || sel.contains(&row.path)) {
-                Some(k) => changes.push((row.id.clone(), Some(Link::new(&self.cv.list[k].dir, root.as_deref())))),
-                None if matches!(row.manual, Some(None)) => changes.push((row.id.clone(), None)),
+                Some(k) => changes.push((row.path.clone(), Some(self.cv.list[k].dir.clone()))),
+                None if matches!(row.manual, Some(None)) => changes.push((row.path.clone(), None)),
                 None => {}
             }
         }
-        let mut changed = false;
-        for (id, l) in changes {
-            match l {
-                Some(l) => {
-                    if self.cv.links.get(&id) != Some(&l) {
-                        self.cv.links.insert(id, l);
-                        changed = true;
-                    }
-                }
-                None => changed |= self.cv.links.remove(&id).is_some(),
-            }
-        }
-        if changed {
-            self.cv_save_links();
+        // every link goes into the dependency file of its own specimen (in its _geo folder)
+        for (file, dir) in changes {
+            self.cv_store_link(&file, dir.as_deref());
         }
         // rows that were only suggested are links now
         self.cv.rows_stale = true;

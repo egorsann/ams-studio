@@ -62,6 +62,7 @@ pub enum Action {
     About,
     ToggleBrowser,
     ToggleCoreViewer,
+    EnableCoreViewer,
     ToggleTheme,
     StepSpecimen(i32),
     TogglePhase,
@@ -87,6 +88,8 @@ enum Focus {
     Files,
     Specimens,
     Graphs,
+    /// The core viewer: Esc drops the selection first and only then resets the zoom.
+    Core,
 }
 
 /// K1 / K2 / K3 marker colours: strong ones on white, softer ones on the dark blue-grey.
@@ -398,7 +401,13 @@ pub struct App {
     st_planes: Vec<stereo_planes::StPlane>,
     st_planes_on: bool,
     st_plane_comments: bool,
-    st_plane_strike: bool,
+    /// How planes are typed in: 0 strike with the left-hand rule (default), 1 strike with the right-hand rule, 2 dip direction.
+    st_plane_conv: u8,
+    /// The open file the planes were last loaded for, edits not written yet (since when), and the planes of the first
+    /// version (preferences folder) waiting to move into the specimens' dependency files.
+    planes_for: Option<PathBuf>,
+    planes_dirty: Option<f64>,
+    planes_legacy: Vec<stereo_planes::StPlane>,
     /// New planes are added specimen specific (off: global).
     st_plane_new_spec: bool,
     st_connect: bool,
@@ -583,7 +592,10 @@ impl App {
             st_planes: vec![],
             st_planes_on: true,
             st_plane_comments: true,
-            st_plane_strike: false,
+            st_plane_conv: 0,
+            planes_for: None,
+            planes_dirty: None,
+            planes_legacy: vec![],
             st_plane_new_spec: false,
             st_connect: false,
             st_mf: false,
@@ -663,8 +675,8 @@ impl App {
         };
         app.load_state();
         app.load_plots();
-        app.cv.links = core_links::read(&core_links::path());
-        app.st_planes = stereo_planes::read();
+        app.cv.legacy_links = core_links::read_legacy();
+        app.planes_legacy = stereo_planes::read_legacy();
         if app.dark {
             std::mem::swap(&mut app.k_colors, &mut app.k_other);
         }
@@ -725,7 +737,7 @@ impl App {
                 "core_fit_all" => self.cv.fit_all = v == "1",
                 "st_planes" => self.st_planes_on = v != "0",
                 "st_plane_comments" => self.st_plane_comments = v != "0",
-                "st_plane_strike" => self.st_plane_strike = v == "1",
+                "st_plane_conv" => self.st_plane_conv = v.parse().unwrap_or(0u8).min(2),
                 "st_plane_new_spec" => self.st_plane_new_spec = v == "1",
                 "core_frac" => self.cv.frac = v.parse().unwrap_or(0.28f32).clamp(0.12, 0.6),
                 "hfrac" => self.hfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
@@ -743,7 +755,7 @@ impl App {
         let _ = std::fs::write(
             p,
             format!(
-                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nuse_p={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\ncore_on={}\ncore_root={}\ncore_needle={}\ncore_frac={}\ncore_fit_all={}\nst_planes={}\nst_plane_comments={}\nst_plane_strike={}\nst_plane_new_spec={}\n",
+                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nuse_p={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\ncore_on={}\ncore_root={}\ncore_needle={}\ncore_frac={}\ncore_fit_all={}\nst_planes={}\nst_plane_comments={}\nst_plane_conv={}\nst_plane_new_spec={}\n",
                 self.browser_dir.display(),
                 self.dark as u8,
                 self.browser_open as u8,
@@ -767,7 +779,7 @@ impl App {
                 self.cv.fit_all as u8,
                 self.st_planes_on as u8,
                 self.st_plane_comments as u8,
-                self.st_plane_strike as u8,
+                self.st_plane_conv,
                 self.st_plane_new_spec as u8
             ),
         );
@@ -1309,6 +1321,7 @@ impl App {
             Action::Colors => self.open_win(W_COLORS),
             Action::About => self.open_win(W_ABOUT),
             Action::ToggleCoreViewer => self.cv_toggle(),
+            Action::EnableCoreViewer => self.cv_enable(),
             Action::ToggleBrowser => {
                 self.browser_open = !self.browser_open;
                 self.save_state();
@@ -1371,6 +1384,7 @@ impl App {
             Focus::Files if specs => clear_specs(self),
             Focus::Specimens if specs => clear_specs(self),
             Focus::Specimens if files => clear_files(self),
+            Focus::Core if specs => clear_specs(self),
             Focus::Graphs => {
                 // only the last drag selection goes
                 if self.last_band && specs {
@@ -1437,7 +1451,11 @@ impl App {
                 return out;
             }
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-                if self.st_view.is_zoomed() || self.views.iter().any(|v| v.is_zoomed()) || self.cv.view.is_zoomed() {
+                // the core viewer was used last: its selection goes first, the zoom is reset by the next Esc
+                let core_selection = self.last_focus == Focus::Core && self.doc.as_ref().map_or(false, |d| d.n_selected() > 0);
+                if core_selection {
+                    self.esc_clear_selection();
+                } else if self.st_view.is_zoomed() || self.views.iter().any(|v| v.is_zoomed()) || self.cv.view.is_zoomed() {
                     self.st_view.reset();
                     self.views.iter_mut().for_each(|v| v.reset());
                     self.cv.view.reset();
@@ -1577,6 +1595,7 @@ impl eframe::App for App {
         }
         self.track_layout(&ctx);
         self.cv_poll(&ctx);
+        self.planes_poll(&ctx);
         if self.reset_snap.is_some() && self.reset_undo_left().is_none() {
             self.reset_snap = None; // the ten minutes are over
         }
@@ -1686,9 +1705,18 @@ impl eframe::App for App {
                     ui.separator();
                     if item(ui, "File Browser", "Ctrl+B", true) { actions.push(Action::ToggleBrowser) }
                     // a pane above the plots with the photos of the cubes on the core
-                    if ui.add_enabled(has, egui::Button::new(if self.cv.on { "\u{2713}  Enable core viewer" } else { "      Enable core viewer" })).on_hover_text("Shows the cube photos on the core above the plots; clicking or selecting cubes selects their records and the other way round. Asks for the folder with the photos.").clicked() {
-                        actions.push(Action::ToggleCoreViewer);
+                    // always the same text, always the window where the cube folders are linked
+                    if ui.add_enabled(has, egui::Button::new("Enable core viewer")).on_hover_text("Opens the window that links the specimens to their cube photo folders, then shows the photos on the core above the plots; clicking or selecting cubes selects their records and the other way round.").clicked() {
+                        actions.push(Action::EnableCoreViewer);
                         ui.close();
+                    }
+                    // once the open file has a link the viewer can be switched off and on here
+                    if self.cv_current_has_link() {
+                        let mut on = self.cv.on;
+                        if ui.checkbox(&mut on, "Show core viewer").on_hover_text("The open file is linked to its cube photos: untick to hide the core viewer, tick to show it again").changed() {
+                            actions.push(Action::ToggleCoreViewer);
+                            ui.close();
+                        }
                     }
                     if item(ui, if self.dark { "Light Theme" } else { "Dark Theme" }, "", true) { actions.push(Action::ToggleTheme) }
                     ui.separator();
@@ -1833,7 +1861,11 @@ impl eframe::App for App {
                 } else if spec_rect.contains(p) {
                     Focus::Specimens
                 } else if plots_rect.contains(p) {
-                    Focus::Graphs
+                    if self.cv.on && self.cv.rect.contains(p) {
+                        Focus::Core
+                    } else {
+                        Focus::Graphs
+                    }
                 } else {
                     self.last_focus
                 };
@@ -2209,13 +2241,32 @@ impl App {
                 band = out.band;
             }
         }
-        // the core viewer: a click or a drag over cubes selects their records like a marker does
+        // the core viewer: a click or a drag over cubes selects their records like a marker does; with Ctrl the cubes
+        // are added to the selection (a band) or switched in or out of it (a click)
+        self.cv.rect = core_rect.unwrap_or(Rect::NOTHING);
         if let Some(cr) = core_rect {
             let out = self.cv_pane(ui, cr, th);
+            if let Some(doc) = &mut self.doc {
+                let n = doc.selected.len();
+                if let Some(recs) = out.toggle.as_ref().map(|r| r.iter().copied().filter(|&i| i < n).collect::<Vec<_>>()) {
+                    // all of them selected: they go; otherwise they all join
+                    let all = !recs.is_empty() && recs.iter().all(|&i| doc.selected[i]);
+                    for i in recs {
+                        doc.selected[i] = !all;
+                    }
+                    self.last_band = false;
+                }
+                if let (Some(b), true) = (&out.band, out.additive) {
+                    for &i in b.iter().filter(|&&i| i < n) {
+                        doc.selected[i] = true;
+                    }
+                    self.last_band = true;
+                }
+            }
             if out.click.is_some() {
                 click = out.click;
             }
-            if out.band.is_some() {
+            if out.band.is_some() && !out.additive {
                 band = out.band;
             }
         }

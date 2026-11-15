@@ -250,7 +250,10 @@ pub fn draw(ui: &mut Ui, rect: Rect, cubes: &[Cube], textures: &HashMap<(u32, ch
             label_box(&pa, rect, r.center(), format!("{}  {specimen}", c.name()), th);
         }
         if resp.clicked() && !c.recs.is_empty() {
-            if c.recs.len() == 1 {
+            if mods.ctrl || mods.command {
+                // Ctrl + click: the cube joins the selection or leaves it
+                out.toggle = Some(c.recs.clone());
+            } else if c.recs.len() == 1 {
                 out.click = Some(c.recs[0]);
             } else {
                 out.band = Some(c.recs.clone());
@@ -264,6 +267,7 @@ pub fn draw(ui: &mut Ui, rect: Rect, cubes: &[Cube], textures: &HashMap<(u32, ch
         picked.sort_unstable();
         picked.dedup();
         out.band = Some(picked);
+        out.additive = mods.ctrl || mods.command;
     }
     // row letters at the left, slice numbers along the bottom
     let mut seen: HashSet<(i32, char)> = HashSet::new();

@@ -16,10 +16,80 @@
 //! ```
 //!
 //! A record without a drill core reorientation is `null`.
+//!
+//! The same file also holds the other things that belong to the specimen and should travel with the data (one file per
+//! `_geo` folder, in the synced data tree, not in the program's preferences):
+//!
+//! * `core_viewer`: the folder with the cube photos of the specimen (absolute path, and the path relative to this file,
+//!   which still works when the whole data tree is synced to another machine);
+//! * `stereonet`: planes drawn as great circles in the geographic stereonet, `planes_specimen` (only for this specimen)
+//!   and `planes_global` (shown for every specimen; a copy is kept in the file of each specimen of the file tree).
 
 use crate::core::{Arrow, CoreSetup, Face};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+
+/// What the file says about itself (the `note` key).
+const NOTE: &str = "AMS Studio dependency file of this _geo folder; keep it with the _geo files. files: the drill core reorientation (dip direction and plunge of the hole, the offset of the orientation line from the arrow mark, the face that holds the arrow and its direction) of every record of the .ams files here, which stay exact copies of their sources; the geographic view is computed from it. core_viewer: the folder with the cube photos of this specimen (photo_folder is absolute, photo_folder_relative_to_this_file still works when the data tree is synced elsewhere). stereonet: planes drawn as great circles in the geographic stereonet (dip direction and dip in degrees, a comment, a colour): planes_specimen are for this specimen only, planes_global are shown for every specimen and copied into the file of each specimen of the file tree.";
+/// The sections other than `files`.
+const SECTIONS: [&str; 2] = ["core_viewer", "stereonet"];
+
+/// `<specimen folder>_geo/<specimen folder>_geo_dependancy.json` for any file of a specimen: the source file in the
+/// specimen folder, or its copy in the `_geo` folder.
+pub fn for_source(file: &Path) -> PathBuf {
+    let dir = file.parent().unwrap_or(Path::new("."));
+    let leaf = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    if crate::specset::is_result_folder(&leaf) {
+        return path_for(file);
+    }
+    path_for(&dir.join(crate::specset::geo_folder_name(&leaf)).join("x.ams"))
+}
+
+fn stamp(v: &mut Value, json_path: &Path) {
+    let folder = json_path.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    v["kind"] = json!("AMS Studio dependency file");
+    v["version"] = json!(1);
+    v["folder"] = json!(folder);
+    v["note"] = json!(NOTE);
+}
+
+fn is_empty(v: &Value) -> bool {
+    v.get("files").and_then(|f| f.as_object()).map_or(true, |f| f.is_empty()) && SECTIONS.iter().all(|k| v.get(*k).map_or(true, |x| x.is_null()))
+}
+
+/// One section of the dependency file (`core_viewer`, `stereonet`), `None` when the file or the section is missing.
+pub fn read_section(json_path: &Path, key: &str) -> Option<Value> {
+    load(json_path).get(key).cloned().filter(|x| !x.is_null())
+}
+
+/// Sets or removes (`None`) a section; the other sections stay. The folder and the file are made when needed, and the
+/// file is removed again when nothing is left in it. Removing from a file that does not exist does nothing.
+pub fn write_section(json_path: &Path, key: &str, val: Option<Value>) -> std::io::Result<()> {
+    if val.is_none() && !json_path.is_file() {
+        return Ok(());
+    }
+    let mut v = load(json_path);
+    match val {
+        Some(x) => v[key] = x,
+        None => {
+            if let Some(o) = v.as_object_mut() {
+                o.remove(key);
+            }
+        }
+    }
+    if is_empty(&v) {
+        let _ = std::fs::remove_file(json_path);
+        return Ok(());
+    }
+    stamp(&mut v, json_path);
+    if !v.get("files").map_or(false, |f| f.is_object()) {
+        v["files"] = json!({});
+    }
+    if let Some(d) = json_path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    std::fs::write(json_path, serde_json::to_string_pretty(&v).unwrap_or_default() + "\n")
+}
 
 /// `<dir>/<dir name>_dependancy.json` for any `.ams` file of a `_geo` folder (`DC26AB002_AMS_geo/DC26AB002_AMS_geo_dependancy.json`).
 pub fn path_for(ams_file: &Path) -> PathBuf {
@@ -59,11 +129,7 @@ pub fn write(ams_file: &Path, records: &[(String, Option<CoreSetup>)]) -> std::i
     let jp = path_for(ams_file);
     let file = ams_file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let mut v = load(&jp);
-    let folder = ams_file.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    v["kind"] = json!("AMS Studio drill core reorientation");
-    v["version"] = json!(1);
-    v["folder"] = json!(folder);
-    v["note"] = json!("Holds the drill core reorientation of the .ams files in this folder (dip direction and plunge of the hole, the offset of the orientation line from the arrow mark, the face that holds the arrow and its direction). The .ams files here are exact copies of their sources; the geographic view is computed from this file, so keep it with them.");
+    stamp(&mut v, &jp);
     if !v.get("files").map_or(false, |f| f.is_object()) {
         v["files"] = json!({});
     }
@@ -73,7 +139,7 @@ pub fn write(ams_file: &Path, records: &[(String, Option<CoreSetup>)]) -> std::i
     } else if let Some(f) = v["files"].as_object_mut() {
         f.remove(&file);
     }
-    if v["files"].as_object().map_or(true, |f| f.is_empty()) {
+    if is_empty(&v) {
         let _ = std::fs::remove_file(&jp);
         return Ok(jp);
     }
@@ -108,6 +174,17 @@ mod tests {
         assert!(read(&ams).is_empty() && read(&other).len() == 1);
         write(&other, &[("A1".into(), None)]).unwrap();
         assert!(!path_for(&ams).exists());
+        // other sections share the file: the reorientation going away keeps them, removing the last one removes the file
+        write_section(&path_for(&ams), "core_viewer", Some(json!({ "photo_folder": "/x" }))).unwrap();
+        write(&ams, &[("C1".into(), Some(a))]).unwrap();
+        write(&ams, &[("C1".into(), None)]).unwrap();
+        assert_eq!(read_section(&path_for(&ams), "core_viewer").unwrap()["photo_folder"], "/x");
+        write_section(&path_for(&ams), "stereonet", None).unwrap();
+        write_section(&path_for(&ams), "core_viewer", None).unwrap();
+        assert!(!path_for(&ams).exists());
+        // the dependency file of a specimen, from its source file or from its _geo copy
+        assert_eq!(for_source(Path::new("/d/DC26AB002_AMS/DC26AB002_use.ams")), PathBuf::from("/d/DC26AB002_AMS/DC26AB002_AMS_geo/DC26AB002_AMS_geo_dependancy.json"));
+        assert_eq!(for_source(Path::new("/d/DC26AB002_AMS/DC26AB002_AMS_geo/DC26AB002_use_geo.ams")), PathBuf::from("/d/DC26AB002_AMS/DC26AB002_AMS_geo/DC26AB002_AMS_geo_dependancy.json"));
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 }

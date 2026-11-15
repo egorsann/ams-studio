@@ -24,6 +24,11 @@ pub struct PlotOut {
     pub hover: Option<String>,
     /// Specimen indices inside a rubber band that was just released.
     pub band: Option<Vec<usize>>,
+    /// Ctrl was held: the band adds to the selection instead of replacing it.
+    pub additive: bool,
+    /// Ctrl + click on something that stands for these specimens (a cube of the core viewer): switch them in or out of
+    /// the selection.
+    pub toggle: Option<Vec<usize>>,
 }
 
 /// Marker types a selection may touch: no modifier = all shown types; Ctrl = K1, Alt = K2, Shift = K3
