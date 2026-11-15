@@ -4,6 +4,7 @@ use crate::plots::{self, AxisCfg, ColorCfg, NetView, Pt, ScatterSpec, StereoOpts
 use ams_core::params::{param_class, param_sd, param_values_vol, N_PARAMS, PARAM_LABELS};
 mod analysis_ui;
 mod dialogs_ui;
+mod export_ui;
 mod owens_file_ui;
 mod recombine_ui;
 mod specset_ui;
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Action {
     Open,
+    ExportAms,
     Recombine,
     Volume,
     OpenSet,
@@ -205,6 +207,7 @@ const W_CLASSES: usize = 14;
 const W_SET: usize = 15;
 const W_VOL: usize = 16;
 const W_RECOMB: usize = 17;
+const W_EXPORT: usize = 18;
 
 struct ShotJob {
     copy: bool,
@@ -281,6 +284,13 @@ fn info_icon(ui: &mut Ui, text: &str) {
     resp.on_hover_text(text);
 }
 
+/// The open file as it was before the last rotation (and the pending rotations of all files).
+pub(super) struct OwensUndo {
+    raw: Vec<u8>,
+    specs: Vec<ams_core::ams::Specimen>,
+    pending: std::collections::HashMap<PathBuf, Vec<Option<ams_core::tensor::Mat3>>>,
+}
+
 pub struct App {
     doc: Option<Doc>,
     derived: Vec<Derived>,
@@ -333,6 +343,13 @@ pub struct App {
     win_factors: bool,
     win_about: bool,
     win_edit: bool,
+    win_export: bool,
+    ex: export_ui::ExportState,
+    /// Files selected in the browser tree (Shift: range, Ctrl: single) and the anchor of a range.
+    tree_sel: Vec<PathBuf>,
+    tree_anchor: Option<PathBuf>,
+    /// Files that were exported with their rotation.
+    exported: std::collections::HashSet<PathBuf>,
     /// Folder set and file of the last session, restored at start.
     restore_root: Option<PathBuf>,
     restore_file: Option<PathBuf>,
@@ -367,7 +384,9 @@ pub struct App {
     owens_old: bool,
     /// Short notice next to the Owens toggle: (text, time it appeared).
     owens_toast: Option<(String, f64)>,
-    owens_undo: Option<(Vec<u8>, Vec<ams_core::ams::Specimen>)>,
+    owens_undo: Option<OwensUndo>,
+    /// Rotations of files that are not saved yet, per file and record (applied when the file is opened, used by Export as .ams).
+    pending: std::collections::HashMap<PathBuf, Vec<Option<ams_core::tensor::Mat3>>>,
     ana: analysis_ui::AnaState,
     info: Option<String>,
     hover: [String; 4],
@@ -477,6 +496,11 @@ impl App {
             win_factors: false,
             win_about: false,
             win_edit: false,
+            win_export: false,
+            ex: Default::default(),
+            tree_sel: vec![],
+            tree_anchor: None,
+            exported: Default::default(),
             restore_root: None,
             restore_file: None,
             tree_cur: None,
@@ -502,6 +526,7 @@ impl App {
             owens_old: true,
             owens_toast: None,
             owens_undo: None,
+            pending: Default::default(),
             ana: Default::default(),
             info: None,
             hover: Default::default(),
@@ -597,9 +622,55 @@ impl App {
         );
     }
 
+    /// Rotates records of the open file now and remembers the rotation for the file: it is applied again when the
+    /// file is opened later and used by Export as .ams. Nothing is written.
+    pub(super) fn rotate_doc(&mut self, jobs: &[(usize, ams_core::tensor::Mat3)]) {
+        let Some(d) = &mut self.doc else { return };
+        self.owens_undo = Some(OwensUndo { raw: d.raw.clone(), specs: d.specs.clone(), pending: self.pending.clone() });
+        for (i, r) in jobs {
+            d.rotate_specimen(*i, r);
+        }
+        let (path, n, synthetic) = (d.path.clone(), d.specs.len(), d.synthetic);
+        if !synthetic {
+            self.add_pending(&path, n, jobs);
+        }
+        self.dirty = true;
+    }
+
+    pub(super) fn undo_doc_rotation(&mut self) {
+        if let (Some(d), Some(u)) = (&mut self.doc, self.owens_undo.take()) {
+            d.raw = u.raw;
+            d.specs = u.specs;
+            self.pending = u.pending;
+            self.dirty = true;
+        }
+    }
+
+    /// Adds rotations to the pending ones of a file (a later one acts after an earlier one).
+    pub(super) fn add_pending(&mut self, path: &Path, n: usize, jobs: &[(usize, ams_core::tensor::Mat3)]) {
+        let v = self.pending.entry(path.to_path_buf()).or_insert_with(|| vec![None; n]);
+        v.resize(n, None);
+        for (i, r) in jobs {
+            if let Some(slot) = v.get_mut(*i) {
+                *slot = Some(match slot {
+                    Some(old) => ams_core::tensor::mat_mul(r, old),
+                    None => *r,
+                });
+            }
+        }
+    }
+
     fn open_path(&mut self, p: PathBuf) {
         match Doc::open(&p) {
-            Ok(d) => {
+            Ok(mut d) => {
+                // rotations that were made earlier but not saved are applied again
+                if let Some(v) = self.pending.get(&p) {
+                    for (i, r) in v.iter().enumerate() {
+                        if let (Some(r), true) = (r, i < d.specs.len()) {
+                            d.rotate_specimen(i, r);
+                        }
+                    }
+                }
                 if let Some(parent) = p.parent() {
                     self.browser_dir = parent.to_path_buf();
                 }
@@ -693,6 +764,7 @@ impl App {
             Action::OpenSet => self.open_folder_of_specimens(ctx),
             Action::Volume => self.open_volume(),
             Action::Recombine => self.open_recombine(),
+            Action::ExportAms => self.open_export(),
             Action::Prev | Action::Next => {
                 if let Some(d) = self.doc.as_ref().filter(|d| !d.synthetic) {
                     let (prev, next, _, _) = self.neighbours_of(&d.path);
@@ -896,6 +968,7 @@ impl App {
             (Modifiers::NONE, Key::Escape, Action::ClearSel),
             (c, Key::F1, Action::SetClasses),
             (Modifiers::SHIFT | Modifiers::CTRL, Key::O, Action::OpenSet),
+            (Modifiers::SHIFT | Modifiers::CTRL, Key::S, Action::ExportAms),
             (c, Key::O, Action::Open),
             (c, Key::P, Action::Prev),
             (c, Key::N, Action::Next),
@@ -1092,6 +1165,7 @@ impl eframe::App for App {
                     ui.separator();
                     if item(ui, "Save Active Records As", "Ctrl+S", has) { actions.push(Action::SaveActive) }
                     if item(ui, "Append Selected Records Into", "Ctrl+A", has) { actions.push(Action::AppendSel) }
+                    if item(ui, "Export as .ams ...", "Ctrl+Shift+S", has) { actions.push(Action::ExportAms) }
                     if item(ui, "Export Data File (CSV, in- and out-of-phase)", "Ctrl+E", has) { actions.push(Action::ExportCsv) }
                     if item(ui, "Export Selection (CSV, in- and out-of-phase)", "Ctrl+Shift+E", has) { actions.push(Action::ExportSelection) }
                     ui.separator();
@@ -1909,6 +1983,7 @@ impl App {
             W_SET => self.win_set = true,
             W_VOL => self.win_vol = true,
             W_RECOMB => self.win_recomb = true,
+            W_EXPORT => self.win_export = true,
             _ => {}
         }
     }
@@ -2017,6 +2092,7 @@ impl App {
         self.edit_data_window(ctx);
         self.classes_window(ctx);
         self.poll_restore(ctx);
+        self.export_window(ctx);
         self.recombine_window(ctx);
         self.volume_window(ctx);
         self.owens_window(ctx);
@@ -2223,33 +2299,23 @@ impl App {
         } else {
             vec![]
         };
-        let mut store = None;
+        let mut store: Option<()> = None;
         if rotate {
-            if let Some(d) = &mut self.doc {
+            if self.doc.is_some() {
                 if !jobs.is_empty() {
-                    store = Some((d.raw.clone(), d.specs.clone()));
-                }
-                for (i, r) in &jobs {
-                    let rot = ams_core::coords::owens_rotation(r[0], r[1], r[2], r[3]);
-                    d.rotate_specimen(*i, &rot);
+                    let mats: Vec<(usize, ams_core::tensor::Mat3)> = jobs.iter().map(|(i, r)| (*i, ams_core::coords::owens_rotation(r[0], r[1], r[2], r[3]))).collect();
+                    self.rotate_doc(&mats);
+                    self.of.last = None;
                 }
                 rows.iter_mut().for_each(|r| *r = [0.0; 4]);
                 one = [0.0; 4];
-                self.dirty = true;
             }
         }
         if undo {
-            if let (Some(d), Some((raw, specs))) = (&mut self.doc, self.owens_undo.take()) {
-                d.raw = raw;
-                d.specs = specs;
-                self.dirty = true;
-                self.of.last = None;
-            }
-        }
-        if store.is_some() {
-            self.owens_undo = store;
+            self.undo_doc_rotation();
             self.of.last = None;
         }
+        let _ = &mut store;
         if old != self.owens_old {
             self.owens_old = old;
             self.save_state();

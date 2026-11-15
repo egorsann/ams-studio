@@ -1,13 +1,11 @@
 //! Spec to Geo (Owens) with the values read from a spreadsheet or csv, for the open file ("single") or for the
 //! specimen folders of its parent tree ("multiple"). See `ams_core::owens_table` for the layout of the table.
 //!
-//! Single rotates the data of the open file in memory (like the manual input; *Save Active Records As* keeps it).
-//! Multiple changes the file tree, after the user has been told: in each specimen folder the source file is moved
-//! into a new sub-folder `_raw` and the corrected file `<name>_corr.ams` is written into a new sub-folder `_corr`;
-//! other files stay in the specimen folder. Nothing is overwritten, and *Undo* puts everything back.
+//! Single rotates the data of the open file in memory. Multiple rotates the main files of the specimen folders in
+//! memory too: the rotation of each file is remembered (`App::pending`) and applied when the file is opened.
+//! Nothing is saved by Rotate; the files are selected in the file browser and written with File > Export as .ams.
 
 use super::{owens_head, App, W_OWENS};
-use crate::doc;
 use ams_core::ams;
 use ams_core::coords::owens_rotation;
 use ams_core::owens_table::{self, Table, TableError, Via, ROLES};
@@ -41,11 +39,6 @@ pub(super) struct Target {
     pub rel_dir: String,
     pub file_name: String,
     pub records: Vec<(String, Option<(usize, Via)>)>,
-    /// Redo: the source is the one already in `_raw`; only the `_corr` file is written again.
-    pub redo: bool,
-    /// When the `_raw` / `_corr` files of an earlier correction were created (they exist now).
-    pub raw_time: Option<std::time::SystemTime>,
-    pub corr_time: Option<std::time::SystemTime>,
 }
 
 #[derive(Default)]
@@ -64,39 +57,8 @@ pub(super) struct OwensFile {
     pub msg: String,
     /// What the last correction from a file was, so that *Undo last correction* can name it.
     pub last: Option<Scope>,
-    /// What the last multiple correction did, to undo it.
-    pub ops: Vec<MoveOp>,
-    /// The "files will be moved" prompt is showing.
-    pub confirm: bool,
-    /// Replace the results of an earlier correction (and correct again from `_raw`).
-    pub overwrite: bool,
-}
-
-/// One specimen of a multiple correction: the source moved to `raw`, the corrected file written to `corr`.
-pub(super) struct MoveOp {
-    pub orig: PathBuf,
-    pub raw: PathBuf,
-    pub corr: PathBuf,
-    pub corr_len: u64,
-    pub new_dirs: Vec<PathBuf>,
-    /// The source was moved (false for a redo from `_raw`).
-    pub moved: bool,
-    /// Files that were replaced, kept in memory so that Undo can bring them back.
-    pub raw_backup: Option<Vec<u8>>,
-    pub corr_backup: Option<Vec<u8>>,
-}
-
-fn file_time(p: &Path) -> Option<std::time::SystemTime> {
-    let m = std::fs::metadata(p).ok()?;
-    m.created().or_else(|_| m.modified()).ok()
-}
-
-/// Name of the corrected file: the source's name with `_corr` before the extension.
-fn corr_name(file_name: &str) -> String {
-    match file_name.rsplit_once('.') {
-        Some((s, e)) => format!("{s}_corr.{e}"),
-        None => format!("{file_name}_corr"),
-    }
+    /// The rotations that were pending before the last multiple correction (for Undo).
+    pub undo_pending: Option<std::collections::HashMap<PathBuf, Vec<Option<ams_core::tensor::Mat3>>>>,
 }
 
 impl Scope {
@@ -211,7 +173,7 @@ impl App {
                 let names: Vec<String> = d.specs.iter().map(|s| s.name.clone()).collect();
                 let ident = self.set.as_ref().map(|s| s.ident.clone()).unwrap_or_else(|| self.last_ident.clone());
                 let a = owens_table::assign(&table, &names, &ids_for(&file_name, &folder, &ident));
-                self.of.plan.push(Target { label: file_name.clone(), path: Some(d.path.clone()), rel_dir: String::new(), file_name, records: names.into_iter().zip(a).collect(), redo: false, raw_time: None, corr_time: None });
+                self.of.plan.push(Target { label: file_name.clone(), path: Some(d.path.clone()), rel_dir: String::new(), file_name, records: names.into_iter().zip(a).collect()});
             }
             Scope::Multiple => {
                 // the folders and main files: the open specimen set, else the parent of this file's folder
@@ -234,49 +196,20 @@ impl App {
                 };
                 self.of.root = Some(root.clone());
                 self.of.ident = ident.clone();
-                // folders that hold their own main file (not a result of an earlier correction)
-                let normal_dirs: std::collections::HashSet<PathBuf> = folders
-                    .iter()
-                    .zip(&picks)
-                    .filter(|(f, p)| {
-                        let leaf = f.name.rsplit('/').next().unwrap_or(&f.name);
-                        leaf != "_raw" && leaf != "_corr" && p.file().is_some() && !(matches!(p, Pick::Only(_)) && f.dir.join("_raw").is_dir())
-                    })
-                    .map(|(f, _)| f.dir.clone())
-                    .collect();
                 for (f, p) in folders.iter().zip(&picks) {
                     let leaf = f.name.rsplit('/').next().unwrap_or(&f.name);
-                    if leaf == "_corr" {
-                        continue; // results of an earlier correction
+                    if leaf == "_geo" || leaf == "_raw" || leaf == "_corr" {
+                        continue; // exported results
                     }
                     let Some(k) = p.file() else { continue };
                     let path = f.dir.join(&f.files[k]);
                     let file_name = f.files[k].clone();
-                    let (label, rel_dir, dir, redo) = if leaf == "_raw" {
-                        // the source of an earlier correction: only offered again when overwriting is allowed,
-                        // and not when a new main file sits in the specimen folder itself
-                        let Some(parent) = f.dir.parent().map(|p| p.to_path_buf()) else { continue };
-                        if !self.of.overwrite || !parent.join("_corr").is_dir() || normal_dirs.contains(&parent) {
-                            continue;
-                        }
-                        let rel = f.name.rsplit_once('/').map(|x| x.0.to_string()).unwrap_or_default();
-                        let label = rel.rsplit('/').next().unwrap_or(&rel).to_string();
-                        (format!("{label} (again from _raw)"), rel, parent, true)
-                    } else {
-                        if matches!(p, Pick::Only(_)) && f.dir.join("_raw").is_dir() {
-                            continue; // what is left next to _raw / _corr is not the main file
-                        }
-                        (f.name.clone(), f.name.clone(), f.dir.clone(), false)
-                    };
                     let names: Vec<String> = std::fs::read(&path).ok().and_then(|b| ams::parse(&b).ok()).map(|s| s.into_iter().map(|x| x.name).collect()).unwrap_or_default();
                     if names.is_empty() {
                         continue;
                     }
-                    let folder_for_ids = if redo { label.trim_end_matches(" (again from _raw)").to_string() } else { f.name.clone() };
-                    let a = owens_table::assign(&table, &names, &ids_for(&file_name, &folder_for_ids, &ident));
-                    let raw_time = if redo { None } else { file_time(&dir.join("_raw").join(&file_name)) };
-                    let corr_time = file_time(&dir.join("_corr").join(corr_name(&file_name)));
-                    self.of.plan.push(Target { label, path: Some(path), rel_dir, file_name, records: names.into_iter().zip(a).collect(), redo, raw_time, corr_time });
+                    let a = owens_table::assign(&table, &names, &ids_for(&file_name, &f.name, &ident));
+                    self.of.plan.push(Target { label: f.name.clone(), path: Some(path), rel_dir: f.name.clone(), file_name, records: names.into_iter().zip(a).collect() });
                 }
                 let _ = Pick::None;
             }
@@ -293,172 +226,56 @@ impl App {
     fn of_apply(&mut self) {
         let Some(table) = self.of.table.clone() else { return };
         let Some(scope) = self.of.scope else { return };
+        let mats = |t: &Target| -> Vec<(usize, ams_core::tensor::Mat3)> {
+            t.records.iter().enumerate().filter_map(|(i, r)| r.1.map(|(ri, _)| (i, { let v = table.rows[ri].vals; owens_rotation(v[0], v[1], v[2], v[3]) }))).collect()
+        };
         match scope {
             Scope::Single => {
                 let Some(target) = self.of.plan.first() else { return };
-                let jobs: Vec<(usize, [f64; 4])> = target.records.iter().enumerate().filter_map(|(i, r)| r.1.map(|(ri, _)| (i, table.rows[ri].vals))).collect();
+                let jobs = mats(target);
                 if jobs.is_empty() {
                     return;
                 }
-                if let Some(d) = &mut self.doc {
-                    self.owens_undo = Some((d.raw.clone(), d.specs.clone()));
-                    for (i, v) in &jobs {
-                        d.rotate_specimen(*i, &owens_rotation(v[0], v[1], v[2], v[3]));
-                    }
-                    self.dirty = true;
-                    self.of.last = Some(Scope::Single);
-                    self.of.msg = format!("Rotated {} record(s) of this file. Use File > Save Active Records As to keep them.", jobs.len());
-                }
+                self.rotate_doc(&jobs);
+                self.of.last = Some(Scope::Single);
+                self.of.msg = format!("Rotated {} record(s) of this file. Nothing is saved yet: File > Export as .ams (or Save Active Records As) writes it.", jobs.len());
             }
             Scope::Multiple => {
-                let overwrite = self.of.overwrite;
-                let (mut ops, mut recs, mut skipped) = (vec![], 0usize, vec![]);
-                for t in &self.of.plan {
-                    let Some(src) = &t.path else { continue };
-                    if t.records.iter().all(|r| r.1.is_none()) {
-                        continue;
+                self.of.undo_pending = Some(self.pending.clone());
+                let open_path = self.doc.as_ref().filter(|d| !d.synthetic).map(|d| d.path.clone());
+                let (mut files, mut recs) = (0, 0);
+                let targets: Vec<(PathBuf, usize, Vec<(usize, ams_core::tensor::Mat3)>)> = self.of.plan.iter().filter_map(|t| t.path.clone().map(|p| (p, t.records.len(), mats(t)))).filter(|(_, _, j)| !j.is_empty()).collect();
+                for (path, n, jobs) in targets {
+                    recs += jobs.len();
+                    files += 1;
+                    if open_path.as_ref() == Some(&path) {
+                        self.rotate_doc(&jobs); // the open file is rotated on screen too
+                    } else {
+                        self.add_pending(&path, n, &jobs);
                     }
-                    // the specimen folder: the source's folder, or the parent of _raw for a redo
-                    let Some(dir) = (if t.redo { src.parent().and_then(|p| p.parent()) } else { src.parent() }) else { continue };
-                    let (raw_dir, corr_dir) = (dir.join("_raw"), dir.join("_corr"));
-                    let (raw, corr) = (raw_dir.join(&t.file_name), corr_dir.join(corr_name(&t.file_name)));
-                    let exists = (!t.redo && raw.exists()) || corr.exists();
-                    if exists && !overwrite {
-                        let when = t.corr_time.or(t.raw_time).map(doc::fmt_time).unwrap_or_default();
-                        skipped.push(format!("{} (results from {when} UTC exist; tick Overwrite to replace them)", t.label));
-                        continue;
-                    }
-                    // what is replaced is kept in memory, so that Undo can bring it back
-                    let raw_backup = if !t.redo && raw.exists() { std::fs::read(&raw).ok() } else { None };
-                    let corr_backup = if corr.exists() { std::fs::read(&corr).ok() } else { None };
-                    let Ok(mut bytes) = std::fs::read(src) else {
-                        skipped.push(format!("{} (could not be read)", t.label));
-                        continue;
-                    };
-                    let mut n = 0;
-                    for (i, (_, a)) in t.records.iter().enumerate() {
-                        if let (Some((ri, _)), Some(rec)) = (a, bytes.get_mut(i * ams::RECORD_LEN..(i + 1) * ams::RECORD_LEN)) {
-                            let v = table.rows[*ri].vals;
-                            ams::rotate_record(rec, &owens_rotation(v[0], v[1], v[2], v[3]));
-                            n += 1;
-                        }
-                    }
-                    let mut new_dirs = vec![];
-                    let mut failed: Option<String> = None;
-                    for d in [&raw_dir, &corr_dir] {
-                        if !d.exists() {
-                            match std::fs::create_dir(d) {
-                                Ok(()) => new_dirs.push(d.clone()),
-                                Err(e) => {
-                                    failed = Some(format!("{}: {e}", d.display()));
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if failed.is_none() {
-                        // the corrected file first; the source is only moved once that is on disk
-                        if let Err(e) = std::fs::write(&corr, &bytes) {
-                            failed = Some(format!("{}: {e}", corr.display()));
-                        } else if !t.redo {
-                            if raw_backup.is_some() {
-                                let _ = std::fs::remove_file(&raw); // a rename onto an existing file fails on Windows
-                            }
-                            if let Err(e) = std::fs::rename(src, &raw) {
-                                match &corr_backup {
-                                    Some(b) => {
-                                        let _ = std::fs::write(&corr, b);
-                                    }
-                                    None => {
-                                        let _ = std::fs::remove_file(&corr);
-                                    }
-                                }
-                                if let Some(b) = &raw_backup {
-                                    let _ = std::fs::write(&raw, b);
-                                }
-                                failed = Some(format!("moving {}: {e}", src.display()));
-                            }
-                        }
-                    }
-                    match failed {
-                        Some(e) => {
-                            for d in new_dirs.iter().rev() {
-                                let _ = std::fs::remove_dir(d);
-                            }
-                            skipped.push(format!("{} ({e})", t.label));
-                        }
-                        None => {
-                            recs += n;
-                            ops.push(MoveOp { orig: src.clone(), raw, corr, corr_len: bytes.len() as u64, new_dirs, moved: !t.redo, raw_backup, corr_backup });
-                        }
-                    }
-                }
-                let files = ops.len();
-                // the open file may have been moved: show its corrected version instead
-                let reopen = self.doc.as_ref().and_then(|d| ops.iter().find(|o| o.orig == d.path || o.corr == d.path)).map(|o| o.corr.clone());
-                self.of.ops = ops;
-                self.refresh_set();
-                if let Some(p) = reopen {
-                    self.open_path(p);
                 }
                 self.of.last = Some(Scope::Multiple);
-                let replaced = self.of.ops.iter().filter(|o| o.raw_backup.is_some() || o.corr_backup.is_some()).count();
-                self.of.msg = format!("Rotated {recs} record(s) in {files} file(s): the sources are in _raw folders, the corrected files (_corr.ams) in _corr folders.{}", if replaced > 0 { format!(" {replaced} earlier result(s) were replaced; Undo brings them back.") } else { String::new() });
-                if !skipped.is_empty() {
-                    self.of.msg += &format!(" Skipped: {}.", skipped.join("; "));
-                }
+                self.of.msg = format!("Rotated {recs} record(s) of {files} file(s) in memory. Nothing is saved yet: select the files in the browser and use File > Export as .ams.");
             }
         }
     }
 
-    /// Undo of the last correction from a file: the open file's data (single) or the written copies (multiple).
+    /// Undo of the last correction from a file: the open file's data (single) or the pending rotations (multiple).
     pub(super) fn of_undo(&mut self) {
         match self.of.last {
             Some(Scope::Single) => {
-                if let (Some(d), Some((raw, specs))) = (&mut self.doc, self.owens_undo.take()) {
-                    d.raw = raw;
-                    d.specs = specs;
-                    self.dirty = true;
-                    self.of.msg = "The last correction of this file was undone.".into();
-                }
+                self.undo_doc_rotation();
+                self.of.msg = "The last correction of this file was undone.".into();
             }
             Some(Scope::Multiple) => {
-                let (mut restored, mut left) = (0, 0);
-                let reopen = self.doc.as_ref().and_then(|d| self.of.ops.iter().find(|o| o.corr == d.path || o.raw == d.path)).map(|o| o.orig.clone());
-                for op in std::mem::take(&mut self.of.ops).into_iter().rev() {
-                    // the corrected file goes only if it is still what was written (an earlier one comes back);
-                    // the source goes back if its place is free (a file it replaced in _raw comes back too)
-                    let mut corr_ok = !op.corr.exists() || (std::fs::metadata(&op.corr).map_or(false, |m| m.len() == op.corr_len) && std::fs::remove_file(&op.corr).is_ok());
-                    if corr_ok {
-                        if let Some(b) = &op.corr_backup {
-                            corr_ok = std::fs::write(&op.corr, b).is_ok();
-                        }
-                    }
-                    let back_ok = if op.moved {
-                        let ok = !op.orig.exists() && std::fs::rename(&op.raw, &op.orig).is_ok();
-                        if ok {
-                            if let Some(b) = &op.raw_backup {
-                                let _ = std::fs::write(&op.raw, b);
-                            }
-                        }
-                        ok
-                    } else {
-                        true
-                    };
-                    if corr_ok && back_ok {
-                        restored += 1;
-                    } else {
-                        left += 1;
-                    }
-                    for d in op.new_dirs.iter().rev() {
-                        let _ = std::fs::remove_dir(d);
-                    }
+                if let Some(p) = self.of.undo_pending.take() {
+                    self.pending = p;
                 }
-                self.refresh_set();
-                if let Some(p) = reopen.filter(|p| p.exists()) {
-                    self.open_path(p);
+                // show the open file as it is without the undone rotations
+                if let Some(path) = self.doc.as_ref().filter(|d| !d.synthetic).map(|d| d.path.clone()) {
+                    self.open_path(path);
                 }
-                self.of.msg = format!("The last multiple correction was undone: {restored} file(s) put back{}.", if left > 0 { format!(", {left} could not be (a file was changed or is in the way)") } else { String::new() });
+                self.of.msg = "The last multiple correction was undone: the rotations were taken back.".into();
             }
             None => {}
         }
@@ -481,13 +298,6 @@ impl App {
         let (files_n, recs_n) = self.of_counts();
         let (mut open, mut cancel, mut switched) = (true, false, false);
         let (mut single, mut multiple, mut back, mut select, mut rotate, mut undo) = (false, false, false, false, false, false);
-        let confirm = self.of.confirm;
-        let mut ow = self.of.overwrite;
-        let existing: Vec<String> = self.of.plan.iter().filter(|t| t.records.iter().any(|r| r.1.is_some())).filter_map(|t| t.corr_time.or(t.raw_time).map(|tm| format!("{}  (created {} UTC)", t.label, doc::fmt_time(tm)))).collect();
-        let (mut do_apply, mut cancel_confirm) = (false, false);
-        let live = |t: &&Target| t.records.iter().any(|r| r.1.is_some());
-        let (redo_n, new_n) = (self.of.plan.iter().filter(live).filter(|t| t.redo).count(), self.of.plan.iter().filter(live).filter(|t| !t.redo).count());
-        let first_target = self.of.plan.iter().find(live).map(|t| (t.path.clone(), t.file_name.clone(), t.redo));
         self.base_window(ctx, "Specimen to Geographic Rotation (Owens' method)", W_OWENS, Vec2::new(700.0, 780.0)).open(&mut open).resizable(true).show(ctx, |ui| {
             super::tools_ui::pop_style(ui, 1.3);
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
@@ -509,61 +319,6 @@ impl App {
             });
             if stage == Stage::Scope {
                 ui.label(RichText::new("Where should the values from the file go?").weak().small());
-                return;
-            }
-            if confirm {
-                // the file tree is going to change: say how, and ask
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(RichText::new("This changes the file tree").strong().color(warn));
-                    ui.label(format!("{files_n} specimen folder(s) are affected. In each of them:"));
-                    if new_n > 0 {
-                        ui.label(format!("\u{2022} {new_n}: the source file (the main file) is MOVED into the sub-folder  _raw  (made if it is not there)"));
-                    }
-                    if redo_n > 0 {
-                        ui.label(format!("\u{2022} {redo_n}: the file already in  _raw  is used again as the source and stays where it is"));
-                    }
-                    ui.label("\u{2022} the corrected file, named like the source with  _corr  added, is written into the sub-folder  _corr");
-                    ui.label("\u{2022} other files in the specimen folder stay where they are");
-                    ui.label("\u{2022} Undo last correction (multiple) puts everything back");
-                    if let Some((Some(p), name, redo)) = &first_target {
-                        let src_dir = p.parent();
-                        let dir = (if *redo { src_dir.and_then(|d| d.parent()) } else { src_dir }).map(|d| d.display().to_string()).unwrap_or_default();
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("Example:").strong().small());
-                        let text = if *redo {
-                            format!("{dir}/_raw/{name}  (stays, is the source)\n   \u{2192} corrected file  {dir}/_corr/{}", corr_name(name))
-                        } else {
-                            format!("{dir}/{name}\n   \u{2192} moved to  {dir}/_raw/{name}\n   \u{2192} corrected file  {dir}/_corr/{}", corr_name(name))
-                        };
-                        ui.label(RichText::new(text).monospace().small());
-                    }
-                });
-                if !existing.is_empty() || ow {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        if existing.is_empty() {
-                            ui.label("No results from an earlier correction exist here.");
-                        } else if ow {
-                            ui.label(RichText::new(format!("{} specimen(s) already have results. They will be OVERWRITTEN:", existing.len())).strong().color(bad));
-                            ui.label(RichText::new("the _raw / _corr files that are replaced are kept in memory, so Undo brings them back while the program stays open").weak().small());
-                        } else {
-                            ui.label(RichText::new(format!("{} specimen(s) already have results (they are skipped unless you overwrite):", existing.len())).strong().color(warn));
-                        }
-                        for line in existing.iter().take(8) {
-                            ui.label(RichText::new(format!("\u{2022} {line}")).small());
-                        }
-                        if existing.len() > 8 {
-                            ui.label(RichText::new(format!("and {} more", existing.len() - 8)).small().weak());
-                        }
-                        ui.checkbox(&mut ow, "Overwrite results that already exist (and correct again from _raw)");
-                    });
-                }
-                ui.horizontal(|ui| {
-                    let go = egui::Button::new(RichText::new("Move the files and write the corrected ones").strong().color(Color32::WHITE)).fill(if dark { Color32::from_rgb(52, 104, 200) } else { Color32::from_rgb(47, 111, 222) });
-                    do_apply = ui.add(go).clicked();
-                    cancel_confirm = ui.button("Cancel").clicked();
-                });
                 return;
             }
             let sc = scope.unwrap_or(Scope::Single);
@@ -613,7 +368,7 @@ impl App {
                 ui.label(RichText::new("One row per specimen. The header can be in any of the first 20 rows; any sheet of a workbook is tried. Also accepted: FS FD DS DD, \u{201c}Strike (LHR)\u{201d} (left-hand rule), \u{201c}Dip Direction\u{201d}, \u{201c}Sample ID\u{201d}. Strikes: index finger along the strike, thumb to the dip direction (0\u{b0} dips to 90\u{b0}); \u{201c}LHR\u{201d} is used as it stands, a dip direction is turned into a strike. Same for the drill table.").weak().small());
                 ui.label(RichText::new(match sc {
                     Scope::Single => "Specimen = a record name of this file (ZZ01-A1) or the name of the file / its folder (applies to every record). A file with a single row applies to every record.",
-                    Scope::Multiple => "Specimen = the specimen folder or main file name (applies to every record of its main file) or a record name. The source file of each specimen is moved into a new _raw folder and the corrected file (<name>_corr.ams) is written into a new _corr folder, both inside the specimen folder.",
+                    Scope::Multiple => "Specimen = the specimen folder or main file name (applies to every record of its main file) or a record name. Rotate only turns the data in memory; nothing is saved. Select the files in the browser and use File > Export as .ams: the corrected file goes into a _geo folder inside the specimen folder.",
                 }).weak().small());
                 if sc == Scope::Multiple {
                     ui.separator();
@@ -623,8 +378,8 @@ impl App {
                         cols[0].label(mono("parent folder/\n\u{251c}\u{2500} SPECIMEN-1/\n\u{2502}  \u{251c}\u{2500} SPECIMEN-1_use.ams  \u{25cf}\n\u{2502}  \u{2514}\u{2500} other versions.ams\n\u{251c}\u{2500} SPECIMEN-2/\n\u{2502}  \u{2514}\u{2500} SPECIMEN-2_use.ams  \u{25cf}\n\u{2514}\u{2500} \u{2026}".to_string()));
                         cols[0].label(RichText::new("\u{25cf} main file of the specimen").weak().small());
                         cols[0].add_space(4.0);
-                        cols[0].label(RichText::new("After the correction").strong().small());
-                        cols[0].label(mono("SPECIMEN-1/\n\u{251c}\u{2500} _raw/   SPECIMEN-1_use.ams\n\u{251c}\u{2500} _corr/  SPECIMEN-1_use_corr.ams\n\u{2514}\u{2500} other files stay here".to_string()));
+                        cols[0].label(RichText::new("After Export as .ams").strong().small());
+                        cols[0].label(mono("SPECIMEN-1/\n\u{251c}\u{2500} SPECIMEN-1_use.ams  (stays)\n\u{251c}\u{2500} _geo/  SPECIMEN-1_use_geo.ams\n\u{2514}\u{2500} other files stay here".to_string()));
                         let root_name = self.of.root.as_ref().and_then(|r| r.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or("parent folder".into());
                         cols[1].label(RichText::new("Found under your parent folder").strong().small());
                         let mut s = format!("{root_name}/\n");
@@ -675,8 +430,8 @@ impl App {
                 });
                 let h = (ui.available_height() - 104.0).max(120.0);
                 egui::ScrollArea::both().id_salt("of-list").max_height(h).auto_shrink([false, false]).show(ui, |ui| {
-                    egui::Grid::new("of-list-grid").striped(true).num_columns(9).spacing([14.0, 5.0]).show(ui, |ui| {
-                        let heads: &[&str] = if sc == Scope::Single { &["#", "Record", "FS", "FD", "DS", "DD", "Row of the file"] } else { &["#", "Specimen", "Main file", "Records", "FS", "FD", "DS", "DD", "Existing results"] };
+                    egui::Grid::new("of-list-grid").striped(true).num_columns(8).spacing([14.0, 5.0]).show(ui, |ui| {
+                        let heads: &[&str] = if sc == Scope::Single { &["#", "Record", "FS", "FD", "DS", "DD", "Row of the file"] } else { &["#", "Specimen", "Main file", "Records", "FS", "FD", "DS", "DD"] };
                         for h in heads {
                             ui.label(RichText::new(*h).strong());
                         }
@@ -715,11 +470,6 @@ impl App {
                                 ui.label(RichText::new(&tg.file_name).small());
                                 ui.label(RichText::new(format!("{n_rot} of {}", tg.records.len())).color(if n_rot == tg.records.len() { ok } else if n_rot == 0 { bad } else { warn }));
                                 let rows: Vec<usize> = tg.records.iter().filter_map(|r| r.1.map(|x| x.0)).collect();
-                                let existing_txt = match (tg.redo, tg.corr_time.or(tg.raw_time)) {
-                                    (true, Some(tm)) => format!("again from _raw; replaces _corr from {} UTC", doc::fmt_time(tm)),
-                                    (false, Some(tm)) => format!("from {} UTC", doc::fmt_time(tm)),
-                                    _ => String::new(),
-                                };
                                 match rows.first() {
                                     Some(&r0) if rows.iter().all(|r| *r == r0) => {
                                         for v in t.rows[r0].vals {
@@ -738,7 +488,6 @@ impl App {
                                         }
                                     }
                                 }
-                                ui.label(RichText::new(existing_txt).small().color(warn));
                                 ui.end_row();
                             }
                             if self.of.plan.is_empty() {
@@ -756,21 +505,14 @@ impl App {
                 let ready = self.of.table.is_some() && recs_n > 0;
                 rotate = ui.add_enabled(ready, go).on_hover_text(match sc {
                     Scope::Single => "Rotate the records of the open file",
-                    Scope::Multiple => "Write the corrected copies into a new folder next to the parent folder",
+                    Scope::Multiple => "Rotate the main files in memory (nothing is written)",
                 }).clicked();
-                if sc == Scope::Multiple {
-                    ui.checkbox(&mut ow, "Overwrite results that already exist").on_hover_text("For specimens that were corrected before: replace the _corr file (and a new main file replaces the one in _raw), or correct again from the file in _raw. You are asked first.");
-                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| cancel = ui.button("Cancel").clicked());
             });
             if !self.of.msg.is_empty() {
                 ui.label(RichText::new(&self.of.msg).color(ok).small());
             }
         });
-        if ow != self.of.overwrite {
-            self.of.overwrite = ow;
-            self.of_build_plan();
-        }
         if switched {
             // the manual / new / classic switch takes the window back to the manual input
             self.owens_old = old;
@@ -788,7 +530,6 @@ impl App {
         }
         if back {
             self.of.stage = Stage::Manual;
-            self.of.confirm = false;
         }
         if select {
             self.of_select_file();
@@ -797,23 +538,14 @@ impl App {
             self.of_undo();
         }
         if rotate {
+            self.of_apply();
             if self.of.scope == Some(Scope::Multiple) {
-                self.of.confirm = true;
+                // the rotations are held; a second Rotate on the same list would rotate again
+                self.of.plan.clear();
+                self.of.note = "Done. Choose Select file ... to prepare another correction.".into();
             } else {
-                self.of_apply();
                 self.of_build_plan();
             }
-        }
-        if do_apply {
-            self.of.confirm = false;
-            self.of_apply();
-            // the files have been moved: the list of what to correct is empty until a file is selected again,
-            // so that a second Rotate cannot hit the files that are left in the specimen folders
-            self.of.plan.clear();
-            self.of.note = "Done. Choose Select file ... to prepare another correction.".into();
-        }
-        if cancel_confirm {
-            self.of.confirm = false;
         }
         self.win_owens = open && !cancel;
     }
