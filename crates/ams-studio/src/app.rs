@@ -1556,16 +1556,31 @@ fn tool(ui: &mut Ui, icon: Icon, tip: &str, enabled: bool, selected: bool, dark:
     resp.on_hover_text(tip).clicked() && enabled
 }
 
-/// The Out-of-Phase button while the out-of-phase data are shown: bigger, with a fat red outline. Returns the click and
-/// the rectangle of the button.
-fn tool_flagged(ui: &mut Ui, icon: Icon, enabled: bool, dark: bool) -> (bool, Rect) {
+/// The Out-of-Phase button. Its slot is always 46 x 36 (so the toolbar never changes size); normally an ordinary tool
+/// button sits in the middle of it, and while the out-of-phase data are shown (`flagged`) the icon is bigger and the
+/// slot gets a fat red outline. Returns the click and the rectangle of the slot.
+fn tool_slot(ui: &mut Ui, icon: Icon, tip: &str, enabled: bool, selected: bool, flagged: bool, dark: bool) -> (bool, Rect) {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(46.0, 36.0), if enabled { Sense::click() } else { Sense::hover() });
     if ui.is_rect_visible(rect) {
         let pa = ui.painter();
-        pa.rect_filled(rect, 7.0, ui.visuals().selection.bg_fill);
-        icons::paint(pa, Rect::from_center_size(rect.center(), icons::size() * 1.45), icon, dark);
-        pa.rect_stroke(rect, 7.0, Stroke::new(3.5, Color32::from_rgb(222, 38, 38)), StrokeKind::Inside);
+        if flagged {
+            pa.rect_filled(rect, 7.0, ui.visuals().selection.bg_fill);
+            icons::paint(pa, Rect::from_center_size(rect.center(), icons::size() * 1.45), icon, dark);
+            pa.rect_stroke(rect, 7.0, Stroke::new(3.5, Color32::from_rgb(222, 38, 38)), StrokeKind::Inside);
+        } else {
+            let small = Rect::from_center_size(rect.center(), Vec2::splat(30.0));
+            if selected {
+                pa.rect_filled(small, 6.0, ui.visuals().selection.bg_fill);
+            } else if resp.hovered() && enabled {
+                pa.rect_filled(small, 6.0, ui.visuals().widgets.hovered.bg_fill);
+            }
+            icons::paint(pa, Rect::from_center_size(rect.center(), icons::size()), icon, dark);
+            if !enabled {
+                pa.rect_filled(small, 6.0, ui.visuals().panel_fill.gamma_multiply(0.62));
+            }
+        }
     }
+    let resp = if flagged { resp } else { resp.on_hover_text(tip) };
     (resp.clicked() && enabled, rect)
 }
 
@@ -1806,12 +1821,12 @@ impl eframe::App for App {
                 if tool(ui, Icon::DataTable, "Data Table  F2", has, self.win_table, d) { actions.push(Action::DataTable) }
                 sep(ui);
                 if tool(ui, Icon::InPhase, "In-Phase AMS  F3", has, !self.out_phase, d) { actions.push(Action::Phase(false)) }
-                if self.out_phase && self.oop_highlight {
-                    // out-of-phase data are on screen: a bigger button with a fat red outline (the other tools move right)
-                    let (clicked, r) = tool_flagged(ui, Icon::OutPhase, has, d);
-                    oop_rect = r;
-                    if clicked { actions.push(Action::Phase(true)) }
-                } else if tool(ui, Icon::OutPhase, "Out-of-Phase AMS  F4", has, self.out_phase, d) { actions.push(Action::Phase(true)) }
+                // the slot of this button is always the big one, so nothing in the window moves when the out-of-phase
+                // data are switched on: the bigger icon and the fat red outline only fill it
+                let flagged = self.out_phase && self.oop_highlight;
+                let (clicked, r) = tool_slot(ui, Icon::OutPhase, "Out-of-Phase AMS  F4", has, self.out_phase, flagged, d);
+                if flagged { oop_rect = r; }
+                if clicked { actions.push(Action::Phase(true)) }
                 sep(ui);
                 for (ch, cs, tip) in [('S', CoordSys::Specimen, "Specimen Coordinates  F5"), ('G', CoordSys::Geographic, "Geographic Coordinates  F6"), ('P', CoordSys::Paleo, "Paleogeographic Coordinates  F7"), ('T', CoordSys::Tectonic, "Tectonic Coordinates  F8")] {
                     if tool(ui, Icon::Coord(ch), tip, has, self.coord == cs, d) { actions.push(Action::Coord(cs)) }
@@ -2253,7 +2268,7 @@ impl App {
             let mut body = self.pane_frame(ui, rects[i], i, &names[i], th);
             // the settings of the three plot panes (the stereonet has none)
             let cfg: Option<PaneCfg> = (i >= 1).then(|| self.cfg(i - 1).clone());
-            let coloured = i == 0 || cfg.as_ref().map_or(false, |c| matches!(c.kind, XyKind::Scatter | XyKind::Line) || (i == 1 && c.polar));
+            let coloured = i == 0 || cfg.as_ref().map_or(false, |c| matches!(c.kind, XyKind::Scatter | XyKind::Line) || (i == 3 && c.polar));
             let (cpts, crange) = if coloured { Self::colorized(&pts, &self.color[i], &class_cols) } else { (pts.clone(), None) };
             let show_bar = coloured && crange.is_some() && (i == 0 || cfg.as_ref().map_or(false, |c| c.legend));
             if show_bar {
@@ -2279,8 +2294,8 @@ impl App {
                     let shown: Vec<Pt> = if c.sel_only { cpts.iter().filter(|p| p.selected).cloned().collect() } else { cpts.clone() };
                     const SALT: [&str; 3] = ["xy_a", "xy_b", "xy_c"];
                     const SALT_BIN: [&str; 3] = ["bn_a", "bn_b", "bn_c"];
-                    // the top right pane can be a polar plot (T angle, Pj radius) whatever its plot type is
-                    if k == 0 && c.polar {
+                    // the bottom right pane (T vs Pj) can be a polar plot (T angle, Pj radius)
+                    if k == 2 && c.polar {
                         plots::polar(ui, body, &shown, if self.use_p { 3 } else { 4 }, c.polar_log, self.marker, th, "polar")
                     } else {
                     match c.kind {
@@ -2382,10 +2397,10 @@ impl App {
         let txt = if self.hover[i].is_empty() { RichText::new(name).weak() } else { RichText::new(&self.hover[i]) };
         // the title / hover text gives way to the tick boxes on the right
         let c0 = (i >= 1).then(|| self.cfg(i - 1).clone());
-        let is_polar = i == 1 && c0.as_ref().map_or(false, |c| c.polar);
+        let is_polar = i == 3 && c0.as_ref().map_or(false, |c| c.polar);
         let has_p = is_polar || c0.as_ref().map_or(false, |c| [&c.x, &c.y, &c.hist].iter().any(|a| a.param == 3 || a.param == 4));
         let has_log = i == 2 && c0.as_ref().map_or(false, |c| matches!(c.kind, XyKind::Scatter | XyKind::Line));
-        let reserved = if i == 0 { 0.0 } else { 118.0 + if has_p { 34.0 } else { 0.0 } + if has_log { 78.0 } else { 0.0 } + if i == 1 { 62.0 + if is_polar { 78.0 } else { 0.0 } } else { 0.0 } };
+        let reserved = if i == 0 { 0.0 } else { 118.0 + if has_p { 34.0 } else { 0.0 } + if has_log { 78.0 } else { 0.0 } + if i == 3 { 62.0 + if is_polar { 78.0 } else { 0.0 } } else { 0.0 } };
         child.add_sized([(header.width() - reserved - 34.0).max(40.0), 18.0], egui::Label::new(txt).truncate());
         let mut changed = false;
         let mut p_changed = false;
@@ -2400,17 +2415,17 @@ impl App {
                 if has_p {
                     p_changed |= ui.checkbox(&mut self.use_p, "P").on_hover_text("Use P instead of Pj (the default) wherever a plot shows it").changed();
                 }
-                if i == 1 {
-                    // the top right pane as a polar plot: T as the angle, Pj as the radius (linear or logarithmic)
+                if i == 3 {
+                    // the bottom right pane (T vs Pj) as a polar plot: T as the angle, Pj as the radius (linear or logarithmic)
                     let mut pol = c.polar;
                     if ui.checkbox(&mut pol, "Polar").on_hover_text("Show T (angle) against Pj (radius) as a polar plot, the way it is usually drawn in publications").changed() {
-                        self.cfg_mut(0).polar = pol;
+                        self.cfg_mut(2).polar = pol;
                         cfg_changed = true;
                     }
                     if c.polar {
                         let mut lg = c.polar_log;
                         if ui.checkbox(&mut lg, if self.use_p { "Log P" } else { "Log Pj" }).on_hover_text("Logarithmic radius (the corner is Pj = 1)").changed() {
-                            self.cfg_mut(0).polar_log = lg;
+                            self.cfg_mut(2).polar_log = lg;
                             cfg_changed = true;
                         }
                     }
@@ -2543,7 +2558,7 @@ impl App {
                                     }
                                 });
                             });
-                            if k == 0 && orig.polar {
+                            if k == 2 && orig.polar {
                                 ui.label(RichText::new("The Polar tick in the pane's header is on: T angle, Pj radius. The plot type below is used again when it is off.").weak().small());
                             }
                             ui.horizontal(|ui| {

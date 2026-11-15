@@ -26,7 +26,7 @@ pub(super) struct PaneCfg {
     pub zero: bool,
     /// How a bar or box plot forms its groups.
     pub group: GroupBy,
-    /// The top right pane as a polar plot (T as the angle, Pj as the radius) instead of the plot type above.
+    /// The bottom right pane (T vs Pj) as a polar plot (T as the angle, Pj as the radius) instead of the plot type above.
     pub polar: bool,
     /// The radius of the polar plot is logarithmic.
     pub polar_log: bool,
@@ -285,7 +285,7 @@ impl App {
         let pj = if self.use_p { "P" } else { "Pj" };
         let name = |k: usize| {
             let c = self.cfg(k);
-            if k == 0 && c.polar {
+            if k == 2 && c.polar {
                 return format!("T vs {pj} (polar)");
             }
             match c.kind {
