@@ -1,8 +1,8 @@
 //! The open document: specimens, which of them are active/selected, and folder navigation.
 
-use anisoft_core::ams::{self, Axes, Specimen, NAME_LEN, OFF_NAME, RECORD_LEN};
-use anisoft_core::coords::{CoordSys, Orientation};
-use anisoft_core::tensor::{rotate_tensor, Mat3};
+use ams_core::ams::{self, Axes, Specimen, NAME_LEN, OFF_NAME, RECORD_LEN};
+use ams_core::coords::{CoordSys, Orientation};
+use ams_core::tensor::{rotate_tensor, Mat3};
 use std::path::{Path, PathBuf};
 
 pub struct Doc {
@@ -115,8 +115,8 @@ pub fn neighbours(path: &Path) -> (Option<PathBuf>, Option<PathBuf>, usize, usiz
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anisoft_core::ams::{build_record, Phase};
-    use anisoft_core::tensor::sym;
+    use ams_core::ams::{build_record, Phase};
+    use ams_core::tensor::sym;
 
     fn tmp_doc() -> (tempdir::D, PathBuf) {
         let d = tempdir::D::new();
@@ -132,7 +132,7 @@ mod tests {
         pub struct D(pub std::path::PathBuf);
         impl D {
             pub fn new() -> D {
-                let p = std::env::temp_dir().join(format!("anisoft-test-{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')', ' '], ""));
+                let p = std::env::temp_dir().join(format!("ams-studio-test-{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')', ' '], ""));
                 std::fs::create_dir_all(&p).unwrap();
                 D(p)
             }

@@ -4,10 +4,10 @@
 use super::tools_ui::{big_btn, tint};
 use super::{App, W_CONTOUR, W_GROUP};
 use crate::icons::Icon;
-use anisoft_core::coords::CoordSys;
-use anisoft_core::density::{self, DensityGrid};
-use anisoft_core::stats::{self, Ellipse, GroupStats, PARAM_NAMES};
-use anisoft_core::tensor::{dec_inc, from_dec_inc, Vec3};
+use ams_core::coords::CoordSys;
+use ams_core::density::{self, DensityGrid};
+use ams_core::stats::{self, Ellipse, GroupStats, PARAM_NAMES};
+use ams_core::tensor::{dec_inc, from_dec_inc, Vec3};
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, TextureHandle, TextureOptions, Ui, Vec2};
 
 const KNAMES: [&str; 3] = ["K1", "K2", "K3"];
@@ -76,13 +76,13 @@ fn cyan(dark: bool) -> Color32 {
     tint(dark, 190, 250, 250)
 }
 
-fn net_pos(c: Pos2, r: f32, v: Vec3) -> Pos2 {
+pub(super) fn net_pos(c: Pos2, r: f32, v: Vec3) -> Pos2 {
     let (d, i) = dec_inc(v);
     let (x, y) = density::project(d, i);
     Pos2::new(c.x + x as f32 * r, c.y - y as f32 * r)
 }
 
-fn k_marker(pa: &egui::Painter, p: Pos2, a: usize, size: f32, fill: Color32, outline: Color32, w: f32) {
+pub(super) fn k_marker(pa: &egui::Painter, p: Pos2, a: usize, size: f32, fill: Color32, outline: Color32, w: f32) {
     let st = Stroke::new(w, outline);
     match a {
         0 => {
@@ -120,18 +120,18 @@ fn polyline(pa: &egui::Painter, pts: &[Pos2], stroke: Stroke, brk: f32) {
     }
 }
 
-fn outline(pa: &egui::Painter, c: Pos2, r: f32, vs: &[Vec3], stroke: Stroke) {
+pub(super) fn outline(pa: &egui::Painter, c: Pos2, r: f32, vs: &[Vec3], stroke: Stroke) {
     let pts: Vec<Pos2> = vs.iter().map(|v| net_pos(c, r, *v)).collect();
     polyline(pa, &pts, stroke, r * 0.6);
 }
 
 /// Great circle perpendicular to `v`.
-fn plane_of(v: Vec3) -> Vec<Vec3> {
+pub(super) fn plane_of(v: Vec3) -> Vec<Vec3> {
     let h = if v[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
-    let a = anisoft_core::tensor::cross(v, h);
-    let na = anisoft_core::tensor::norm(a);
+    let a = ams_core::tensor::cross(v, h);
+    let na = ams_core::tensor::norm(a);
     let a = [a[0] / na, a[1] / na, a[2] / na];
-    let b = anisoft_core::tensor::cross(v, a);
+    let b = ams_core::tensor::cross(v, a);
     (0..=180)
         .map(|i| {
             let t = std::f64::consts::TAU * i as f64 / 180.0;
@@ -720,4 +720,53 @@ fn group_csv(s: &GroupStats, n: usize) -> String {
         t += &format!("{},{},{:.5},{:.5}\n", nm, mv.map_or(String::new(), |v| format!("{:.5}", v[p])), s.avg[p].0, s.avg[p].1);
     }
     t
+}
+
+/// What to draw on top of the main window's stereonet besides the data points.
+#[derive(Clone, Default, PartialEq)]
+pub struct StereoOverlay {
+    pub mean: bool,
+    pub conf: bool,
+    pub planes: [bool; 3],
+    pub boot: bool,
+    pub boot_conf: bool,
+}
+
+pub(super) fn draw_stereo_overlay(pa: &egui::Painter, c: Pos2, r: f32, s: &GroupStats, o: &StereoOverlay, show: [bool; 3], kc: [Color32; 3]) {
+    if o.boot {
+        if let Some(b) = &s.bootstrap {
+            for a in 0..3 {
+                if !show[a] {
+                    continue;
+                }
+                for v in &b.points[a] {
+                    pa.circle_filled(net_pos(c, r, *v), 1.1, kc[a]);
+                }
+                if o.boot_conf {
+                    if let Some(e) = &b.ellipse[a] {
+                        outline(pa, c, r, &e.outline(&s.vecs, 120), Stroke::new(1.3, kc[a].gamma_multiply(0.75)));
+                    }
+                }
+            }
+        }
+    }
+    if o.mean {
+        for a in 0..3 {
+            if o.planes[a] {
+                outline(pa, c, r, &plane_of(s.vecs[a]), Stroke::new(1.0, kc[a]));
+            }
+        }
+        if o.conf {
+            for a in 0..3 {
+                if let (true, Some(e)) = (show[a], &s.jelinek[a]) {
+                    outline(pa, c, r, &e.outline(&s.vecs, 120), Stroke::new(2.2, kc[a]));
+                }
+            }
+        }
+        for a in 0..3 {
+            if show[a] {
+                k_marker(pa, net_pos(c, r, s.vecs[a]), a, 7.0, kc[a], Color32::BLACK, 1.5);
+            }
+        }
+    }
 }

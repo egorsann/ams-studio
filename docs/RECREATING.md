@@ -10,8 +10,8 @@ If you only want the software: the `crates/` tree is complete and `cargo test` i
 
 A Rust workspace:
 
-- `anisoft-core`: no GUI. `.ams` reader (`ams`), eigen-decomposition and parameters (`tensor`), coordinate systems (`coords`, approximate), group statistics with Jelinek ellipses and bootstrap (`stats`), contour density and contour lines (`density`), `.ged` files (`ged`), the four tool calculations (`tools`), csv export (`export`). Examples: `validate` (decoded `.ams` vs the original's csv), `check_tools` (tool results vs files the original wrote), `make_demo` (made-up data).
-- `anisoft`: the egui/eframe app. `app.rs` (state, menus, toolbar, plots, windows, shortcuts), `app/tools_ui.rs` (five tool windows), `app/analysis_ui.rs` (Group Statistics and Contour), `plots.rs` (stereonet, histogram, scatter with rubber band), `icons.rs` (vector toolbar icons, no image assets), `doc.rs` (the open file: records, active/selected flags, display order).
+- `ams-core`: no GUI. `.ams` reader (`ams`), eigen-decomposition and parameters (`tensor`), coordinate systems (`coords`, approximate), group statistics with Jelinek ellipses and bootstrap (`stats`), contour density and contour lines (`density`), `.ged` files (`ged`), the four tool calculations (`tools`), csv export (`export`). Examples: `validate` (decoded `.ams` vs the original's csv), `check_tools` (tool results vs files the original wrote), `make_demo` (made-up data).
+- `ams-studio`: the egui/eframe app. `app.rs` (state, menus, toolbar, plots, windows, shortcuts), `app/tools_ui.rs` (five tool windows), `app/analysis_ui.rs` (Group Statistics and Contour), `plots.rs` (stereonet, histogram, scatter with rubber band), `icons.rs` (vector toolbar icons, no image assets), `doc.rs` (the open file: records, active/selected flags, display order).
 
 Stack choices that mattered: Rust + egui because it gives resizable/collapsible panels and a single native binary on Linux and Windows; no third-party plotting crate (everything is drawn with the egui painter, which made rubber-band selection, per-marker picking and PNG export of exact regions easy); `rfd` for native file dialogs; `image` only to write PNGs.
 
@@ -78,19 +78,23 @@ Discoveries made this way, to show the style: the stored tensors are normalised 
 ## 5. Testing
 
 - `cargo test` (42 tests): core maths, record and `.ged` round trips, the 12-specimen regression against the original's printed output, strain matrices, contour levels and lines, GUI state helpers.
-- `cargo run -p anisoft-core --example validate -- file.ams export.csv` and `... --example check_tools -- A.ams B.ams added.ams subtracted.ams overprint.ams` repeat the comparisons against the original's own output on your files.
-- **Headless GUI testing** (what produced all screenshots): `Xvfb :98 -screen 0 1500x1000x24`, then launch with `env -u WAYLAND_DISPLAY DISPLAY=:98 LIBGL_ALWAYS_SOFTWARE=1 HOME=<fresh dir> XDG_CONFIG_HOME=<fresh dir>/.config ./target/release/anisoft file.ams`, drive with `xdotool` (`windowfocus` first; drags need `mousedown`, several `mousemove`s with short sleeps, `mouseup`), capture with `import -window root`. A fresh `XDG_CONFIG_HOME` gives the default layout; write `win_w=1400`/`win_h=950` into its `state.txt` for a bigger test window. Native file dialogs cannot be tested this way; everything behind them is covered by unit tests.
+- `cargo run -p ams-core --example validate -- file.ams export.csv` and `... --example check_tools -- A.ams B.ams added.ams subtracted.ams overprint.ams` repeat the comparisons against the original's own output on your files.
+- **Headless GUI testing** (what produced all screenshots): `Xvfb :98 -screen 0 1500x1000x24`, then launch with `env -u WAYLAND_DISPLAY DISPLAY=:98 LIBGL_ALWAYS_SOFTWARE=1 HOME=<fresh dir> XDG_CONFIG_HOME=<fresh dir>/.config ./target/release/ams-studio file.ams`, drive with `xdotool` (`windowfocus` first; drags need `mousedown`, several `mousemove`s with short sleeps, `mouseup`), capture with `import -window root`. A fresh `XDG_CONFIG_HOME` gives the default layout; write `win_w=1400`/`win_h=950` into its `state.txt` for a bigger test window. Native file dialogs cannot be tested this way; everything behind them is covered by unit tests.
 
 ## 6. Building and releasing
 
-- `cargo build --release -p anisoft` gives one binary (no installer, no runtime files). On Linux the build needs no extra libraries; running needs a Wayland or X11 session.
+- `cargo build --release -p ams-studio` gives one binary (no installer, no runtime files). On Linux the build needs no extra libraries; running needs a Wayland or X11 session.
 - `.github/workflows/release.yml` builds the Windows `.exe` (`windows-latest`, MSVC) and a Linux binary on every `v*` tag and attaches them to a GitHub Release; `ci.yml` runs the tests on every push. The Windows build hides the console window (`windows_subsystem = "windows"` in `main.rs`) and reads its preferences from `%APPDATA%`.
+
+## 6b. Windows build without Windows
+
+The `.exe` is cross-compiled on Linux in a container: `podman run` of `rust:latest`, `apt install gcc-mingw-w64-x86-64`, `rustup target add x86_64-pc-windows-gnu`, `cargo build --release --locked --target x86_64-pc-windows-gnu -p ams-studio` with `RUSTFLAGS='-C link-arg=-static-libgcc -C link-arg=-static'` (no MinGW DLLs needed). It runs on Windows 10/11 and was tested by double-clicking it in a Windows 11 VM (opens files, draws plots, native dialogs work). It is unsigned. Copy a clean source tree into the container (not `target/`).
 
 ## 7. Open items (what to do next)
 
 1. **Per-specimen orientation**: Edit Data should read a `.ged`, write OP1-OP4/alpha/phi/foliation fields into the `.ams` records (offsets in `FORMATS.md`) and G/P/T should use them. The geographic and paleo rules are in `ORIGINAL_BEHAVIOUR.md` section 9; the tectonic rule and OP4 are undecoded. The global Orientation Parameters window is an approximation to be replaced.
 2. Contour `Foliation Pole` / `Lineation` inputs need that data.
 3. Import of `.asc`/`.ran`, Set Data Classes, Paleo-Horizontal/Vertical: menu items exist, behaviour not implemented.
-4. Bootstrap ellipse numbers differ from the original's; the contour maximum is within about 3 % (kernel `exp(k (cos^2 - 1))` is close, not identical); contour level steps for maxima above 45 are guessed.
+4. Per-specimen E12/E23/E13 are approximate (5 %). Bootstrap ellipse numbers differ from the original's; the contour maximum is within about 3 % (kernel `exp(k (cos^2 - 1))` is close, not identical); contour level steps for maxima above 45 are guessed.
 5. Find Duplicates in the tensor tool keeps the first record of each name; the original's rule is unknown.
 6. Deform AMS should start from the main window's fabric as the original does.

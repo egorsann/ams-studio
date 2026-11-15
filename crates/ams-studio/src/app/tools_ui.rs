@@ -1,14 +1,14 @@
 //! The five windows of the Tools menu. Behaviour follows the original (see
-//! `anisoft-core/src/tools.rs`); the look follows the rest of this app.
+//! `ams-core/src/tools.rs`); the look follows the rest of this app.
 
 use super::App;
 use crate::doc::Doc;
 use crate::icons::{self, Icon};
-use anisoft_core::ams::{Specimen, RECORD_LEN};
-use anisoft_core::density::project;
-use anisoft_core::ged::{GedFile, GedRow};
-use anisoft_core::tensor::dec_inc;
-use anisoft_core::tools::*;
+use ams_core::ams::{Specimen, RECORD_LEN};
+use ams_core::density::project;
+use ams_core::ged::{GedFile, GedRow};
+use ams_core::tensor::dec_inc;
+use ams_core::tools::*;
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
 const T_GED: usize = 8;
@@ -267,7 +267,7 @@ struct SetSt {
 impl SetSt {
     fn load(path: &std::path::Path) -> Result<SetSt, String> {
         let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let specs = anisoft_core::ams::parse(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+        let specs = ams_core::ams::parse(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
         let n = specs.len();
         Ok(SetSt { label: path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), raw, specs, dis: vec![false; n], sel: vec![false; n], field_f: None, freq_f: None })
     }
@@ -401,7 +401,7 @@ struct DefState {
     stretch: String,
     gamma: String,
     model: Deform,
-    matrix: Option<anisoft_core::tensor::Mat3>,
+    matrix: Option<ams_core::tensor::Mat3>,
     msg: String,
 }
 
@@ -1021,7 +1021,7 @@ impl App {
                 pa.rect_filled(rect, 2.0, if dark { Color32::from_gray(24) } else { Color32::WHITE });
                 let (c, r) = (rect.center(), 235.0);
                 draw_net(&pa, c, r, ink, true);
-                let to_dec_inc = |q: &anisoft_core::tensor::Vec3| dec_inc([q[1], q[0], q[2]]);
+                let to_dec_inc = |q: &ams_core::tensor::Vec3| dec_inc([q[1], q[0], q[2]]);
                 for q in st.model.axes() {
                     let (d, i) = to_dec_inc(&q);
                     let p = to_screen(c, r, d, i);
@@ -1216,14 +1216,14 @@ mod tests {
     }
 
     fn set_of(names: &[&str], kms: &[f64]) -> SetSt {
-        use anisoft_core::ams::{build_record, Phase};
-        use anisoft_core::tensor::sym;
+        use ams_core::ams::{build_record, Phase};
+        use ams_core::tensor::sym;
         let mut raw = vec![];
         for (n, k) in names.iter().zip(kms) {
             let ph = Phase { km: *k, sd: [1e-3; 3], tensor: sym(1.2, 1.0, 0.8, 0.0, 0.0, 0.0), ftest: [5.0, 1.0, 1.0] };
             raw.extend(build_record(n, &ph, &ph, 400.0, 1220.0));
         }
-        let specs = anisoft_core::ams::parse(&raw).unwrap();
+        let specs = ams_core::ams::parse(&raw).unwrap();
         let n = specs.len();
         SetSt { label: "t".into(), raw, specs, dis: vec![false; n], sel: vec![false; n], field_f: None, freq_f: None }
     }
@@ -1235,7 +1235,7 @@ mod tests {
         st.calc(1.0); // pairs automatically: C1 (A0,B1), B1 (A1,B0)
         assert_eq!(st.pairs, vec![(0, 1), (1, 0)]);
         assert!((st.km[0].unwrap() - 3e-3).abs() < 1e-9 && (st.km[1].unwrap() - 4e-3).abs() < 1e-9);
-        let out = anisoft_core::ams::parse(&st.result_bytes().unwrap()).unwrap();
+        let out = ams_core::ams::parse(&st.result_bytes().unwrap()).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[1].name, "B1");
         assert!((out[1].inphase.km - 4e-3).abs() < 1e-8);

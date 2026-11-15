@@ -1,14 +1,14 @@
 //! Compare the tools code with files written by the original Anisoft.
-//! cargo run -p anisoft-core --example check_tools -- A.ams B.ams added.ams subtracted.ams overprint.ams
-use anisoft_core::ams::{parse, RECORD_LEN};
-use anisoft_core::tools::*;
+//! cargo run -p ams-core --example check_tools -- A.ams B.ams added.ams subtracted.ams overprint.ams
+use ams_core::ams::{parse, RECORD_LEN};
+use ams_core::tools::*;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let rd = |i: usize| std::fs::read(&a[i]).expect("read");
     let (ba, bb, badd, bsub, bfo) = (rd(1), rd(2), rd(3), rd(4), rd(5));
     let (sa, sb) = (parse(&ba).unwrap(), parse(&bb).unwrap());
-    let names = |s: &[anisoft_core::ams::Specimen]| s.iter().map(|x| x.name.clone()).collect::<Vec<_>>();
+    let names = |s: &[ams_core::ams::Specimen]| s.iter().map(|x| x.name.clone()).collect::<Vec<_>>();
     let pairs = pair_by_name(&names(&sa), &names(&sb));
     for (label, sign, bytes) in [("add", 1.0, &badd), ("subtract", -1.0, &bsub)] {
         let want = parse(bytes).unwrap();

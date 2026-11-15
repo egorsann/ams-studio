@@ -12,7 +12,7 @@
 ## Repository map
 
 ```
-crates/anisoft-core/   pure Rust, no GUI, the testable part
+crates/ams-core/   pure Rust, no GUI, the testable part
   src/ams.rs           .ams reader/writer (640-byte records), Axes (eigen + parameters)
   src/tensor.rs        eigen decomposition (Jacobi), dec/inc, L F P Pj T U Q E
   src/stats.rs         group statistics, Jelinek ellipses, bootstrap
@@ -21,13 +21,16 @@ crates/anisoft-core/   pure Rust, no GUI, the testable part
   src/ged.rs           .ged parse/write
   src/coords.rs        S/G/P/T rotations (approximate, global parameters)
   src/export.rs        csv export
+  src/params.rs        the 24 plottable parameters (PARAM_LABELS) and their values per specimen
   examples/            validate, check_tools (compare with the original), make_demo
-crates/anisoft/        egui app
+crates/ams-studio/        egui app
   src/app.rs           state, menus, toolbar, plots layout, windows, shortcuts, persistence
   src/app/tools_ui.rs  GED Editor, Tensor Addition/Subtraction, Fabric Overprint, Intersection, Deform AMS
   src/app/analysis_ui.rs  Group Statistics and Contour Plot
   src/plots.rs         stereonet / histogram / scatter drawing + rubber-band picking
   src/icons.rs         vector toolbar icons
+  src/icon.rs          the application icon (AMS ellipsoid), drawn procedurally; `ams-studio --write-icons assets` regenerates assets/icon.png/.ico
+  build.rs             embeds assets/icon.ico into the Windows exe
   src/doc.rs           open document (records, active/selected, order)
 examples/*.ams         made-up demo data
 docs/                  documentation and screenshots
@@ -37,9 +40,9 @@ docs/                  documentation and screenshots
 
 ```
 cargo test                                   # 42 tests
-cargo run --release -p anisoft -- examples/demo_60_specimens.ams
-cargo run -p anisoft-core --example make_demo -- out.ams 60
-cargo run -p anisoft-core --example validate -- file.ams anisoft_export.csv
+cargo run --release -p ams-studio -- examples/demo_60_specimens.ams
+cargo run -p ams-core --example make_demo -- out.ams 60
+cargo run -p ams-core --example validate -- file.ams anisoft_export.csv
 ```
 
 ## Rules that matter

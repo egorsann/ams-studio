@@ -1,6 +1,6 @@
-//! cargo run -p anisoft-core --example validate -- file.ams anisoft_export.csv
+//! cargo run -p ams-core --example validate -- file.ams anisoft_export.csv
 //! Compares the decoded .ams against a csv exported by the original Anisoft.
-use anisoft_core::ams;
+use ams_core::ams;
 use std::collections::HashMap;
 
 fn main() {

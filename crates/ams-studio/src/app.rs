@@ -1,10 +1,11 @@
 use crate::doc::{self, Derived, Doc};
 use crate::icons::{self, Icon};
-use crate::plots::{self, Pt, ScatterSpec, StereoOpts, Theme};
+use crate::plots::{self, AxisCfg, ColorCfg, Pt, ScatterSpec, StereoOpts, Theme};
+use ams_core::params::{param_class, param_sd, param_values, N_PARAMS, PARAM_LABELS};
 mod analysis_ui;
 mod tools_ui;
-use anisoft_core::coords::{CoordSys, Orientation};
-use anisoft_core::export;
+use ams_core::coords::{CoordSys, Orientation};
+use ams_core::export;
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Key, Layout, Modifiers, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
 use std::path::{Path, PathBuf};
 
@@ -45,7 +46,122 @@ pub enum Action {
     TogglePhase,
 }
 
-const METRICS: [&str; 4] = ["Km", "P", "Pj", "T"];
+/// Options of one of the two scatter plots (P vs Kmean, T vs P).
+#[derive(Clone, PartialEq)]
+struct ScCfg {
+    x: AxisCfg,
+    y: AxisCfg,
+    diag: bool,
+    conf: bool,
+    connect: bool,
+    legend: bool,
+}
+
+impl ScCfg {
+    fn new(x: usize, y: usize) -> ScCfg {
+        ScCfg { x: AxisCfg::new(x), y: AxisCfg::new(y), diag: false, conf: false, connect: false, legend: true }
+    }
+}
+
+impl PartialEq for AxisCfg {
+    fn eq(&self, o: &Self) -> bool {
+        self.param == o.param && self.auto == o.auto && self.min == o.min && self.max == o.max && self.log == o.log
+    }
+}
+impl PartialEq for ColorCfg {
+    fn eq(&self, o: &Self) -> bool {
+        self.on == o.on && self.param == o.param && self.auto == o.auto && self.min == o.min && self.max == o.max && self.log == o.log && self.palette == o.palette
+    }
+}
+
+fn class_color(class: u8, dark: bool) -> Option<Color32> {
+    let c = match class {
+        1 => (255, 188, 188),
+        2 => (190, 250, 190),
+        3 => (196, 196, 255),
+        4 => (190, 250, 250),
+        5 => (255, 190, 250),
+        _ => return None,
+    };
+    Some(tools_ui::tint(dark, c.0, c.1, c.2))
+}
+
+/// Parameters grouped by type, one column per group, in the order of the original's list.
+const PARAM_GROUPS: [(&str, &[usize]); 7] = [
+    ("Magnitude", &[0]),
+    ("Shape", &[1, 2, 3, 4, 5, 6, 7, 8]),
+    ("K1 (max)", &[9, 12, 13]),
+    ("K2 (int)", &[10, 14, 15]),
+    ("K3 (min)", &[11, 16, 17]),
+    ("F-tests", &[18, 19, 20]),
+    ("Confidence", &[21, 22, 23]),
+];
+
+/// Drop-down of all plottable parameters. It opens as one wide panel with the parameters
+/// grouped by type in columns, each on the background colour the original uses.
+fn param_combo(ui: &mut Ui, id: &str, v: &mut usize, dark: bool) -> bool {
+    let mut changed = false;
+    let cur = RichText::new(PARAM_LABELS[(*v).min(N_PARAMS - 1)]);
+    let cur = match class_color(param_class(*v), dark) { Some(c) => cur.background_color(c).color(Color32::BLACK), None => cur };
+    egui::ComboBox::from_id_salt(id).width(120.0).selected_text(cur).show_ui(ui, |ui| {
+        ui.horizontal_top(|ui| {
+            for (title, items) in PARAM_GROUPS {
+                ui.vertical(|ui| {
+                    ui.set_min_width(88.0);
+                    ui.label(RichText::new(title).small().strong());
+                    for &i in items {
+                        let t = RichText::new(PARAM_LABELS[i]);
+                        let t = match class_color(param_class(i), dark) { Some(c) => t.background_color(c).color(Color32::BLACK), None => t };
+                        if ui.add(egui::Button::selectable(*v == i, t).min_size(Vec2::new(84.0, 0.0))).clicked() {
+                            *v = i;
+                            changed = true;
+                            ui.close();
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+            }
+        });
+    });
+    changed
+}
+
+fn range_fields(ui: &mut Ui, auto: &mut bool, min: &mut f64, max: &mut f64, log: &mut bool, id: &str) {
+    ui.horizontal(|ui| {
+        ui.checkbox(auto, "Auto-scale");
+        egui::ComboBox::from_id_salt((id, "scale")).width(96.0).selected_text(if *log { "Log (base 10)" } else { "Linear" }).show_ui(ui, |ui| {
+            ui.selectable_value(log, false, "Linear");
+            ui.selectable_value(log, true, "Log (base 10)");
+        });
+    });
+    ui.add_enabled_ui(!*auto, |ui| {
+        let speed = 0.01 * max.abs().max(min.abs()).max(1e-6);
+        ui.horizontal(|ui| {
+            ui.add(egui::DragValue::new(min).speed(speed).max_decimals(8));
+            ui.label("to");
+            ui.add(egui::DragValue::new(max).speed(speed).max_decimals(8));
+        });
+    });
+}
+
+fn axis_ui(ui: &mut Ui, title: &str, id: &str, cfg: &mut AxisCfg, dark: bool) {
+    ui.label(RichText::new(title).strong());
+    param_combo(ui, id, &mut cfg.param, dark);
+    range_fields(ui, &mut cfg.auto, &mut cfg.min, &mut cfg.max, &mut cfg.log, id);
+}
+
+fn color_ui(ui: &mut Ui, id: &str, c: &mut ColorCfg, dark: bool) {
+    ui.checkbox(&mut c.on, RichText::new("Color-coding").strong());
+    ui.add_enabled_ui(c.on, |ui| {
+        param_combo(ui, id, &mut c.param, dark);
+        range_fields(ui, &mut c.auto, &mut c.min, &mut c.max, &mut c.log, id);
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut c.palette, 0, "Rainbow");
+            ui.radio_value(&mut c.palette, 1, "Shades");
+            ui.radio_value(&mut c.palette, 2, "Grayscales");
+        });
+    });
+}
 
 /// A drag over rows of a list: anchor position, whether it adds to the previous selection, and that selection.
 struct ListDrag {
@@ -89,7 +205,16 @@ pub struct App {
     marker: f32,
     bins: usize,
     export: [bool; 4],
-    log_km: bool,
+    hist_cfg: AxisCfg,
+    sc: [ScCfg; 2],
+    color: [ColorCfg; 4],
+    color_master: ColorCfg,
+    st_data: bool,
+    st_caption: bool,
+    st_legend: bool,
+    st_connect: bool,
+    st_mf: bool,
+    st_overlay: analysis_ui::StereoOverlay,
     browser_w: f32,
     spec_w: f32,
     win_size: Option<[f32; 2]>,
@@ -99,9 +224,6 @@ pub struct App {
     list_off: f32,
     list_h: f32,
     pane_settings: [bool; 4],
-    color_on: bool,
-    palette: u8,
-    metric: usize,
     filter: usize,
     k_colors: [Color32; 3],
     dark: bool,
@@ -130,7 +252,7 @@ pub struct App {
 
 /// Window size and maximised flag saved by the previous run (read before the window is created).
 pub fn saved_window() -> (Option<[f32; 2]>, bool) {
-    let Ok(s) = std::fs::read_to_string(state_path()) else { return (None, false) };
+    let Some(s) = read_state_text() else { return (None, false) };
     let (mut w, mut h, mut max) = (None, None, false);
     for l in s.lines() {
         match l.split_once('=') {
@@ -162,8 +284,16 @@ fn config_dir() -> PathBuf {
     home_dir().join(".config")
 }
 
+/// Marker size in the plots for a fresh installation.
+const DEFAULT_MARKER: f32 = 6.0;
+
 fn state_path() -> PathBuf {
-    config_dir().join("anisoft-linux").join("state.txt")
+    config_dir().join("ams-studio").join("state.txt")
+}
+
+/// Preferences text: the current file, or the one written under the program's former name.
+fn read_state_text() -> Option<String> {
+    std::fs::read_to_string(state_path()).ok().or_else(|| std::fs::read_to_string(config_dir().join("anisoft-linux").join("state.txt")).ok())
 }
 
 impl App {
@@ -182,10 +312,19 @@ impl App {
             browser_back: vec![],
             spec_color_open: false,
             show_k: [true; 3],
-            marker: 4.0,
+            marker: DEFAULT_MARKER,
             bins: 12,
             export: [true; 4],
-            log_km: false,
+            hist_cfg: AxisCfg::new(0),
+            sc: [ScCfg::new(0, 3), { let mut s = ScCfg::new(3, 5); s.y.auto = false; s.y.min = -1.0; s.y.max = 1.0; s }],
+            color: Default::default(),
+            color_master: ColorCfg::default(),
+            st_data: true,
+            st_caption: true,
+            st_legend: true,
+            st_connect: false,
+            st_mf: false,
+            st_overlay: Default::default(),
             browser_w: 230.0,
             spec_w: 170.0,
             win_size: None,
@@ -195,9 +334,6 @@ impl App {
             list_off: 0.0,
             list_h: 0.0,
             pane_settings: [false; 4],
-            color_on: false,
-            palette: 0,
-            metric: 0,
             filter: 0,
             k_colors: [Color32::from_rgb(220, 30, 30), Color32::from_rgb(30, 170, 60), Color32::from_rgb(30, 60, 220)],
             dark: false,
@@ -231,13 +367,14 @@ impl App {
     }
 
     fn load_state(&mut self) {
-        let Ok(s) = std::fs::read_to_string(state_path()) else { return };
+        let Some(s) = read_state_text() else { return };
         for l in s.lines() {
             let Some((k, v)) = l.split_once('=') else { continue };
             match k {
                 "last_dir" if Path::new(v).is_dir() => self.browser_dir = PathBuf::from(v),
                 "dark" => self.dark = v == "1",
-                "logkm" => self.log_km = v == "1",
+                "logkm" => self.sc[0].x.log = v == "1",
+                "marker" => self.marker = v.parse().unwrap_or(DEFAULT_MARKER).clamp(2.0, 9.0),
                 "browser_w" => self.browser_w = v.parse().unwrap_or(230.0f32).clamp(150.0, 520.0),
                 "spec_w" => self.spec_w = v.parse().unwrap_or(170.0f32).clamp(110.0, 420.0),
                 "win_w" | "win_h" => {
@@ -262,13 +399,14 @@ impl App {
         let _ = std::fs::write(
             p,
             format!(
-                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nlogkm={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\n",
+                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nlogkm={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\n",
                 self.browser_dir.display(),
                 self.dark as u8,
                 self.browser_open as u8,
                 self.hfrac,
                 self.vfrac,
-                self.log_km as u8,
+                self.sc[0].x.log as u8,
+                self.marker,
                 self.browser_w,
                 self.spec_w,
                 self.win_size.map_or(1280.0, |s| s[0]),
@@ -306,13 +444,10 @@ impl App {
         }
     }
 
-    fn metric_value(&self, i: usize) -> Option<f64> {
-        let d = &self.derived[i];
-        match self.metric {
-            0 => Some(d.km),
-            1 => d.axes.shape.map(|s| s.p),
-            2 => d.axes.shape.map(|s| s.pj),
-            _ => d.axes.shape.map(|s| s.t),
+    /// The Specimens-panel / toolbar colour-coding applies to every plot that has markers.
+    fn apply_master_color(&mut self) {
+        for i in [0usize, 2, 3] {
+            self.color[i] = self.color_master.clone();
         }
     }
 
@@ -321,41 +456,34 @@ impl App {
         if self.derived.len() != doc.specs.len() {
             return vec![];
         }
-        let idx: Vec<usize> = (0..doc.specs.len())
+        (0..doc.specs.len())
             .filter(|&i| doc.active[i] && (self.filter == 0 || doc.selected[i]))
-            .collect();
-        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-        for &i in &idx {
-            if let Some(v) = self.metric_value(i) {
-                lo = lo.min(v);
-                hi = hi.max(v);
-            }
-        }
-        idx.iter()
-            .map(|&i| {
+            .map(|i| {
                 let d = &self.derived[i];
-                let color = if self.color_on {
-                    let t = self.metric_value(i).map_or(0.0, |v| if hi > lo { (v - lo) / (hi - lo) } else { 0.5 });
-                    Some(match self.palette {
-                        0 => plots::rainbow(t),
-                        1 => plots::shades(t),
-                        _ => plots::gray(t),
-                    })
-                } else {
-                    None
-                };
+                let ph = if self.out_phase { &doc.specs[i].outphase } else { &doc.specs[i].inphase };
+                let vals = param_values(d.km, &d.axes, ph);
                 Pt {
                     idx: i,
                     name: doc.specs[i].name.clone(),
-                    km: d.km,
                     di: d.axes.dec_inc,
-                    p: d.axes.shape.map(|s| s.p),
-                    t: d.axes.shape.map(|s| s.t),
+                    vals,
+                    sds: [param_sd(9, ph), param_sd(10, ph), param_sd(11, ph)],
                     selected: doc.selected[i],
-                    color,
+                    color: None,
                 }
             })
             .collect()
+    }
+
+    /// Copy of the points coloured according to `cfg`, and the colour range when colouring is on.
+    fn colorized(pts: &[Pt], cfg: &ColorCfg) -> (Vec<Pt>, Option<(f64, f64)>) {
+        if !cfg.on {
+            return (pts.to_vec(), None);
+        }
+        let k = cfg.param.min(N_PARAMS - 1);
+        let range = cfg.range(pts.iter().map(|p| p.vals[k]));
+        let out = pts.iter().map(|p| Pt { color: cfg.color(p.vals[k], range), ..p.clone() }).collect();
+        (out, Some(range))
     }
 
     // ---------------------------------------------------------------- actions
@@ -403,7 +531,7 @@ impl App {
                     if d.n_selected() == 0 {
                         self.info = Some("Select some specimens first.".into());
                     } else if let Some(p) = rfd::FileDialog::new().add_filter("AMS files", &["ams"]).set_title("Append selected records into...").pick_file() {
-                        let ok = std::fs::metadata(&p).map_or(false, |m| m.len() % anisoft_core::ams::RECORD_LEN as u64 == 0);
+                        let ok = std::fs::metadata(&p).map_or(false, |m| m.len() % ams_core::ams::RECORD_LEN as u64 == 0);
                         if !ok {
                             self.info = Some("That is not a valid .ams file (size is not a multiple of 640 bytes).".into());
                         } else {
@@ -495,7 +623,7 @@ impl App {
                     let base = if copy {
                         None
                     } else {
-                        let stem = self.doc.as_ref().and_then(|d| d.path.file_stem()).map(|s| s.to_string_lossy().to_string()).unwrap_or("anisoft".into());
+                        let stem = self.doc.as_ref().and_then(|d| d.path.file_stem()).map(|s| s.to_string_lossy().to_string()).unwrap_or("ams-studio".into());
                         match rfd::FileDialog::new().add_filter("PNG base name", &["png"]).set_file_name(format!("{stem}.png")).set_title("Save Graphics To File").save_file() {
                             Some(p) => Some(p),
                             None => return,
@@ -707,12 +835,12 @@ impl eframe::App for App {
 
         // window title like the original: Anisoft - [path (n / total)]
         let title = match &self.doc {
-            Some(d) if d.synthetic => format!("Anisoft - [{}]", d.path.display()),
+            Some(d) if d.synthetic => format!("AMS Studio - [{}]", d.path.display()),
             Some(d) => {
                 let (_, _, pos, total) = doc::neighbours(&d.path);
-                format!("Anisoft - [{}  ({pos} / {total})]{}", d.path.display(), if d.modified { " *" } else { "" })
+                format!("AMS Studio - [{}  ({pos} / {total})]{}", d.path.display(), if d.modified { " *" } else { "" })
             }
-            None => "Anisoft".to_string(),
+            None => "AMS Studio".to_string(),
         };
         if title != self.last_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -832,11 +960,15 @@ impl eframe::App for App {
                     ui.selectable_value(&mut self.filter, 0, "All active");
                     ui.selectable_value(&mut self.filter, 1, "Selected only");
                 }).response.on_hover_text("Which specimens are plotted");
-                egui::ComboBox::from_id_salt("tb_metric").width(70.0).selected_text(METRICS[self.metric]).show_ui(ui, |ui| {
-                    for (i, m) in METRICS.iter().enumerate() {
-                        ui.selectable_value(&mut self.metric, i, *m);
+                {
+                    let mut p = self.color_master.param;
+                    if param_combo(ui, "tb_metric", &mut p, d) {
+                        self.color_master.param = p;
+                        self.color_master.on = true;
+                        self.apply_master_color();
                     }
-                }).response.on_hover_text("Quantity used for colour-coding");
+                    ui.label(RichText::new("").small()).on_hover_text("Parameter used for colour-coding all plots");
+                }
                 if tool(ui, Icon::GroupStats, "Group Statistics  F9", has, self.win_group, d) { actions.push(Action::GroupStats) }
                 if tool(ui, Icon::Contour, "Contour Plot  F12", has, self.win_contour, d) { actions.push(Action::Contour) }
             });
@@ -1017,17 +1149,12 @@ impl App {
             ui.strong("Specimens");
         });
         if self.spec_color_open {
-            ui.checkbox(&mut self.color_on, "Color-coding");
-            ui.add_enabled_ui(self.color_on, |ui| {
-                egui::ComboBox::from_id_salt("metric_panel").selected_text(METRICS[self.metric]).show_ui(ui, |ui| {
-                    for (i, m) in METRICS.iter().enumerate() {
-                        ui.selectable_value(&mut self.metric, i, *m);
-                    }
-                });
-                ui.radio_value(&mut self.palette, 0, "Rainbow");
-                ui.radio_value(&mut self.palette, 1, "Shades");
-                ui.radio_value(&mut self.palette, 2, "Grayscales");
-            });
+            let before = self.color_master.clone();
+            let dark = self.dark;
+            color_ui(ui, "metric_panel", &mut self.color_master, dark);
+            if before != self.color_master {
+                self.apply_master_color();
+            }
         }
         ui.separator();
         let Some(doc) = &mut self.doc else {
@@ -1144,35 +1271,39 @@ impl App {
         };
         let rects = [tl, tr, bl, br];
         let names = ["Stereonet", "N vs Kmean", "P vs Kmean", "T vs P"];
+        let mut overlay_gs: Option<ams_core::stats::GroupStats> = None;
+        if self.st_overlay.mean || self.st_overlay.boot {
+            let idx: Vec<usize> = pts.iter().map(|p| p.idx).collect();
+            let tensors: Vec<_> = idx.iter().map(|&i| self.derived[i].tensor).collect();
+            let kms: Vec<f64> = idx.iter().map(|&i| self.derived[i].km).collect();
+            overlay_gs = ams_core::stats::group_stats(&tensors, &kms);
+        }
         for i in 0..4 {
-            let body = self.pane_frame(ui, rects[i], i, names[i], th);
+            let mut body = self.pane_frame(ui, rects[i], i, names[i], th);
+            let (cpts, crange) = if i == 1 { (pts.clone(), None) } else { Self::colorized(&pts, &self.color[i]) };
+            let show_bar = i != 1 && crange.is_some() && (i == 0 || self.sc[i - 2].legend);
+            if show_bar {
+                let bar = Rect::from_min_max(Pos2::new(body.min.x, body.max.y - 30.0), body.max);
+                body.max.y -= 30.0;
+                plots::color_bar(ui, bar, &self.color[i], crange.unwrap(), th);
+            }
             let out = match i {
                 0 => {
-                    let o = StereoOpts { show: self.show_k, size: self.marker };
-                    plots::stereonet(ui, body, &pts, &o, th, cs_label)
+                    let o = StereoOpts { show: self.show_k, size: self.marker, data: self.st_data, caption: self.st_caption, legend: self.st_legend, connect: self.st_connect, foliation: self.st_mf };
+                    let out = plots::stereonet(ui, body, &cpts, &o, th, cs_label);
+                    if let Some(gs) = &overlay_gs {
+                        let (c, r) = plots::net_geometry(body);
+                        let pa = ui.painter_at(body);
+                        analysis_ui::draw_stereo_overlay(&pa, c, r, gs, &self.st_overlay, self.show_k, self.k_colors);
+                    }
+                    out
                 }
-                1 => plots::hist_km(ui, body, &pts, self.bins, th),
-                2 => {
-                    let exp = km_exp(&pts);
-                    plots::scatter(
-                        ui,
-                        body,
-                        &pts,
-                        ScatterSpec { xlabel: &(if self.log_km { "Kmean [SI]".to_string() } else { format!("Kmean [E{exp:+03} SI]") }), ylabel: "P", xlog: self.log_km, x: Box::new(|p| Some(p.km)), y: Box::new(|p| p.p), xr: None, yr: None, zero_line: false, salt: "pkm" },
-                        self.marker,
-                        th,
-                        Some(exp),
-                    )
+                1 => plots::histogram(ui, body, &pts, self.bins, &self.hist_cfg, th),
+                _ => {
+                    let c = &self.sc[i - 2];
+                    let spec = ScatterSpec { x: &c.x, y: &c.y, zero_line: i == 3, diagonal: c.diag, conf: c.conf, connect: c.connect, salt: if i == 2 { "pkm" } else { "tp" } };
+                    plots::scatter(ui, body, &cpts, &spec, self.marker, th)
                 }
-                _ => plots::scatter(
-                    ui,
-                    body,
-                    &pts,
-                    ScatterSpec { xlabel: "P", ylabel: "T", x: Box::new(|p| p.p), y: Box::new(|p| p.t), xr: None, yr: Some((-1.0, 1.0)), zero_line: true, salt: "tp", xlog: false },
-                    self.marker,
-                    th,
-                    None,
-                ),
             };
             self.hover[i] = out.hover.unwrap_or_default();
             if out.click.is_some() {
@@ -1215,35 +1346,126 @@ impl App {
         }
         let txt = if self.hover[i].is_empty() { RichText::new(name).weak() } else { RichText::new(&self.hover[i]) };
         child.label(txt);
-        let mut log_changed = false;
+        let mut changed = false;
         child.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.checkbox(&mut self.export[i], "Export graphics");
             if i == 2 {
-                log_changed = ui.checkbox(&mut self.log_km, "Log Km").on_hover_text("Logarithmic Kmean axis").changed();
+                let lab = if self.sc[0].x.param == 0 { "Log Km" } else { "Log X" };
+                changed |= ui.checkbox(&mut self.sc[0].x.log, lab).on_hover_text("Logarithmic X axis").changed();
             }
         });
-        if log_changed {
+        if changed {
             self.save_state();
         }
-        let mut top = header.max.y + 2.0;
+        let top = header.max.y + 2.0;
         if self.pane_settings[i] {
-            let strip = Rect::from_min_size(Pos2::new(rect.min.x + 8.0, top), Vec2::new(rect.width() - 16.0, 26.0));
-            let mut s = ui.new_child(UiBuilder::new().max_rect(strip).layout(Layout::left_to_right(Align::Center)));
-            s.add(egui::Slider::new(&mut self.marker, 2.0..=9.0).text("marker").max_decimals(0));
-            match i {
-                0 => {
-                    s.checkbox(&mut self.show_k[0], "K1");
-                    s.checkbox(&mut self.show_k[1], "K2");
-                    s.checkbox(&mut self.show_k[2], "K3");
-                }
-                1 => {
-                    s.add(egui::Slider::new(&mut self.bins, 3..=40).text("bins"));
-                }
-                _ => {}
-            }
-            top += 28.0;
+            self.pane_options(ui.ctx(), rect, header, i);
         }
         Rect::from_min_max(Pos2::new(rect.min.x + 4.0, top), Pos2::new(rect.max.x - 4.0, rect.max.y - 4.0))
+    }
+
+    /// The options panel of a plot (opened with the arrow in its header), with the choices the original offers.
+    fn pane_options(&mut self, ctx: &egui::Context, rect: Rect, header: Rect, i: usize) {
+        let dark = self.dark;
+        let marker_before = self.marker;
+        let max_h = (rect.height() - 40.0).max(120.0);
+        let mut close = false;
+        egui::Area::new(egui::Id::unique(("pane-options", i))).order(egui::Order::Foreground).fixed_pos(Pos2::new(rect.min.x + 8.0, header.max.y + 2.0)).show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(300.0);
+                egui::ScrollArea::vertical().max_height(max_h).auto_shrink([true, true]).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Symbol size");
+                        ui.add(egui::DragValue::new(&mut self.marker).range(2.0..=15.0).speed(0.2).max_decimals(0));
+                        if ui.small_button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                    ui.separator();
+                    match i {
+                        0 => {
+                            ui.horizontal(|ui| {
+                                for (a, n) in ["K1", "K2", "K3"].iter().enumerate() {
+                                    let (rr, _) = ui.allocate_exact_size(Vec2::new(54.0, 22.0), Sense::hover());
+                                    ui.painter().rect_filled(rr, 3.0, class_color(a as u8 + 1, dark).unwrap_or(Color32::GRAY));
+                                    ui.scope_builder(UiBuilder::new().max_rect(rr.shrink2(Vec2::new(3.0, 0.0))).layout(Layout::left_to_right(Align::Center)), |ui| {
+                                        ui.checkbox(&mut self.show_k[a], RichText::new(*n).color(Color32::BLACK));
+                                    });
+                                }
+                                ui.checkbox(&mut self.st_mf, "MF").on_hover_text("Magnetic foliation: a great circle perpendicular to each K3");
+                            });
+                            ui.checkbox(&mut self.st_data, RichText::new("Data points").strong());
+                            ui.checkbox(&mut self.st_connect, "Connect symbols").on_hover_text("Join the points of each axis in file order");
+                            ui.separator();
+                            let before = self.color[0].clone();
+                            color_ui(ui, "st-color", &mut self.color[0], dark);
+                            if before != self.color[0] {
+                                self.color_master = self.color[0].clone();
+                                self.apply_master_color();
+                            }
+                            ui.separator();
+                            ui.checkbox(&mut self.st_overlay.mean, RichText::new("Mean tensor").strong());
+                            ui.add_enabled_ui(self.st_overlay.mean, |ui| {
+                                ui.indent("mt", |ui| {
+                                    ui.checkbox(&mut self.st_overlay.conf, "Conf. ellipses");
+                                    for (a, n) in ["K2-K3 plane", "K1-K3 plane", "K1-K2 plane"].iter().enumerate() {
+                                        ui.checkbox(&mut self.st_overlay.planes[a], RichText::new(*n).background_color(class_color(a as u8 + 1, dark).unwrap_or(Color32::GRAY)).color(Color32::BLACK));
+                                    }
+                                });
+                            });
+                            ui.checkbox(&mut self.st_overlay.boot, RichText::new("Bootstrap").strong());
+                            ui.add_enabled_ui(self.st_overlay.boot, |ui| {
+                                ui.indent("bt", |ui| {
+                                    ui.checkbox(&mut self.st_overlay.boot_conf, "Conf. ellipses");
+                                });
+                            });
+                            ui.add_enabled(false, egui::Checkbox::new(&mut false, "Foliation / Lineation (needs .ged data)"));
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut self.st_caption, "Caption");
+                                ui.checkbox(&mut self.st_legend, "Legend");
+                            });
+                        }
+                        1 => {
+                            ui.label(RichText::new("Data").strong());
+                            param_combo(ui, "hist-param", &mut self.hist_cfg.param, dark);
+                            let h = &mut self.hist_cfg;
+                            range_fields(ui, &mut h.auto, &mut h.min, &mut h.max, &mut h.log, "hist");
+                            ui.add(egui::Slider::new(&mut self.bins, 3..=60).text("bins"));
+                        }
+                        _ => {
+                            let k = i - 2;
+                            let id = if i == 2 { "pk" } else { "tp" };
+                            axis_ui(ui, "X-axis", &format!("{id}-x"), &mut self.sc[k].x, dark);
+                            ui.separator();
+                            axis_ui(ui, "Y-axis", &format!("{id}-y"), &mut self.sc[k].y, dark);
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut self.sc[k].diag, "Diagonal line");
+                                ui.checkbox(&mut self.sc[k].conf, "Conf. intervals").on_hover_text("Error bars (±SD) for K1, K2, K3 on the Y axis");
+                            });
+                            ui.separator();
+                            let before = self.color[i].clone();
+                            color_ui(ui, &format!("{id}-color"), &mut self.color[i], dark);
+                            if before != self.color[i] {
+                                self.color_master = self.color[i].clone();
+                                self.apply_master_color();
+                            }
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut self.sc[k].connect, "Connect symbols").on_hover_text("Join the points in file order");
+                                ui.checkbox(&mut self.sc[k].legend, "Legend").on_hover_text("Show the colour scale below the plot");
+                            });
+                        }
+                    }
+                });
+            });
+        });
+        if self.marker != marker_before {
+            self.layout_changed = Some(ctx.input(|t| t.time));
+        }
+        if close {
+            self.pane_settings[i] = false;
+        }
     }
 
     fn handle_screenshot(&mut self, ctx: &egui::Context) {
@@ -1294,11 +1516,6 @@ impl App {
             }
         }
     }
-}
-
-fn km_exp(pts: &[Pt]) -> i32 {
-    let hi = pts.iter().map(|p| p.km.abs()).fold(0.0f64, f64::max);
-    if hi > 0.0 { hi.log10().floor() as i32 } else { 0 }
 }
 
 const ROW_H: f32 = 22.0;
@@ -1414,13 +1631,13 @@ impl App {
     fn base_window(&self, ctx: &egui::Context, title: &'static str, slot: usize, size: Vec2) -> egui::Window<'static> {
         let c = ctx.content_rect().center();
         let pos = Pos2::new((c.x - size.x / 2.0).max(8.0), (c.y - size.y / 2.0).max(40.0));
-        egui::Window::new(title).id(egui::Id::unique(("anisoft-window", title, self.win_serial[slot]))).default_pos(pos).default_size(size)
+        egui::Window::new(title).id(egui::Id::unique(("ams-window", title, self.win_serial[slot]))).default_pos(pos).default_size(size)
     }
 
     fn windows(&mut self, ctx: &egui::Context) {
         if let Some(msg) = self.info.clone() {
             let mut open = true;
-            egui::Window::new("Anisoft").open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            egui::Window::new("AMS Studio").open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
                 tools_ui::pop_style(ui, 1.4);
                 ui.set_max_width(640.0);
                 ui.label(&msg);
@@ -1434,9 +1651,9 @@ impl App {
         }
 
         let mut open = self.win_about;
-        self.base_window(ctx, "About Anisoft", W_ABOUT, Vec2::new(760.0, 220.0)).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+        self.base_window(ctx, "About AMS Studio", W_ABOUT, Vec2::new(760.0, 220.0)).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
             tools_ui::pop_style(ui, 1.4);
-            ui.heading("Anisoft for Linux");
+            ui.heading("AMS Studio");
             ui.label("An independent reimplementation of AGICO's Anisoft 6, written in Rust with egui.");
             ui.label("Reads Safyr7 .ams files; anisotropy results were checked against csv exports of the original program.");
             ui.label(RichText::new("Anisoft is a program of AGICO, Brno. This project is not affiliated with AGICO.").weak());

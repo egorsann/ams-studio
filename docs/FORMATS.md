@@ -43,7 +43,7 @@ CRLF text, every line padded with spaces to 62 characters.
 
 Line 1: `rows + 2` (width 4, left aligned), site name (16), latitude (7), longitude (7), rock type, strat, litho, region (4 each), OP1..OP4 (3 each).
 
-Then one line per specimen: name (12), sampling dec (4), inc (4), `fol1-code` and `lin1-code` as two characters in a 4-wide field, fol1 dec (4), fol1 dip (4), lin1 trend (4), lin1 plunge (4), `fol2-code` and `lin2-code` (4-wide field), fol2 dec (4), fol2 dip (4), lin2 trend (4), lin2 plunge (4). Empty cells are written as `0`. `crates/anisoft-core/src/ged.rs` parses and writes it and its test reproduces a file written by the original byte for byte.
+Then one line per specimen: name (12), sampling dec (4), inc (4), `fol1-code` and `lin1-code` as two characters in a 4-wide field, fol1 dec (4), fol1 dip (4), lin1 trend (4), lin1 plunge (4), `fol2-code` and `lin2-code` (4-wide field), fol2 dec (4), fol2 dip (4), lin2 trend (4), lin2 plunge (4). Empty cells are written as `0`. `crates/ams-core/src/ged.rs` parses and writes it and its test reproduces a file written by the original byte for byte.
 
 ## csv exported by the original
 
@@ -53,8 +53,8 @@ This program's export (`File > Export Data File` and `Export Selection`) writes 
 
 ## Preferences file
 
-`~/.config/anisoft-linux/state.txt` on Linux (`%APPDATA%\anisoft-linux\state.txt` on Windows): `key=value` lines: `last_dir`, `dark`, `browser`, `hfrac`, `vfrac`, `logkm`, `browser_w`, `spec_w`, `win_w`, `win_h`, `maximized`. Delete it to reset the layout.
+`~/.config/ams-studio/state.txt` on Linux (`%APPDATA%\ams-studio\state.txt` on Windows): `key=value` lines: `last_dir`, `dark`, `browser`, `hfrac`, `vfrac`, `logkm`, `marker` (plot marker size, default 6; remembered), `browser_w`, `spec_w`, `win_w`, `win_h`, `maximized`. Delete it to reset the layout.
 
 ## Demo files
 
-`examples/demo_60_specimens.ams` and `examples/demo_12_specimens.ams` are **made up** by `cargo run -p anisoft-core --example make_demo -- out.ams N` (fixed seed, two sites, realistic normalised tensors). The 12-specimen file with its Group Statistics result printed by the original is used as a regression test in `stats.rs`.
+`examples/demo_60_specimens.ams` and `examples/demo_12_specimens.ams` are **made up** by `cargo run -p ams-core --example make_demo -- out.ams N` (fixed seed, two sites, realistic normalised tensors). The 12-specimen file with its Group Statistics result printed by the original is used as a regression test in `stats.rs`.

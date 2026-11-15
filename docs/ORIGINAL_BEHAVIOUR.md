@@ -91,3 +91,14 @@ Inputs per fabric: Kmean, P, T, Kmax Dec/Inc, Kmin Dec/Inc; increments 11 / 101 
 - Esc closes the tool windows. Group Statistics and Contour use all active records.
 - Data Table columns: `# Specimen Field Freq Kmean Kmax(Dec Inc) Kint(Dec Inc) Kmin(Dec Inc) L F P Pj T U Q E F ...` (the F-test columns continue off screen), coloured headers (Kmean pink, Kmax red, Kint green, Kmin lavender, shape cyan).
 - Selecting does not filter group statistics; "Disregard" does.
+
+## 11. Plot option panels (the arrow in each plot header)
+
+All four plots have an options panel that slides over the left of the plot:
+
+- **Stereonet**: K1 / K2 / K3 / MF check boxes (pink, green, lavender, lavender backdrops), *Symbol size* (default 12 in the original; this program uses 6), *Data points*, Conf. ellipses, Color-coding (checkbox, "Data Classes" combo, Auto-scale with min/max and Linear / Log, Rainbow / Shades / Grayscales), *Connect symbols* ("All Data" combo), *Mean tensor* (Conf. ellipses, K2-K3 / K1-K3 / K1-K2 planes), *Bootstrap* (Conf. ellipses), *Foliation* (Plane, Pole, Strike) and *Lineation* (need `.ged` data), Caption, Legend, Apply.
+- **Histogram**: *Data* combo + Linear / Log (base 10) combo.
+- **P vs Kmean and T vs P**: X-axis combo + Auto-scale + min/max + Linear/Log; Y-axis likewise; Symbol size; Diagonal line; Conf. intervals; Color-coding block; Connect symbols; Legend; Apply.
+- The *Data* lists (X axis, Y axis, histogram, colour-coding) offer, in this order: `Kmean, L, F, P, Pj, T, U, Q, E, K1, K2, K3, K1_Dec, K1_Inc, K2_Dec, K2_Inc, K3_Dec, K3_Inc, FTest, FTest_F12, FTest_F23, E12, E23, E13` (the middle of the list was inferred from the csv column order; only the start and the end were seen on screen). Backgrounds: Kmean pink, L..Q cyan, K1* pink, K2* green, K3* lavender, tests uncoloured.
+- E12 / E23 / E13 are confidence angles in degrees per specimen. This program uses `atan(rms(sd_i, sd_j) / (k_i - k_j))` from the stored standard deviations: within about 5 % of the original, not exact (the original uses the full tensor covariance).
+- Default scatter axes: P vs Kmean, T vs P with T fixed to -1..1; the original's default marker is a cyan diamond, size 12.

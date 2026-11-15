@@ -1,7 +1,7 @@
 //! Writes a made-up Safyr7-style .ams file (no real data) for demos and screenshots.
-//! cargo run -p anisoft-core --example make_demo -- demo.ams [n]
-use anisoft_core::ams::{build_record, Phase};
-use anisoft_core::tensor::{mat_mul, sym, Mat3};
+//! cargo run -p ams-core --example make_demo -- demo.ams [n]
+use ams_core::ams::{build_record, Phase};
+use ams_core::tensor::{mat_mul, sym, Mat3};
 
 struct Lcg(u64);
 impl Lcg {
@@ -45,7 +45,7 @@ fn main() {
         let (k1, k2, k3) = (e1 / m, e2 / m, e3 / m);
         let base: Mat3 = sym(k1, k2, k3, 0.0, 0.0, 0.0);
         let r = mat_mul(&rot_z(dec + 12.0 * rng.gauss()), &rot_x(dip + 8.0 * rng.gauss()));
-        let t = anisoft_core::tensor::rotate_tensor(&base, &r);
+        let t = ams_core::tensor::rotate_tensor(&base, &r);
         let scaled = |m: f64| -> Mat3 { let mut x = t; for row in x.iter_mut() { for v in row.iter_mut() { *v *= m; } } x };
         // like real files: the stored tensor is normalised (trace 3), Km is stored separately
         let ip = Phase { km, sd: [2e-3, 2e-3, 2e-3], tensor: t, ftest: [20.0 + 60.0 * rng.next(), 5.0, 8.0] };
