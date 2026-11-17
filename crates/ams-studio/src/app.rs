@@ -1709,9 +1709,9 @@ impl App {
         self.pane_settings = [false; 4];
     }
 
-    /// Esc with nothing open: clears what was selected in the pane that was used last (files or sub-specimens); after
-    /// the plots it only undoes a drag selection.
-    fn esc_clear_selection(&mut self) {
+    /// Esc with nothing open: clears what was selected in the pane that was used last (files or sub-specimens, or the
+    /// specimens picked in a plot, the core viewer or the map). True when there was something to clear.
+    fn esc_clear_selection(&mut self) -> bool {
         let files = !self.tree_sel.is_empty();
         let specs = self.doc.as_ref().map_or(false, |d| d.n_selected() > 0);
         let clear_files = |s: &mut App| s.tree_sel.clear();
@@ -1720,22 +1720,16 @@ impl App {
                 d.selected.iter_mut().for_each(|a| *a = false);
             }
         };
+        self.last_band = false;
         match self.last_focus {
             Focus::Files if files => clear_files(self),
             Focus::Files if specs => clear_specs(self),
             Focus::Specimens if specs => clear_specs(self),
             Focus::Specimens if files => clear_files(self),
-            Focus::Core if specs => clear_specs(self),
-            Focus::Graphs => {
-                // only the last drag selection goes
-                if self.last_band && specs {
-                    clear_specs(self);
-                }
-                self.last_band = false;
-            }
-            Focus::None if specs => clear_specs(self),
-            _ => {}
+            Focus::Core | Focus::Graphs | Focus::None if specs => clear_specs(self),
+            _ => return false,
         }
+        true
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) -> Vec<Action> {
@@ -1798,7 +1792,7 @@ impl App {
             return out;
         }
         // Esc: first everything that is open (dialogs, pop-outs, drop-down menus) closes at once; with nothing open
-        // it takes zoomed plots back, and then clears the selection of the pane that was used last
+        // it clears the selection of the pane that was used last, and then takes zoomed plots back
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             if egui::Popup::is_any_open(ctx) || self.any_dialog_open() {
                 // an open menu closes by itself when the key is left alone
@@ -1806,16 +1800,11 @@ impl App {
                 return out;
             }
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-                // the core viewer was used last: its selection goes first, the zoom is reset by the next Esc
-                let core_selection = self.last_focus == Focus::Core && self.doc.as_ref().map_or(false, |d| d.n_selected() > 0);
-                if core_selection {
-                    self.esc_clear_selection();
-                } else if self.st_view.is_zoomed() || self.views.iter().any(|v| v.is_zoomed()) || self.cv.view.is_zoomed() {
+                // in every pane the selection goes first; the next Esc takes the zoom back
+                if !self.esc_clear_selection() && (self.st_view.is_zoomed() || self.views.iter().any(|v| v.is_zoomed()) || self.cv.view.is_zoomed()) {
                     self.st_view.reset();
                     self.views.iter_mut().for_each(|v| v.reset());
                     self.cv.view.reset();
-                } else {
-                    self.esc_clear_selection();
                 }
             }
             return out;
