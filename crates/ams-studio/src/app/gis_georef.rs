@@ -1,5 +1,5 @@
 //! The two helper windows of the GIS viewer: the coordinates table (preview of the file, the user says which column
-//! is what) and the georeferencing of a map image (matching points on the image and on the OpenStreetMap basemap,
+//! is what) and the georeferencing of a map image (matching points on the image and on the basemap,
 //! like QGIS' georeferencer).
 
 use super::gis_data::{self as gd, CoordKind, CrsChoice};
@@ -106,7 +106,7 @@ pub fn crs_picker(ui: &mut Ui, id: &str, c: &mut CrsChoice) {
     });
     match c.kind {
         CoordKind::Utm => {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("UTM zone");
                 ui.add(egui::DragValue::new(&mut c.zone).range(1..=60));
                 ui.selectable_value(&mut c.north, true, "North");
@@ -115,11 +115,12 @@ pub fn crs_picker(ui: &mut Ui, id: &str, c: &mut CrsChoice) {
             });
         }
         CoordKind::Epsg => {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("EPSG code");
                 ui.add(egui::TextEdit::singleline(&mut c.epsg).desired_width(70.0).hint_text("28412"));
                 ui.label("or search by name");
-                ui.add(egui::TextEdit::singleline(&mut c.search).desired_width(210.0).hint_text("pulkovo gauss zone 12"));
+                let w = ui.available_width().clamp(120.0, 210.0);
+                ui.add(egui::TextEdit::singleline(&mut c.search).desired_width(w).hint_text("pulkovo gauss zone 12"));
             });
             if !c.search.trim().is_empty() {
                 let hits = gis::epsg_search(&c.search, 8);
@@ -199,15 +200,15 @@ impl App {
             ui.label("This map layer is gone.");
             return;
         };
-        let Gis { gr, tiles, base_on, maps, locs, placed, view, .. } = &mut self.gis;
+        let Gis { gr, tiles, base_on, maps, locs, placed, view, backdrop_until, .. } = &mut self.gis;
         ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new("Which spot on the map image is which spot on the earth?").strong().size(17.0));
-            info_icon(ui, "Click a recognisable spot on the map image (left: a road crossing, a corner tick of the map frame, a river bend), then the same spot on the OpenStreetMap basemap (right). Repeat with at least three spots spread over the whole map; two give only a rough fit (scale, rotation, shift), three or more fit a general affine transform and the error of every point is shown. The fit is drawn over the basemap so you can check it. Scroll zooms, drag moves. If a point is not on the basemap but its coordinates are printed on the map, type them instead of clicking.");
+            info_icon(ui, "Click a recognisable spot on the map image (left: a road crossing, a corner tick of the map frame, a river bend), then the same spot on the basemap (right). Repeat with at least three spots spread over the whole map; two give only a rough fit (scale, rotation, shift), three or more fit a general affine transform and the error of every point is shown. The fit is drawn over the basemap so you can check it. Scroll zooms, drag moves. If a point is not on the basemap but its coordinates are printed on the map, type them instead of clicking.");
         });
         ui.label(RichText::new("1. Click a spot on the map image (left).   2. Click the same spot on the basemap (right).   Repeat for 3 or more spots.").small());
         ui.horizontal(|ui| {
-            ui.checkbox(base_on, "OpenStreetMap basemap").on_hover_text("Downloads map tiles for the area you look at from tile.openstreetmap.org (see the (i) in the viewer); off until ticked");
+            super::gis_ui::backdrop_button(ui, base_on, tiles, backdrop_until);
             ui.label("Go to latitude");
             ui.add(egui::TextEdit::singleline(&mut gr.goto_lat).desired_width(80.0));
             ui.label("longitude");
@@ -227,7 +228,7 @@ impl App {
             }
             ui.checkbox(&mut gr.preview, "Show the fit over the basemap");
             if gr.preview {
-                ui.add(egui::Slider::new(&mut gr.alpha, 0.1..=1.0).show_value(false));
+                super::thin_slider(ui, egui::Slider::new(&mut gr.alpha, 0.1..=1.0).show_value(false));
             }
         });
         let avail = ui.available_rect_before_wrap();
@@ -334,10 +335,10 @@ impl App {
             }
             painter.text(rect.left_top() + Vec2::new(8.0, 6.0), Align2::LEFT_TOP, "Basemap", FontId::proportional(12.0), if dark { Color32::from_gray(200) } else { Color32::from_gray(70) });
             if !*base_on {
-                painter.text(c, Align2::CENTER_CENTER, "Tick OpenStreetMap basemap above, or type coordinates below", FontId::proportional(13.0), if dark { Color32::from_gray(190) } else { Color32::from_gray(90) });
+                painter.text(c, Align2::CENTER_CENTER, "Switch the backdrop on above, or type coordinates below", FontId::proportional(13.0), if dark { Color32::from_gray(190) } else { Color32::from_gray(90) });
             }
             if *base_on {
-                let t = "© OpenStreetMap contributors";
+                let t = tiles.source.attribution();
                 painter.text(rect.right_bottom() - Vec2::new(8.0, 6.0), Align2::RIGHT_BOTTOM, t, FontId::proportional(11.0), if dark { Color32::from_gray(210) } else { Color32::from_gray(40) });
             }
             let hover = resp.hover_pos();
@@ -538,16 +539,36 @@ impl App {
             crs_picker(ui, "gt-crs", &mut mapping.crs);
             col_combo(ui, "gt-x", xl, &mut mapping.x);
             col_combo(ui, "gt-y", yl, &mut mapping.y);
+            ui.horizontal(|ui| {
+                ui.label("Depth column (drill core, optional)");
+                egui::ComboBox::from_id_salt("gt-depth").selected_text(mapping.depth.map_or("(none)".to_string(), |c| hdr.get(c).cloned().unwrap_or_default())).width(220.0).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut mapping.depth, None, "(none)");
+                    for (c, h) in hdr.iter().enumerate() {
+                        ui.selectable_value(&mut mapping.depth, Some(c), h);
+                    }
+                });
+                info_icon(ui, "For drill core: the column with the depth along the hole in metres. Specimens of one hole share the same coordinates and differ in depth; the map then lists them in a box beside the collar in order of depth. Leave it at (none) when the table has no depth.");
+            });
+            ui.horizontal(|ui| {
+                ui.label("Elevation column (not drill core, optional)");
+                egui::ComboBox::from_id_salt("gt-elev").selected_text(mapping.elev.map_or("(none)".to_string(), |c| hdr.get(c).cloned().unwrap_or_default())).width(220.0).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut mapping.elev, None, "(none)");
+                    for (c, h) in hdr.iter().enumerate() {
+                        ui.selectable_value(&mut mapping.elev, Some(c), h);
+                    }
+                });
+                info_icon(ui, "For block samples and everything that is not drill core: the column with the elevation above sea level in metres. It is shown in the tooltip, and in the box of specimens that share a place when you switch those boxes on (highest first).");
+            });
             ui.separator();
             ui.label(RichText::new(format!("Preview of the file (first {} rows)", table.grid().len().min(40))).strong());
-            let (cn, cx, cy) = (mapping.name, mapping.x, mapping.y);
+            let (cn, cx, cy, cd, ce) = (mapping.name, mapping.x, mapping.y, mapping.depth, mapping.elev);
             let accent = ui.visuals().hyperlink_color;
             egui::ScrollArea::both().max_height((ui.available_height() - 190.0).max(120.0)).id_salt("gt-preview").auto_shrink([false, false]).show(ui, |ui| {
                 egui::Grid::new("gt-grid").striped(true).spacing([14.0, 2.0]).show(ui, |ui| {
                     ui.label("");
                     for c in 0..ncols.min(24) {
                         let (xt, yt) = if mapping.crs.is_degrees() { ("LON", "LAT") } else { ("EAST", "NORTH") };
-                        let tag = if Some(c) == cn { "NAME" } else if Some(c) == cx { xt } else if Some(c) == cy { yt } else { "" };
+                        let tag = if Some(c) == cn { "NAME" } else if Some(c) == cx { xt } else if Some(c) == cy { yt } else if Some(c) == cd { "DEPTH" } else if Some(c) == ce { "ELEV" } else { "" };
                         ui.label(RichText::new(tag).strong().small().color(accent));
                     }
                     ui.end_row();

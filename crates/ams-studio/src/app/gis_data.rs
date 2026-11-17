@@ -1,4 +1,4 @@
-//! The data side of the GIS viewer: OpenStreetMap tiles (fetched on worker threads, cached on disk), map images
+//! The data side of the GIS viewer: basemap tiles (satellite imagery or the OpenStreetMap street map) (fetched on worker threads, cached on disk), map images
 //! (png / jpg / GeoTIFF, with the georeference read from the file, a world file or a saved sidecar) and the
 //! coordinates table (csv / xlsx) with the columns the user assigned.
 
@@ -9,15 +9,96 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-/// OpenStreetMap asks automated clients to identify themselves; nothing about the user or the project goes in here.
+/// The tile servers ask automated clients to identify themselves; nothing about the user or the project goes in here.
 const USER_AGENT: &str = "AMS-Studio/0.2 (desktop AMS viewer)";
-/// Tiles younger than this are used from the disk cache without asking the server (the OSM policy asks for 7 days).
+/// Tiles younger than this are used from the disk cache without asking the server (the OpenStreetMap policy asks for 7
+/// days).
 const CACHE_DAYS: u64 = 14;
 const MAX_SIDE: u32 = 8192;
 
 // ------------------------------------------------------------------------------------------------ tiles
 
 pub type TileKey = (u32, u32, u32);
+
+/// Where the basemap tiles come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BaseSource {
+    /// Esri World Imagery: satellite and aerial photographs.
+    Satellite,
+    /// The OpenStreetMap street map.
+    Streets,
+}
+
+impl BaseSource {
+    pub fn url(self, z: u32, x: u32, y: u32) -> String {
+        match self {
+            BaseSource::Satellite => format!("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"),
+            BaseSource::Streets => format!("https://tile.openstreetmap.org/{z}/{x}/{y}.png"),
+        }
+    }
+
+    /// The sub-folder of the tile cache and the file extension.
+    pub fn dir_name(self) -> &'static str {
+        match self {
+            BaseSource::Satellite => "satellite",
+            BaseSource::Streets => "osm",
+        }
+    }
+
+    fn ext(self) -> &'static str {
+        match self {
+            BaseSource::Satellite => "jpg",
+            BaseSource::Streets => "png",
+        }
+    }
+
+    /// A short word for the backdrop (its menu and the settings).
+    pub fn short(self) -> &'static str {
+        match self {
+            BaseSource::Satellite => "Satellite",
+            BaseSource::Streets => "Street map",
+        }
+    }
+
+    /// What has to be shown on the map where the tiles are used.
+    pub fn attribution(self) -> &'static str {
+        match self {
+            BaseSource::Satellite => "Imagery © Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+            BaseSource::Streets => "© OpenStreetMap contributors",
+        }
+    }
+
+    pub fn server(self) -> &'static str {
+        match self {
+            BaseSource::Satellite => "server.arcgisonline.com (Esri)",
+            BaseSource::Streets => "tile.openstreetmap.org",
+        }
+    }
+
+    /// The deepest zoom level that is asked for; below that the tile of a coarser level is stretched. Satellite imagery
+    /// is not photographed at the finest levels everywhere, and the server draws "no data" tiles there.
+    pub fn max_zoom(self) -> u32 {
+        match self {
+            BaseSource::Satellite => 17,
+            BaseSource::Streets => 19,
+        }
+    }
+
+    pub fn token(self) -> &'static str {
+        match self {
+            BaseSource::Satellite => "satellite",
+            BaseSource::Streets => "streets",
+        }
+    }
+
+    pub fn from_token(t: &str) -> Option<BaseSource> {
+        match t {
+            "satellite" => Some(BaseSource::Satellite),
+            "streets" => Some(BaseSource::Streets),
+            _ => None,
+        }
+    }
+}
 
 /// Where the tile cache lives: $XDG_CACHE_HOME or ~/.cache on Linux, %LOCALAPPDATA% on Windows.
 pub fn cache_dir() -> PathBuf {
@@ -42,7 +123,7 @@ struct TileEntry {
     used: u64,
 }
 
-type TileMsg = (TileKey, Result<ColorImage, String>);
+type TileMsg = (BaseSource, TileKey, Result<ColorImage, String>);
 
 pub struct Tiles {
     entries: HashMap<TileKey, TileEntry>,
@@ -54,24 +135,26 @@ pub struct Tiles {
     /// The last network problem, shown in the window.
     pub error: Option<String>,
     pub fetched: usize,
+    /// Where the tiles come from; changing it forgets the tiles of the other source.
+    pub source: BaseSource,
 }
 
 impl Default for Tiles {
     fn default() -> Self {
         let (tx, rx) = channel();
-        Tiles { entries: HashMap::new(), queue: VecDeque::new(), inflight: 0, tx, rx, frame: 0, error: None, fetched: 0 }
+        Tiles { entries: HashMap::new(), queue: VecDeque::new(), inflight: 0, tx, rx, frame: 0, error: None, fetched: 0, source: BaseSource::Satellite }
     }
 }
 
-fn fetch_tile(key: TileKey) -> Result<ColorImage, String> {
+fn fetch_tile(source: BaseSource, key: TileKey) -> Result<ColorImage, String> {
     let (z, x, y) = key;
-    let path = cache_dir().join(z.to_string()).join(x.to_string()).join(format!("{y}.png"));
+    let path = cache_dir().join(source.dir_name()).join(z.to_string()).join(x.to_string()).join(format!("{y}.{}", source.ext()));
     let fresh = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age < Duration::from_secs(CACHE_DAYS * 86_400));
     let bytes = match (fresh, std::fs::read(&path)) {
         (true, Ok(b)) => b,
         _ => {
             let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(12))).user_agent(USER_AGENT).build().into();
-            let got = agent.get(&format!("https://tile.openstreetmap.org/{z}/{x}/{y}.png")).call().map_err(|e| e.to_string()).and_then(|mut r| r.body_mut().read_to_vec().map_err(|e| e.to_string()));
+            let got = agent.get(&source.url(z, x, y)).call().map_err(|e| e.to_string()).and_then(|mut r| r.body_mut().read_to_vec().map_err(|e| e.to_string()));
             match got {
                 Ok(b) => {
                     if let Some(d) = path.parent() {
@@ -99,12 +182,16 @@ impl Tiles {
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
         self.frame += 1;
         self.queue.clear();
-        while let Ok((key, res)) = self.rx.try_recv() {
+        while let Ok((source, key, res)) = self.rx.try_recv() {
             self.inflight = self.inflight.saturating_sub(1);
             let used = self.frame;
+            // a tile of the source that was switched away from meanwhile is of no use
+            if source != self.source {
+                continue;
+            }
             match res {
                 Ok(img) => {
-                    let t = ctx.load_texture(format!("osm-{}-{}-{}", key.0, key.1, key.2), img, TextureOptions::LINEAR);
+                    let t = ctx.load_texture(format!("tile-{}-{}-{}-{}", source.dir_name(), key.0, key.1, key.2), img, TextureOptions::LINEAR);
                     self.entries.insert(key, TileEntry { state: TileState::Ready(t), used });
                     self.error = None;
                     self.fetched += 1;
@@ -119,6 +206,16 @@ impl Tiles {
         if self.entries.len() > 320 {
             let frame = self.frame;
             self.entries.retain(|_, e| frame.saturating_sub(e.used) < 3 || matches!(e.state, TileState::Loading));
+        }
+    }
+
+    /// Switches to the tiles of another source: what was loaded of the old one is forgotten.
+    pub fn set_source(&mut self, source: BaseSource) {
+        if source != self.source {
+            self.source = source;
+            self.entries.clear();
+            self.queue.clear();
+            self.error = None;
         }
     }
 
@@ -165,10 +262,10 @@ impl Tiles {
             }
             self.entries.insert(key, TileEntry { state: TileState::Loading, used: self.frame });
             self.inflight += 1;
-            let (tx, ctx2) = (self.tx.clone(), ctx.clone());
+            let (tx, ctx2, source) = (self.tx.clone(), ctx.clone(), self.source);
             std::thread::spawn(move || {
-                let r = fetch_tile(key);
-                let _ = tx.send((key, r));
+                let r = fetch_tile(source, key);
+                let _ = tx.send((source, key, r));
                 ctx2.request_repaint();
             });
         }
@@ -273,6 +370,51 @@ pub fn parse_sidecar(text: &str, size: (u32, u32)) -> Result<(Georef, Vec<Contro
 }
 
 /// The georeference of a GeoTIFF: transform, and the coordinate system when it can be told.
+/// The affine transform through three or more tie points `(column, row, 0, x, y, 0)`, least squares; `None` when the
+/// points do not span a plane (all on a line) or the numbers are not finite.
+fn fit_tiepoints(t: &[f64]) -> Option<Affine> {
+    let pts: Vec<[f64; 4]> = t.chunks_exact(6).map(|c| [c[0], c[1], c[3], c[4]]).collect();
+    if pts.len() < 3 || pts.iter().flatten().any(|v| !v.is_finite()) {
+        return None;
+    }
+    // normal equations of  v = p*i + q*j + r  for v = x and v = y
+    let n = pts.len() as f64;
+    let (mut si, mut sj, mut sii, mut sjj, mut sij) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for p in &pts {
+        si += p[0];
+        sj += p[1];
+        sii += p[0] * p[0];
+        sjj += p[1] * p[1];
+        sij += p[0] * p[1];
+    }
+    let m = [[sii, sij, si], [sij, sjj, sj], [si, sj, n]];
+    let det = |m: [[f64; 3]; 3]| m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let d = det(m);
+    if d.abs() < 1e-9 * (sii.abs() + sjj.abs() + 1.0).powi(3) {
+        return None;
+    }
+    let solve = |k: usize| -> [f64; 3] {
+        let (mut ri, mut rj, mut r1) = (0.0, 0.0, 0.0);
+        for p in &pts {
+            ri += p[0] * p[k];
+            rj += p[1] * p[k];
+            r1 += p[k];
+        }
+        let rhs = [ri, rj, r1];
+        let mut out = [0.0; 3];
+        for (c, o) in out.iter_mut().enumerate() {
+            let mut mm = m;
+            for r in 0..3 {
+                mm[r][c] = rhs[r];
+            }
+            *o = det(mm) / d;
+        }
+        out
+    };
+    let (x, y) = (solve(2), solve(3));
+    Some(Affine { a: x[0], b: x[1], c: x[2], d: y[0], e: y[1], f: y[2] })
+}
+
 fn geotiff(path: &Path) -> Result<Option<(Affine, Result<Crs, String>)>, String> {
     use tiff::decoder::Decoder;
     use tiff::tags::Tag;
@@ -284,8 +426,11 @@ fn geotiff(path: &Path) -> Result<Option<(Affine, Result<Crs, String>)>, String>
     let keys = d.get_tag_u16_vec(Tag::GeoKeyDirectoryTag).ok();
     let mut affine = if let Some(t) = tr.filter(|t| t.len() >= 16) {
         Affine { a: t[0], b: t[1], c: t[3], d: t[4], e: t[5], f: t[7] }
-    } else if let (Some(s), Some(t)) = (scale.filter(|s| s.len() >= 2), tie.filter(|t| t.len() >= 6)) {
+    } else if let (Some(s), Some(t)) = (scale.clone().filter(|s| s.len() >= 2), tie.clone().filter(|t| t.len() >= 6)) {
         Affine { a: s[0], b: 0.0, c: t[3] - t[0] * s[0], d: 0.0, e: -s[1], f: t[4] + t[1] * s[1] }
+    } else if let Some(a) = tie.as_deref().filter(|t| scale.is_none() && t.len() >= 18).and_then(fit_tiepoints) {
+        // no pixel scale but three or more tie points (what GDAL calls ground control points): they define the transform
+        a
     } else {
         return Ok(None);
     };
@@ -345,21 +490,123 @@ fn world_file(path: &Path) -> Option<(Affine, Option<Crs>)> {
     None
 }
 
+/// The colour ramp of a grid (low to high): dark blue, teal, green, yellow.
+const GRID_RAMP: [(f32, [u8; 3]); 5] = [(0.0, [68, 1, 84]), (0.25, [59, 82, 139]), (0.5, [33, 145, 140]), (0.75, [94, 201, 98]), (1.0, [253, 231, 37])];
+
+fn ramp_at(t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
+    for w in GRID_RAMP.windows(2) {
+        if t <= w[1].0 {
+            let k = (t - w[0].0) / (w[1].0 - w[0].0);
+            return [0, 1, 2].map(|c| (f32::from(w[0].1[c]) + (f32::from(w[1].1[c]) - f32::from(w[0].1[c])) * k).round() as u8);
+        }
+    }
+    GRID_RAMP[4].1
+}
+
+/// A TIFF that the image decoder does not take, typically a grid of numbers (floating point, 32 bit; geophysics,
+/// geochemistry): the first band, thinned to at most `MAX_SIDE` pixels, coloured with a ramp stretched between the 2nd
+/// and the 98th percentile; the no-data value (GDAL tag) and anything not finite are transparent. A plain 8 or 16 bit
+/// RGB(A) file is shown as the colours it holds. Returns the picture and the size of the file's image.
+fn grid_tiff(path: &Path) -> Result<(ColorImage, (u32, u32)), String> {
+    use tiff::decoder::{Decoder, DecodingResult as R};
+    use tiff::tags::Tag;
+    use tiff::ColorType as C;
+    let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut d = Decoder::new(std::io::BufReader::new(f)).map_err(|e| e.to_string())?;
+    let (w, h) = d.dimensions().map_err(|e| e.to_string())?;
+    let spp = match d.colortype().map_err(|e| e.to_string())? {
+        C::Gray(_) => 1usize,
+        C::GrayA(_) => 2,
+        C::RGB(_) => 3,
+        C::RGBA(_) | C::CMYK(_) => 4,
+        C::Multiband { num_samples, .. } => num_samples as usize,
+        _ => 1,
+    };
+    let nodata = d.get_tag_ascii_string(Tag::Unknown(42113)).ok().and_then(|s| s.trim().trim_end_matches('\0').parse::<f64>().ok());
+    let data = d.read_image().map_err(|e| e.to_string())?;
+    let val = |i: usize| -> Option<f64> {
+        Some(match &data {
+            R::U8(v) => f64::from(*v.get(i)?),
+            R::U16(v) => f64::from(*v.get(i)?),
+            R::U32(v) => f64::from(*v.get(i)?),
+            R::U64(v) => *v.get(i)? as f64,
+            R::I8(v) => f64::from(*v.get(i)?),
+            R::I16(v) => f64::from(*v.get(i)?),
+            R::I32(v) => f64::from(*v.get(i)?),
+            R::I64(v) => *v.get(i)? as f64,
+            R::F32(v) => f64::from(*v.get(i)?),
+            R::F64(v) => *v.get(i)?,
+            _ => return None,
+        })
+    };
+    if val(0).is_none() {
+        return Err("this kind of TIFF is not supported".into());
+    }
+    let step = (w.max(h) as usize).div_ceil(MAX_SIDE as usize).max(1);
+    let (tw, th) = ((w as usize).div_ceil(step), (h as usize).div_ceil(step));
+    let at = |x: usize, y: usize| (y * step * w as usize + x * step) * spp;
+    let colours = matches!(data, R::U8(_) | R::U16(_)) && spp >= 3;
+    let mut pixels = vec![egui::Color32::TRANSPARENT; tw * th];
+    if colours {
+        let div = if matches!(data, R::U16(_)) { 256.0 } else { 1.0 };
+        for y in 0..th {
+            for x in 0..tw {
+                let i = at(x, y);
+                let to8 = |k: usize| (val(i + k).unwrap_or(0.0) / div).clamp(0.0, 255.0) as u8;
+                let a = if spp >= 4 { to8(3) } else { 255 };
+                pixels[y * tw + x] = egui::Color32::from_rgba_unmultiplied(to8(0), to8(1), to8(2), a);
+            }
+        }
+    } else {
+        let usable = |v: f64| v.is_finite() && v.abs() < 1e30 && nodata.map_or(true, |n| (v - n).abs() > n.abs() * 1e-6 + 1e-30);
+        let mut grid: Vec<Option<f32>> = Vec::with_capacity(tw * th);
+        for y in 0..th {
+            for x in 0..tw {
+                grid.push(val(at(x, y)).filter(|v| usable(*v)).map(|v| v as f32));
+            }
+        }
+        let mut sample: Vec<f32> = grid.iter().flatten().copied().step_by((tw * th / 400_000).max(1)).collect();
+        if sample.is_empty() {
+            return Err("the grid has no values".into());
+        }
+        sample.sort_by(f32::total_cmp);
+        let (lo, hi) = (sample[(sample.len() as f32 * 0.02) as usize], sample[((sample.len() as f32 * 0.98) as usize).min(sample.len() - 1)]);
+        let span = if hi > lo { hi - lo } else { 1.0 };
+        for (px, v) in pixels.iter_mut().zip(&grid) {
+            if let Some(v) = v {
+                let [r, g, b] = ramp_at((v - lo) / span);
+                *px = egui::Color32::from_rgb(r, g, b);
+            }
+        }
+    }
+    Ok((ColorImage { size: [tw, th], pixels, source_size: egui::Vec2::new(tw as f32, th as f32) }, (w, h)))
+}
+
 /// Reads a map image and whatever georeference comes with it.
 pub fn load_map(path: &Path) -> Result<LoadedMap, String> {
-    let mut reader = image::ImageReader::open(path).map_err(|e| format!("{}: {e}", path.display()))?.with_guessed_format().map_err(|e| e.to_string())?;
-    reader.no_limits();
-    let img = reader.decode().map_err(|e| format!("Could not read the image: {e}"))?;
-    let (w, h) = (img.width(), img.height());
-    let rgba = img.to_rgba8();
-    drop(img);
-    let rgba = if w.max(h) > MAX_SIDE {
-        let k = f64::from(MAX_SIDE) / f64::from(w.max(h));
-        image::imageops::resize(&rgba, ((f64::from(w) * k).round() as u32).max(1), ((f64::from(h) * k).round() as u32).max(1), image::imageops::FilterType::Triangle)
-    } else {
-        rgba
+    let is_tif = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("tif") || e.eq_ignore_ascii_case("tiff"));
+    let normal = (|| -> Result<(ColorImage, (u32, u32)), String> {
+        let mut reader = image::ImageReader::open(path).map_err(|e| format!("{}: {e}", path.display()))?.with_guessed_format().map_err(|e| e.to_string())?;
+        reader.no_limits();
+        let img = reader.decode().map_err(|e| format!("Could not read the image: {e}"))?;
+        let (w, h) = (img.width(), img.height());
+        let rgba = img.to_rgba8();
+        drop(img);
+        let rgba = if w.max(h) > MAX_SIDE {
+            let k = f64::from(MAX_SIDE) / f64::from(w.max(h));
+            image::imageops::resize(&rgba, ((f64::from(w) * k).round() as u32).max(1), ((f64::from(h) * k).round() as u32).max(1), image::imageops::FilterType::Triangle)
+        } else {
+            rgba
+        };
+        Ok((ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()), (w, h)))
+    })();
+    let (image, (w, h)) = match normal {
+        Ok(x) => x,
+        // a grid of numbers: shown with a colour ramp
+        Err(e) if is_tif => grid_tiff(path).map_err(|g| format!("{e} (as a grid of numbers: {g})"))?,
+        Err(e) => return Err(e),
     };
-    let image = ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw());
     let mut m = LoadedMap { path: path.to_path_buf(), orig: (w, h), image, georef: None, pending: None, note: String::new(), points: vec![] };
 
     // 1. a georeference saved by the GIS viewer
@@ -557,13 +804,17 @@ pub struct Mapping {
     pub x: Option<usize>,
     /// Latitude or northing.
     pub y: Option<usize>,
+    /// Drill core: the column with the depth along the hole (metres), when the table has one.
+    pub depth: Option<usize>,
+    /// Not drill core: the column with the elevation above sea level (metres), when the table has one.
+    pub elev: Option<usize>,
     pub crs: CrsChoice,
     pub mode: MatchMode,
 }
 
 impl Default for Mapping {
     fn default() -> Self {
-        Mapping { header_row: 1, name: None, x: None, y: None, crs: CrsChoice::default(), mode: MatchMode::StartsWithKey }
+        Mapping { header_row: 1, name: None, x: None, y: None, depth: None, elev: None, crs: CrsChoice::default(), mode: MatchMode::StartsWithKey }
     }
 }
 
@@ -586,7 +837,7 @@ impl Mapping {
             MatchMode::StartsWithKey => "starts",
             MatchMode::RowOrder => "order",
         };
-        serde_json::json!({"header_row": self.header_row, "name": self.name, "x": self.x, "y": self.y, "kind": kind, "zone": self.crs.zone, "north": self.crs.north, "epsg": self.crs.epsg, "proj": self.crs.proj, "mode": mode}).to_string()
+        serde_json::json!({"header_row": self.header_row, "name": self.name, "x": self.x, "y": self.y, "depth": self.depth, "elev": self.elev, "kind": kind, "zone": self.crs.zone, "north": self.crs.north, "epsg": self.crs.epsg, "proj": self.crs.proj, "mode": mode}).to_string()
     }
 
     pub fn from_line(text: &str) -> Option<Mapping> {
@@ -613,7 +864,7 @@ impl Mapping {
             search: String::new(),
             proj: v.get("proj").and_then(|e| e.as_str()).unwrap_or("").to_string(),
         };
-        Some(Mapping { header_row: idx("header_row").unwrap_or(1), name: idx("name"), x: idx("x"), y: idx("y"), crs, mode })
+        Some(Mapping { header_row: idx("header_row").unwrap_or(1), name: idx("name"), x: idx("x"), y: idx("y"), depth: idx("depth"), elev: idx("elev"), crs, mode })
     }
 }
 
@@ -670,8 +921,12 @@ pub fn guess_mapping(grid: &[Vec<String>]) -> Mapping {
         m.y = Some(n);
         m.crs.kind = CoordKind::Utm;
     }
+    // a column titled depth (drill core): its own column, never the name
+    m.depth = find(&|c| c.starts_with("depth") || c.contains("depth (") || c.ends_with(" depth") || c == "from" || c.starts_with("from (") || c.starts_with("from_") || c.starts_with("from m"));
+    // a column titled elevation / altitude / height (anything that is not drill core)
+    m.elev = find(&|c| c.starts_with("elev") || c.starts_with("altitude") || c.starts_with("height") || c == "z" || c == "masl" || c == "rl" || c.starts_with("z (") || c.starts_with("alt ("));
     if m.name.is_none() {
-        m.name = (0..h.len()).find(|&i| Some(i) != m.x && Some(i) != m.y);
+        m.name = (0..h.len()).find(|&i| Some(i) != m.x && Some(i) != m.y && Some(i) != m.depth && Some(i) != m.elev);
     }
     if m.name.is_none() {
         // no name column (just coordinates): the rows are numbered and matched by their order
@@ -709,6 +964,10 @@ pub struct Loc {
     pub lon: f64,
     pub lat: f64,
     pub merc: (f64, f64),
+    /// Drill core: the depth along the hole from the depth column, when there is one and the cell is a number.
+    pub depth: Option<f64>,
+    /// Not drill core: the elevation above sea level from the elevation column.
+    pub elev: Option<f64>,
 }
 
 /// The places the table gives with these columns, and what is wrong with the rows that cannot be used.
@@ -754,7 +1013,9 @@ pub fn build_locs(grid: &[Vec<String>], m: &Mapping) -> (Vec<Loc>, Vec<String>) 
             push_bad(&if m.crs.kind == CoordKind::LonLat && x.abs() <= 90.0 && y.abs() > 90.0 { "latitude and longitude look swapped".to_string() } else { format!("coordinates outside the range of {}", crs.label()) });
             continue;
         }
-        locs.push(Loc { key, x, y, xs: cell(cx).trim().to_string(), ys: cell(cy).trim().to_string(), lon, lat, merc: gis::merc_from_lonlat(lon, lat) });
+        let depth = m.depth.and_then(|c| cell(c).trim().replace(',', ".").parse::<f64>().ok()).filter(|v| super::gis_loc::valid_depth(*v));
+        let elev = m.elev.and_then(|c| cell(c).trim().replace(',', ".").parse::<f64>().ok()).filter(|v| super::gis_loc::valid_elevation(*v));
+        locs.push(Loc { key, x, y, xs: cell(cx).trim().to_string(), ys: cell(cy).trim().to_string(), lon, lat, merc: gis::merc_from_lonlat(lon, lat), depth, elev });
     }
     (locs, bad)
 }
@@ -779,6 +1040,24 @@ mod tests {
         let g = grid(&[&["B1", "56.3", "-2.8"]]);
         let m = guess_mapping(&g);
         assert_eq!((m.header_row, m.name, m.x, m.y), (0, Some(0), Some(1), Some(2)));
+    }
+
+    #[test]
+    fn a_depth_column_is_found_and_read_for_drill_core() {
+        let g = grid(&[&["Hole", "Depth (m)", "Easting", "Northing"], &["DH1", "12,4", "500000", "5600000"], &["DH1", "88.75", "500000", "5600000"], &["DH2", "x", "500100", "5600100"], &["DH2", "-3", "500100", "5600100"]]);
+        let m = guess_mapping(&g);
+        assert_eq!((m.name, m.depth, m.x, m.y), (Some(0), Some(1), Some(2), Some(3)));
+        let (locs, bad) = build_locs(&g, &m);
+        assert!(bad.is_empty(), "{bad:?}");
+        // comma and point decimals; text and negative depths are no depth (the place is still read)
+        assert_eq!(locs.iter().map(|l| l.depth).collect::<Vec<_>>(), vec![Some(12.4), Some(88.75), None, None]);
+        // the choice is kept in the preferences line
+        assert_eq!(Mapping::from_line(&m.to_line()).map(|b| b.depth), Some(Some(1)));
+        // no depth column: nothing changes
+        let g2 = grid(&[&["Block", "Easting", "Northing"], &["B1", "500000", "5600000"]]);
+        let m2 = guess_mapping(&g2);
+        assert_eq!(m2.depth, None);
+        assert_eq!(build_locs(&g2, &m2).0[0].depth, None);
     }
 
     #[test]
@@ -850,9 +1129,9 @@ mod tests {
 
     #[test]
     fn the_column_assignment_survives_the_preferences_line() {
-        let m = Mapping { header_row: 2, name: None, x: Some(3), y: Some(4), crs: CrsChoice { kind: CoordKind::Utm, zone: 43, north: false, epsg: "28412".into(), search: "ignored".into(), proj: String::new() }, mode: MatchMode::RowOrder };
+        let m = Mapping { header_row: 2, name: None, x: Some(3), y: Some(4), depth: Some(5), elev: Some(6), crs: CrsChoice { kind: CoordKind::Utm, zone: 43, north: false, epsg: "28412".into(), search: "ignored".into(), proj: String::new() }, mode: MatchMode::RowOrder };
         let back = Mapping::from_line(&m.to_line()).unwrap();
-        assert_eq!((back.header_row, back.name, back.x, back.y, back.mode), (2, None, Some(3), Some(4), MatchMode::RowOrder));
+        assert_eq!((back.header_row, back.name, back.x, back.y, back.depth, back.elev, back.mode), (2, None, Some(3), Some(4), Some(5), Some(6), MatchMode::RowOrder));
         assert_eq!((back.crs.kind, back.crs.zone, back.crs.north, back.crs.epsg.as_str()), (CoordKind::Utm, 43, false, "28412"));
         assert!(back.crs.search.is_empty());
         assert!(Mapping::from_line("not json").is_none());
@@ -866,6 +1145,24 @@ mod tests {
         assert!(!line.contains('\n') && !line.is_empty());
         let (g2, pts) = parse_sidecar(&line, (800, 600)).unwrap();
         assert_eq!((g2.affine, g2.crs, pts.len()), (g.affine, g.crs, 1));
+    }
+
+    #[test]
+    fn the_tile_sources_have_their_own_addresses_caches_and_attribution() {
+        assert_eq!(BaseSource::Streets.url(3, 4, 5), "https://tile.openstreetmap.org/3/4/5.png");
+        // Esri's tile addresses run zoom / row / column
+        assert_eq!(BaseSource::Satellite.url(3, 4, 5), "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/3/5/4");
+        assert_ne!(BaseSource::Satellite.dir_name(), BaseSource::Streets.dir_name());
+        assert!(BaseSource::Satellite.attribution().contains("Esri") && BaseSource::Streets.attribution().contains("OpenStreetMap"));
+        for s in [BaseSource::Satellite, BaseSource::Streets] {
+            assert_eq!(BaseSource::from_token(s.token()), Some(s));
+            assert!(s.max_zoom() <= 19);
+        }
+        assert_eq!(BaseSource::from_token("nonsense"), None);
+        let mut t = Tiles::default();
+        assert_eq!(t.source, BaseSource::Satellite);
+        t.set_source(BaseSource::Streets);
+        assert_eq!(t.source, BaseSource::Streets);
     }
 
     #[test]
@@ -936,5 +1233,47 @@ mod tests {
         assert_eq!(g.affine.apply(0.0, 0.0), (600000.0, 5700000.0));
         assert_eq!(g.affine.apply(4.0, 3.0), (600120.0, 5699910.0));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_float_grid_geotiff_is_shown_with_a_ramp_and_its_no_data_is_transparent() {
+        use tiff::encoder::{colortype, TiffEncoder};
+        use tiff::tags::Tag;
+        let dir = std::env::temp_dir().join(format!("gis-grid-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("grid.tif");
+        {
+            let f = std::fs::File::create(&p).unwrap();
+            let mut enc = TiffEncoder::new(f).unwrap();
+            let mut img = enc.new_image::<colortype::Gray32Float>(10, 10).unwrap();
+            img.encoder().write_tag(Tag::ModelPixelScaleTag, &[25.0f64, 25.0, 0.0][..]).unwrap();
+            img.encoder().write_tag(Tag::ModelTiepointTag, &[0.0f64, 0.0, 0.0, 600000.0, 5700000.0, 0.0][..]).unwrap();
+            img.encoder().write_tag(Tag::GeoKeyDirectoryTag, &[1u16, 1, 0, 2, 1024, 0, 1, 1, 3072, 0, 1, 32642][..]).unwrap();
+            img.encoder().write_tag(Tag::Unknown(42113), "-9999").unwrap();
+            let mut v: Vec<f32> = (0..100).map(|k| k as f32).collect();
+            v[0] = -9999.0;
+            img.write_data(&v).unwrap();
+        }
+        let m = load_map(&p).unwrap();
+        assert_eq!((m.orig, m.image.size), ((10, 10), [10, 10]));
+        // the no-data pixel is clear, the lowest value is the dark end of the ramp, the highest the light end
+        assert_eq!(m.image.pixels[0], egui::Color32::TRANSPARENT);
+        let (lo, hi) = (m.image.pixels[1], m.image.pixels[99]);
+        assert!(lo.b() > lo.g() && hi.r() > 200 && hi.g() > 200, "{lo:?} {hi:?}");
+        assert_eq!(m.georef.expect(&m.note).crs, Crs::Utm { zone: 42, north: true });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn three_tie_points_without_a_pixel_scale_give_the_transform() {
+        // pixel (0,0) -> (600000, 5700000); 25 m pixels, rows going south
+        let t = [0.0, 0.0, 0.0, 600000.0, 5700000.0, 0.0, 100.0, 0.0, 0.0, 602500.0, 5700000.0, 0.0, 0.0, 200.0, 0.0, 600000.0, 5695000.0, 0.0, 100.0, 200.0, 0.0, 602500.0, 5695000.0, 0.0];
+        let a = fit_tiepoints(&t).unwrap();
+        assert!((a.a - 25.0).abs() < 1e-9 && (a.e + 25.0).abs() < 1e-9 && a.b.abs() < 1e-9 && a.d.abs() < 1e-9);
+        assert!((a.c - 600000.0).abs() < 1e-6 && (a.f - 5700000.0).abs() < 1e-6);
+        // three points that lie on a line, or fewer than three, are no transform
+        assert!(fit_tiepoints(&t[..12]).is_none());
+        let line = [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 2.0, 2.0, 0.0, 2.0, 2.0, 0.0, 3.0, 3.0, 0.0];
+        assert!(fit_tiepoints(&line).is_none());
     }
 }

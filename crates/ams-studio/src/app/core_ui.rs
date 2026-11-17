@@ -2,7 +2,10 @@
 //! construction applied to the top of the core (see `ams_core::core`). Each question has its own line, the prompt
 //! above the choice; the explanations are in the (i) pop-ups.
 
+use super::gis_loc::{self, Hole};
+use super::gis_manual_ui::{collar_fields, fill_from_saved, resolve_collar, ManualState};
 use super::{info_icon, tools_ui, App, W_CORE};
+use ams_core::depjson;
 use ams_core::core::{offset_for, slice_of, top_surface_lhr, Arrow, CoreSetup, Face};
 use egui::{Pos2, Sense, Shape, Stroke};
 use ams_core::georot::GeoRot;
@@ -19,20 +22,37 @@ pub(super) struct CoreState {
     /// The intervals are slice numbers read from the names (A12 = slice 12) instead of rows.
     pub by_slice: bool,
     pub intervals: Vec<(u32, u32, f64)>,
+    /// Optional: where the specimen was taken (the collar of the hole and the depth along it), saved for the GIS viewer
+    /// when the rotation is applied. `collar` holds the boxes of the entry.
+    pub collar_on: bool,
+    pub collar: ManualState,
+    pub err: String,
 }
 
 impl Default for CoreState {
     fn default() -> Self {
-        CoreState { setup: CoreSetup { dip_dir: 316.135, plunge: 67.0, ..Default::default() }, first: 1, last: 1, msg: String::new(), intervals_on: false, by_slice: true, intervals: vec![] }
+        CoreState { setup: CoreSetup { dip_dir: 316.135, plunge: 67.0, ..Default::default() }, first: 1, last: 1, msg: String::new(), intervals_on: false, by_slice: true, intervals: vec![], collar_on: false, collar: ManualState::default(), err: String::new() }
     }
 }
 
 impl App {
     pub(super) fn open_core(&mut self) {
         let Some(d) = &self.doc else { return };
+        let (n, path) = (d.specs.len().max(1), d.path.clone());
         self.core.first = 1;
-        self.core.last = d.specs.len().max(1);
+        self.core.last = n;
         self.core.msg.clear();
+        self.core.err.clear();
+        // a position saved for this specimen is shown (and the tick is set); otherwise the entry starts empty and unticked
+        let zone = self.zone_hint();
+        let mut collar = ManualState { zone, north: true, ..Default::default() };
+        let saved = gis_loc::read(&depjson::for_source(&path));
+        if let Some(loc) = &saved {
+            fill_from_saved(&mut collar, loc);
+            collar.depth = loc.depth.map_or(String::new(), |d| format!("{d}"));
+        }
+        self.core.collar_on = saved.is_some();
+        self.core.collar = collar;
         self.open_win(W_CORE);
     }
 
@@ -56,6 +76,7 @@ impl App {
         let scr = ctx.content_rect();
         let size = Vec2::new((scr.width() - 40.0).clamp(560.0, 760.0), (scr.height() - 60.0).clamp(520.0, 760.0));
         self.base_window(ctx, "Drill Core to Geo", W_CORE, size).open(&mut open).resizable(true).show(ctx, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             tools_ui::pop_style(ui, 1.25);
             ui.spacing_mut().item_spacing = Vec2::new(12.0, 12.0);
             ui.spacing_mut().button_padding = Vec2::new(12.0, 6.0);
@@ -89,6 +110,19 @@ impl App {
                 ui.label(RichText::new(format!("Top of the core as a left-hand-rule surface: strike {strike:.1}\u{b0}, dip {dip:.1}\u{b0}")).weak());
                 info_icon(ui, "The end of the core is perpendicular to the hole, so its strike (left-hand rule: index finger along the strike, thumb towards the dip direction) is the dip direction + 90 and its dip is 90 - plunge. These are the values the Owens construction uses as the field strike and dip.");
             });
+
+            // 3b. where the hole is (optional): saved for the GIS viewer with the rotation
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut st.collar_on, "Also enter where this specimen was taken (for the GIS viewer)");
+                info_icon(ui, "Optional. The two coordinates of the collar of the hole and, if you like, the depth of this specimen along the hole are saved with the specimen (in its _geo dependency file) when you press Rotate, together with the dip direction and plunge entered above. The GIS viewer then has them ready: the specimen is on the map, in the box of its collar in order of depth, with the thin line for the direction of the hole, and the Drill core tick of the coordinate entry is already set. Leave it unticked or empty to do it later in the GIS viewer.");
+            });
+            if st.collar_on {
+                egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new("Coordinates of the collar of the hole").strong());
+                    collar_fields(ui, &mut st.collar);
+                });
+            }
 
             // 4. the orientation line
             ui.label(RichText::new("BOH offset: where is the BOH mark relative to the blue arrow?").strong());
@@ -158,17 +192,43 @@ impl App {
                 undo = ui.add_enabled(can_undo, egui::Button::new(RichText::new("Undo last rotation").small()).small()).clicked();
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| cancel = ui.button("Cancel").clicked());
             });
+            if !st.err.is_empty() {
+                ui.label(RichText::new(&st.err).small().color(Color32::from_rgb(200, 80, 40)));
+            }
             if !st.msg.is_empty() {
                 ui.label(RichText::new(&st.msg).small().color(Color32::from_rgb(70, 170, 90)));
             }
+            });
         });
         if rotate {
+            // the optional position is checked first: a mistake in it stops the rotation, so nothing is half done
+            st.err.clear();
+            let collar = if st.collar_on { resolve_collar(&st.collar, Hole::new(st.setup.dip_dir, st.setup.plunge)) } else { Ok(None) };
+            if let Err(e) = &collar {
+                st.err = e.clone();
+            }
+            let collar = collar.unwrap_or(None);
+            if st.err.is_empty() {
             // every record gets the offset of its interval (the single offset when intervals are not used)
             let names: Vec<String> = self.doc.as_ref().map(|d| d.specs.iter().map(|s| s.name.clone()).collect()).unwrap_or_default();
             let jobs = core_jobs(&st.setup, st.intervals_on.then_some((st.by_slice, st.intervals.as_slice())), &names, st.first - 1..st.last);
             match self.rotate_doc(&jobs) {
-                Ok(()) => st.msg = format!("The reorientation of {} record(s) is held; the geographic view (F6) shows it and the specimen coordinates stay as measured. Nothing is saved yet: File > Save as .ams writes the _geo copy and, next to it, the dependency file <specimen folder>_geo_dependancy.json that holds the drill core reorientation.", jobs.len()),
+                Ok(()) => {
+                    st.msg = format!("The reorientation of {} record(s) is held; the geographic view (F6) shows it and the specimen coordinates stay as measured. Nothing is saved yet: File > Save as .ams writes the _geo copy and, next to it, the dependency file <specimen folder>_geo_dependancy.json that holds the drill core reorientation.", jobs.len());
+                    if let (Some(loc), Some(path)) = (collar, self.doc.as_ref().map(|d| d.path.clone())) {
+                        match gis_loc::write(&depjson::for_source(&path), Some(&loc)) {
+                            Ok(()) => {
+                                self.gis.loc.ver += 1;
+                                self.gis.loc.stale = true;
+                                self.gis.fit_pending = true;
+                                st.msg += " The collar position is saved for the GIS viewer.";
+                            }
+                            Err(e) => st.err = format!("Could not save the position: {e}"),
+                        }
+                    }
+                }
                 Err(e) => self.info = Some(e),
+            }
             }
         }
         if undo {

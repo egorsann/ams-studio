@@ -32,9 +32,9 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 /// What the file says about itself (the `note` key).
-const NOTE: &str = "AMS Studio dependency file of this _geo folder; keep it with the _geo files. files: the drill core reorientation (dip direction and plunge of the hole, the offset of the orientation line from the arrow mark, the face that holds the arrow and its direction) of every record of the .ams files here, which stay exact copies of their sources; the geographic view is computed from it. core_viewer: the folder with the cube photos of this specimen (photo_folder is absolute, photo_folder_relative_to_this_file still works when the data tree is synced elsewhere). stereonet: planes drawn as great circles in the geographic stereonet (dip direction and dip in degrees, a comment, a colour): planes_specimen are for this specimen only, planes_global are shown for every specimen and copied into the file of each specimen of the file tree. location: where this specimen was taken (x, y and crs as typed or taken from a datasheet, lon and lat computed from them), used by the GIS viewer.";
+const NOTE: &str = "AMS Studio dependency file of this _geo folder; keep it with the _geo files. files: the drill core reorientation (dip direction and plunge of the hole, the offset of the orientation line from the arrow mark, the face that holds the arrow and its direction) of every record of the .ams files here, which stay exact copies of their sources; the geographic view is computed from it. core_viewer: the folder with the cube photos of this specimen (photo_folder is absolute, photo_folder_relative_to_this_file still works when the data tree is synced elsewhere). stereonet: planes drawn as great circles in the geographic stereonet (dip direction and dip in degrees, a comment, a colour): planes_specimen are for this specimen only, planes_global are shown for every specimen and copied into the file of each specimen of the file tree. location: where this specimen was taken (x, y and crs as typed or taken from a datasheet, lon and lat computed from them), used by the GIS viewer. view: the coordinate system (specimen, geographic, paleo, tectonic) this specimen was last shown in, restored when its file is opened.";
 /// The sections other than `files`.
-const SECTIONS: [&str; 3] = ["core_viewer", "stereonet", "location"];
+const SECTIONS: [&str; 4] = ["core_viewer", "stereonet", "location", "view"];
 
 /// `<specimen folder>_geo/<specimen folder>_geo_dependancy.json` for any file of a specimen: the source file in the
 /// specimen folder, or its copy in the `_geo` folder.
@@ -93,6 +93,19 @@ pub fn write_section(json_path: &Path, key: &str, val: Option<Value>) -> std::io
     std::fs::write(json_path, serde_json::to_string_pretty(&v).unwrap_or_default() + "\n")
 }
 
+/// The coordinate system the specimen was last shown in (`view` section), if one was stored.
+pub fn read_view(json_path: &Path) -> Option<crate::coords::CoordSys> {
+    read_section(json_path, "view")?.get("coordinates")?.as_str().and_then(crate::coords::CoordSys::from_token)
+}
+
+/// Stores the coordinate system the specimen is shown in.
+pub fn write_view(json_path: &Path, cs: crate::coords::CoordSys) -> std::io::Result<()> {
+    if read_view(json_path) == Some(cs) {
+        return Ok(());
+    }
+    write_section(json_path, "view", Some(json!({ "coordinates": cs.token() })))
+}
+
 /// `<dir>/<dir name>_dependancy.json` for any `.ams` file of a `_geo` folder (`DC26AB002_AMS_geo/DC26AB002_AMS_geo_dependancy.json`).
 pub fn path_for(ams_file: &Path) -> PathBuf {
     let dir = ams_file.parent().unwrap_or(Path::new("."));
@@ -124,6 +137,23 @@ pub fn read(ams_file: &Path) -> Vec<Option<CoreSetup>> {
         .collect()
 }
 
+/// The direction of the hole from a drill core reorientation already made for this `_geo` folder: (dip direction,
+/// plunge) of the first record that has one, in any `.ams` file of the folder. `None` when there is none. Used to
+/// offer the hole direction when the position of a specimen is entered.
+pub fn read_hole(json_path: &Path) -> Option<(f64, f64)> {
+    let v = load(json_path);
+    let files = v.get("files")?.as_object()?;
+    // sorted by file name so the answer does not depend on the order of the map
+    let mut names: Vec<&String> = files.keys().collect();
+    names.sort();
+    names.into_iter().find_map(|n| {
+        files[n].get("records")?.as_array()?.iter().find_map(|r| {
+            let r = r.as_object()?;
+            Some((r.get("dip_direction")?.as_f64()?, r.get("plunge")?.as_f64()?))
+        })
+    })
+}
+
 /// Writes (or replaces) the entry of `ams_file` in the dependency file of its folder; entries of other files stay.
 /// `records` holds, aligned with the records of the file, the names and their drill core reorientation. With none at
 /// all the entry is removed (and the file when it is empty). Returns the path of the dependency file.
@@ -152,6 +182,44 @@ pub fn write(ams_file: &Path, records: &[(String, Option<CoreSetup>)]) -> std::i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hole_direction_of_an_earlier_reorientation_can_be_found() {
+        let dir = std::env::temp_dir().join(format!("depjson-hole-{}", std::process::id()));
+        let ams = dir.join("ZZ_AMS_geo").join("ZZ_use_geo.ams");
+        let jp = path_for(&ams);
+        assert_eq!(read_hole(&jp), None);
+        // no reorientation in the records: nothing to find
+        write_section(&jp, "location", Some(serde_json::json!({"x": 1.0}))).unwrap();
+        assert_eq!(read_hole(&jp), None);
+        let a = CoreSetup { dip_dir: 316.135, plunge: 67.0, offset: 356.0, face: Face::UpHole, arrow: Arrow::Right };
+        write(&ams, &[("A1".to_string(), None), ("A2".to_string(), Some(a))]).unwrap();
+        assert_eq!(read_hole(&jp), Some((316.135, 67.0)));
+        // the location section written first stays
+        assert!(read_section(&jp, "location").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_view_of_a_specimen_is_remembered_and_leaves_the_other_sections_alone() {
+        use crate::coords::CoordSys;
+        let dir = std::env::temp_dir().join(format!("depjson-view-{}", std::process::id()));
+        let jp = path_for(&dir.join("ZZ_AMS_geo").join("ZZ_use_geo.ams"));
+        assert_eq!(read_view(&jp), None);
+        write_section(&jp, "location", Some(serde_json::json!({"x": 1.0}))).unwrap();
+        for cs in [CoordSys::Geographic, CoordSys::Tectonic, CoordSys::Specimen] {
+            write_view(&jp, cs).unwrap();
+            assert_eq!(read_view(&jp), Some(cs));
+        }
+        assert!(read_section(&jp, "location").is_some());
+        // a reorientation written afterwards keeps it
+        let a = CoreSetup { dip_dir: 316.135, plunge: 67.0, offset: 356.0, face: Face::UpHole, arrow: Arrow::Right };
+        write(&dir.join("ZZ_AMS_geo").join("ZZ_use_geo.ams"), &[("A1".to_string(), Some(a))]).unwrap();
+        assert_eq!(read_view(&jp), Some(CoordSys::Specimen));
+        assert_eq!(CoordSys::from_token("paleo"), Some(CoordSys::Paleo));
+        assert_eq!(CoordSys::from_token("x"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_file_is_named_after_the_geo_folder_and_round_trips() {

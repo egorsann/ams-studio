@@ -93,6 +93,8 @@ pub fn active_tensors(doc: &crate::doc::Doc, der: &[crate::doc::Derived]) -> Vec
 }
 
 /// The fabric of the mean tensor of some records: the K1 and K3 directions of the mean as the foliation and the lineation.
+/// This is the mean point Group Statistics calculates (`ams_core::stats::group_stats`, as the original does) and draws
+/// at the centre of the confidence ellipses; a test holds the two equal.
 pub fn mean_fabric(t: &[Mat3]) -> Option<gis::Fabric> {
     if t.is_empty() {
         return None;
@@ -101,8 +103,14 @@ pub fn mean_fabric(t: &[Mat3]) -> Option<gis::Fabric> {
     for x in t {
         for r in 0..3 {
             for c in 0..3 {
-                m[r][c] += x[r][c] / t.len() as f64;
+                m[r][c] += x[r][c];
             }
+        }
+    }
+    // sum first, divide after: the same arithmetic as the mean tensor of Group Statistics, so the same bits
+    for row in m.iter_mut() {
+        for v in row.iter_mut() {
+            *v /= t.len() as f64;
         }
     }
     let (_, v) = eig_sym(&m);
@@ -196,6 +204,11 @@ impl App {
                         Some(mut loc) => {
                             loc.datasheet_name = l.key.clone();
                             loc.datasheet_file = file.clone();
+                            // the depth of the datasheet row when it has one, else what was saved; the hole direction is kept
+                            let prev = self.gis.loc.rows[i].saved.as_ref();
+                            loc.depth = l.depth.or(prev.and_then(|p| p.depth));
+                            loc.elevation = l.elev.or(prev.and_then(|p| p.elevation));
+                            loc.hole = prev.and_then(|p| p.hole);
                             if self.gis.loc.rows[i].saved.as_ref() != Some(&loc) {
                                 self.loc_store(i, Some(loc));
                             }
@@ -368,17 +381,45 @@ impl App {
 
     /// The symbols: one per specimen of the file tree (or the open file) that has a saved place. Recomputed when the
     /// files, the places or the settings change; checked at most twice a second.
+    /// A specimen file read the way opening it does: its rotations that were made but not saved, then the reorientation
+    /// of the `_geo` file next to it.
+    fn doc_as_opened(&self, p: &std::path::Path) -> Option<crate::doc::Doc> {
+        let mut d = crate::doc::Doc::open(p).ok()?;
+        if d.raw.len() > 0 && !d.modified {
+            if let Some(v) = self.pending.get(p) {
+                for (i, g) in v.iter().enumerate() {
+                    if let (Some(g), true) = (g, i < d.specs.len()) {
+                        d.set_georot(i, Some(*g), false);
+                    }
+                }
+            }
+        }
+        if !d.synthetic {
+            let partner = super::export_ui::geo_path(p);
+            if let Ok(bytes) = std::fs::read(&partner) {
+                if let Ok(mut theirs) = ams_core::ams::parse(&bytes) {
+                    crate::doc::load_dependency(&mut theirs, &partner);
+                    d.apply_partner(&theirs);
+                }
+            }
+        }
+        Some(d)
+    }
+
     pub(super) fn gis_refresh_placed(&mut self) {
-        let due = self.gis.placed_check.map_or(true, |t| t.elapsed().as_millis() > 500);
+        // checked at most twice a second, except right after a switch of phase: that one should show at once
+        let phase_changed = self.gis.placed_phase != self.out_phase;
+        let due = phase_changed || self.gis.placed_check.map_or(true, |t| t.elapsed().as_millis() > 500);
         if !due {
             return;
         }
+        self.gis.placed_phase = self.out_phase;
         self.gis.placed_check = Some(std::time::Instant::now());
         let files = self.cv_files();
         let mut h = std::collections::hash_map::DefaultHasher::new();
         // the map only ever shows geographic directions: the coordinate system chosen in the main window does not matter
         let geo_open: Vec<crate::doc::Derived> = self.doc.as_ref().map(|d| d.derive(self.out_phase, CoordSys::Geographic, &self.orient)).unwrap_or_default();
-        (files.len(), self.out_phase, self.gis.loc.ver).hash(&mut h);
+        (files.len(), self.out_phase, self.gis.loc.ver, self.pending.len(), self.stash.len()).hash(&mut h);
         format!("{:?}", self.orient).hash(&mut h);
         for f in &files {
             f.hash(&mut h);
@@ -395,6 +436,35 @@ impl App {
             }
         }
         let sig = h.finish();
+        if std::env::var_os("AMS_STUDIO_GIS_DEMO_COLLARS").is_some() {
+            // headless test hook: made-up drill core around 47.2 N 12.5 E - a collar with seven specimens and a hole direction,
+            // a collar with three, one specimen alone with a hole direction, and two loose specimens close by
+            if self.gis.placed.is_empty() && !files.is_empty() {
+                let (cx, cy) = gis::merc_from_lonlat(12.5, 47.2);
+                let mk = |name: &str, dx: f64, dy: f64, depth: Option<f64>, hole: Option<gis_loc::Hole>, k: usize, file: &PathBuf| {
+                    let m = (cx + dx * 12.0, cy + dy * 12.0);
+                    let (lon, lat) = gis::lonlat_from_merc(m.0, m.1);
+                    let dip_dir = (k as f64 * 53.0 + 20.0) % 360.0;
+                    let dip = [8.0, 20.0, 35.0, 52.0, 66.0, 78.0, 88.0][k % 7];
+                    Placed { name: name.to_string(), path: file.clone(), n: 4, lon, lat, merc: m, fabric: gis::Fabric { strike: (dip_dir + 270.0) % 360.0, dip_dir, dip, trend: (dip_dir + 25.0 + k as f64 * 9.0) % 360.0, plunge: [3.0, 15.0, 30.0, 45.0, 60.0, 75.0, 86.0][(k + 2) % 7] }, depth, hole, elev: None }
+                };
+                let h1 = gis_loc::Hole::new(316.1, 67.0);
+                let depths = [12.4, 47.0, 88.75, 131.0, 176.2, 240.0, 305.5];
+                for (k, d) in depths.iter().enumerate() {
+                    self.gis.placed.push(mk(&format!("DH1-{}", k + 1), 0.0, 0.0, Some(*d), h1, k, &files[k % files.len()]));
+                }
+                for (k, d) in [20.0, 64.0, 119.5].iter().enumerate() {
+                    self.gis.placed.push(mk(&format!("DH2-{}", k + 1), 140.0, -30.0, Some(*d), gis_loc::Hole::new(95.0, 55.0), k + 2, &files[k % files.len()]));
+                }
+                self.gis.placed.push(mk("DH3-1", -120.0, 40.0, Some(33.0), gis_loc::Hole::new(200.0, 80.0), 4, &files[0]));
+                self.gis.placed.push(mk("S1", 40.0, 70.0, None, None, 1, &files[0]));
+                self.gis.placed.push(mk("S2", -40.0, -60.0, None, None, 5, &files[0]));
+                self.gis.n_files = files.len();
+                self.gis.fit_pending = true;
+            }
+            self.gis.placed_sig = sig;
+            return;
+        }
         if let Ok(spec) = std::env::var("AMS_STUDIO_GIS_DEMO_SYMBOLS") {
             // headless test hook: a grid of made-up symbols with dips and plunges from shallow to steep around 47.2 N 12.5 E
             if self.gis.placed.is_empty() && !files.is_empty() {
@@ -408,7 +478,7 @@ impl App {
                     let (col, row) = ((k % 4) as f64, (k / 4) as f64);
                     let m = (cx + (col - 1.5) * 90.0, cy - (row - 0.5) * 90.0);
                     let (lon, lat) = gis::lonlat_from_merc(m.0, m.1);
-                    self.gis.placed.push(Placed { name: format!("S{}", k + 1), path: files[k % files.len()].clone(), n: 4, lon, lat, merc: m, fabric: gis::Fabric { strike: (dip_dir + 270.0) % 360.0, dip_dir, dip: *dip, trend, plunge: pl } });
+                    self.gis.placed.push(Placed { name: format!("S{}", k + 1), path: files[k % files.len()].clone(), n: 4, lon, lat, merc: m, fabric: gis::Fabric { strike: (dip_dir + 270.0) % 360.0, dip_dir, dip: *dip, trend, plunge: pl }, depth: None, hole: None, elev: None });
                 }
                 self.gis.n_files = files.len();
                 self.gis.fit_pending = true;
@@ -423,24 +493,44 @@ impl App {
         self.gis.placed.clear();
         self.gis.missing = 0;
         self.gis.n_files = files.len();
+        self.gis.placed_cache.retain(|k, _| files.contains(k));
         for f in &files {
-            let Some(loc) = gis_loc::read(&depjson::for_source(f)) else {
+            // the place and the opened file are kept until the file or its dependency file changes on disk
+            let dep_path = depjson::for_source(f);
+            let partner = super::export_ui::geo_path(f);
+            let mt = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+            let (src, dep, par) = (mt(f), mt(&dep_path), mt(&partner));
+            {
+                let e = self.gis.placed_cache.entry(f.clone()).or_default();
+                if src.is_none() || e.src != src || e.dep != dep || e.partner != par {
+                    *e = super::gis_ui::FileCache { src, dep, partner: par, loc: gis_loc::read(&dep_path), doc: None };
+                }
+            }
+            let Some(loc) = self.gis.placed_cache.get(f).and_then(|e| e.loc.clone()) else {
                 self.gis.missing += 1;
                 continue;
             };
-            // the tensors of the specimen in geographic coordinates
+            // the tensors of the specimen in geographic coordinates; a specimen that is not open is read the way opening it
+            // would (with its reorientation), so its symbol does not change when it becomes the open one
+            let is_open = matches!(&self.doc, Some(d) if d.path == *f && geo_open.len() == d.specs.len());
+            if !is_open && !self.stash.contains_key(f) && self.gis.placed_cache.get(f).is_some_and(|e| e.doc.is_none()) {
+                let d = self.doc_as_opened(f);
+                if let Some(e) = self.gis.placed_cache.get_mut(f) {
+                    e.doc = d;
+                }
+            }
             let tensors: Vec<Mat3> = match &self.doc {
-                Some(d) if d.path == *f && geo_open.len() == d.specs.len() => active_tensors(d, &geo_open),
-                _ => match crate::doc::Doc::open(f) {
-                    Ok(d) => active_tensors(&d, &d.derive(self.out_phase, CoordSys::Geographic, &self.orient)),
-                    Err(_) => vec![],
+                Some(d) if is_open => active_tensors(d, &geo_open),
+                _ => match self.stash.get(f).or_else(|| self.gis.placed_cache.get(f).and_then(|e| e.doc.as_ref())) {
+                    Some(d) => active_tensors(d, &d.derive(self.out_phase, CoordSys::Geographic, &self.orient)),
+                    None => vec![],
                 },
             };
             let Some(fabric) = mean_fabric(&tensors) else {
                 self.gis.missing += 1;
                 continue;
             };
-            self.gis.placed.push(Placed { name: core_pane::spec_id(f), path: f.clone(), n: tensors.len(), lon: loc.lon, lat: loc.lat, merc: loc.merc(), fabric });
+            self.gis.placed.push(Placed { name: core_pane::spec_id(f), path: f.clone(), n: tensors.len(), lon: loc.lon, lat: loc.lat, merc: loc.merc(), fabric, depth: loc.depth, hole: loc.hole, elev: loc.elevation });
         }
     }
 }
@@ -461,6 +551,35 @@ mod tests {
         assert!(moved > 1.0, "{geo:?} {in_specimen:?}");
         // the result does not depend on anything but the file, the phase and the orientation parameters
         assert_eq!(geographic_fabric(&doc, false, &orient), Some(geo));
+    }
+
+    #[test]
+    fn the_symbol_comes_from_the_group_statistics_mean_point_the_centre_of_its_ellipses() {
+        // the mean K1 and K3 that Group Statistics (as in Anisoft 6) prints and draws inside the confidence ellipses are
+        // the ones the strike / dip and lineation symbol is made of
+        let doc = crate::doc::Doc::open(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/demo_12_oriented.ams"))).unwrap();
+        let der = doc.derive(false, CoordSys::Geographic, &Orientation::default());
+        let tensors = active_tensors(&doc, &der);
+        let kms: Vec<f64> = (0..doc.specs.len().min(der.len())).filter(|&i| doc.active[i]).map(|i| der[i].km).collect();
+        let gs = ams_core::stats::group_stats(&tensors, &kms).unwrap();
+        assert_eq!(mean_fabric(&tensors), Some(gis::fabric_from_axes(gs.dec_inc[0], gs.dec_inc[2])));
+        // the symbol's lineation is the mean K1, its plane is perpendicular to the mean K3
+        let f = mean_fabric(&tensors).unwrap();
+        assert!((f.plunge - gs.dec_inc[0].1.abs()).abs() < 1e-6, "{f:?} {:?}", gs.dec_inc);
+        assert!((f.dip - (90.0 - gs.dec_inc[2].1.abs())).abs() < 1e-6, "{f:?} {:?}", gs.dec_inc);
+        // and that point is the centre of the Jelinek ellipses: the outline of each is symmetric about the mean axis
+        for (axis, e) in gs.jelinek.iter().enumerate().filter_map(|(a, e)| e.map(|e| (a, e))) {
+            let out = e.outline(&gs.vecs, 72);
+            let mut mid = [0.0f64; 3];
+            for v in &out[..72] {
+                for c in 0..3 {
+                    mid[c] += v[c] / 72.0;
+                }
+            }
+            let m = (mid[0] * mid[0] + mid[1] * mid[1] + mid[2] * mid[2]).sqrt();
+            let cos = (mid[0] * gs.vecs[axis][0] + mid[1] * gs.vecs[axis][1] + mid[2] * gs.vecs[axis][2]) / m;
+            assert!(cos > 0.999, "axis {axis}: {cos}");
+        }
     }
 
     #[test]

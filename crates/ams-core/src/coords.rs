@@ -18,6 +18,28 @@ pub enum CoordSys {
     Tectonic,
 }
 
+impl CoordSys {
+    /// The word stored in a dependency file.
+    pub fn token(self) -> &'static str {
+        match self {
+            CoordSys::Specimen => "specimen",
+            CoordSys::Geographic => "geographic",
+            CoordSys::Paleo => "paleo",
+            CoordSys::Tectonic => "tectonic",
+        }
+    }
+
+    pub fn from_token(t: &str) -> Option<CoordSys> {
+        Some(match t {
+            "specimen" => CoordSys::Specimen,
+            "geographic" => CoordSys::Geographic,
+            "paleo" => CoordSys::Paleo,
+            "tectonic" => CoordSys::Tectonic,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Orientation {
     pub azimuth: f64,

@@ -13,14 +13,19 @@ mod core_pane;
 mod stereo_planes;
 mod core_ui;
 mod export_ui;
+mod gis_collar;
+mod gis_filter;
+mod gis_qgis;
 mod gis_data;
 mod gis_georef;
 mod gis_layers;
 mod gis_layers_ui;
 mod gis_loc;
+mod gis_vector;
 mod gis_loc_ui;
 mod gis_manual_ui;
 mod gis_ui;
+mod palette;
 mod pane_cfg;
 mod pane_layout;
 mod prefs_ext;
@@ -88,6 +93,16 @@ pub enum Action {
     TogglePhase,
     ResetPanes,
     UndoResetPanes,
+    /// The command palette (Ctrl+Shift+P).
+    Palette,
+    GisLocations,
+    GisManual,
+    GisFit,
+    GisBasemap,
+    GisBackdropSource(gis_data::BaseSource),
+    GisAddLayer,
+    GisImportQgis,
+    GisToggleLayer(u32),
 }
 
 impl PartialEq for AxisCfg {
@@ -404,6 +419,7 @@ pub struct App {
     /// The GIS viewer lives in a window of its own (that can be moved to another screen) instead of in the panes, and
     /// where that window was last: x, y, width, height.
     gis_popped: bool,
+    palette: palette::PaletteState,
     gis_win: Option<[f32; 4]>,
     gis_export: bool,
     /// The preferences as last written, and when they started to differ (they are written after a short quiet moment).
@@ -637,6 +653,7 @@ impl App {
             layout_order: pane_layout::default_order(),
             gis_on: false,
             gis_popped: false,
+            palette: Default::default(),
             gis_win: None,
             gis_export: true,
             state_saved: String::new(),
@@ -1099,8 +1116,7 @@ impl App {
             d.set_georot(*i, Some(*g), false);
         }
         // the view that shows the result
-        self.coord = CoordSys::Geographic;
-        self.dirty = true;
+        self.set_coord(CoordSys::Geographic);
         Ok(())
     }
 
@@ -1160,6 +1176,16 @@ impl App {
         }
     }
 
+    /// Shows the open file in another coordinate system and remembers it for this specimen (the `view` section of its
+    /// dependency file), so it comes back the next time the file is opened.
+    fn set_coord(&mut self, c: CoordSys) {
+        self.coord = c;
+        self.dirty = true;
+        if let Some(d) = self.doc.as_ref().filter(|d| !d.synthetic) {
+            let _ = ams_core::depjson::write_view(&ams_core::depjson::for_source(&d.path), c);
+        }
+    }
+
     fn open_path(&mut self, p: PathBuf) {
         // the file that is open now stays as it is, with its edits, until it is saved
         if self.doc.as_ref().map_or(false, |d| d.path == p && !d.synthetic && d.modified) {
@@ -1197,6 +1223,12 @@ impl App {
                 }
                 if let Some(parent) = p.parent() {
                     self.browser_dir = parent.to_path_buf();
+                }
+                // the coordinate system this specimen was last shown in; a specimen with none stored keeps the current one
+                if !d.synthetic {
+                    if let Some(c) = ams_core::depjson::read_view(&ams_core::depjson::for_source(&p)) {
+                        self.coord = c;
+                    }
                 }
                 self.doc = Some(d);
                 self.classes.clear();
@@ -1325,6 +1357,8 @@ impl App {
                 if let Some(d) = self.doc.as_ref().filter(|d| !d.synthetic) {
                     let (prev, next, _, _) = self.neighbours_of(&d.path);
                     if let Some(p) = if a == Action::Prev { prev } else { next } {
+                        // the file that was open is not selected any more: the new one is the selection
+                        self.tree_sel = vec![p.clone()];
                         self.open_path(p);
                     }
                 }
@@ -1537,10 +1571,7 @@ impl App {
                     }
                 }
             }
-            Action::Coord(c) => {
-                self.coord = c;
-                self.dirty = true;
-            }
+            Action::Coord(c) => self.set_coord(c),
             Action::GroupStats => self.open_win(W_GROUP),
             Action::Contour => self.open_win(W_CONTOUR),
             Action::Tool(name) => self.open_tool(name),
@@ -1551,6 +1582,49 @@ impl App {
             Action::ToggleCoreViewer => self.cv_toggle(),
             Action::Gis => self.gis_open_window(),
             Action::ToggleGis => self.toggle_gis(),
+            Action::Palette => self.palette_toggle(),
+            Action::GisLocations => self.gis_open_loc(),
+            Action::GisManual => self.gis_open_manual(None),
+            Action::GisFit => {
+                if !self.gis_on {
+                    self.toggle_gis();
+                }
+                self.gis.fit_pending = true;
+            }
+            Action::GisBasemap => self.gis.base_on = !self.gis.base_on,
+            Action::GisBackdropSource(src) => {
+                self.gis.tiles.set_source(src);
+                self.gis.base_on = true;
+            }
+            Action::GisAddLayer => {
+                if let Some(p) = gis_ui::pick_file("Map image, GeoTIFF, shapefile, GeoPackage or GeoJSON", "Maps and vector data", &["png", "jpg", "jpeg", "tif", "tiff", "shp", "gpkg", "geojson", "json"], "AMS_STUDIO_GIS_MAP") {
+                    if !self.gis_on {
+                        self.toggle_gis();
+                    }
+                    self.gis.show_layers = true;
+                    self.gis.load_map_file(ctx, p);
+                }
+            }
+            Action::GisImportQgis => {
+                if let Some(p) = gis_ui::pick_file("QGIS project", "QGIS project", &["qgz", "qgs"], "AMS_STUDIO_GIS_QGIS") {
+                    if !self.gis_on {
+                        self.toggle_gis();
+                    }
+                    if let Err(e) = self.gis.import_qgis(&p) {
+                        self.gis.info.clear();
+                        self.gis.map_err = e;
+                    }
+                }
+            }
+            Action::GisToggleLayer(id) => match self.gis.layers.get(id).map(|i| i.kind) {
+                Some(gis_layers::Kind::Basemap) => self.gis.base_on = !self.gis.base_on,
+                Some(_) => {
+                    if let Some(i) = self.gis.layers.get_mut(id) {
+                        i.visible = !i.visible;
+                    }
+                }
+                None => {}
+            },
             Action::PopOutGis => self.toggle_popout(),
             // the sidebar of the pane the mouse is in (only the GIS pane has one); Ctrl+B stays the file browser
             Action::ToggleLayerBar => {
@@ -1587,13 +1661,14 @@ impl App {
 
     /// A dialog, pop-out or message is open (the egui drop-down menus are asked separately).
     fn any_dialog_open(&self) -> bool {
-        self.win_table || self.win_group || self.win_contour || self.win_orient || self.win_colors || self.win_factors || self.win_about || self.win_edit
+        self.palette.open || self.win_table || self.win_group || self.win_contour || self.win_orient || self.win_colors || self.win_factors || self.win_about || self.win_edit
             || self.win_export || self.win_recomb || self.win_vol || self.win_sort || self.win_gis || self.gis.win_georef || self.gis.win_table || self.gis.loc.win || self.gis.manual.win || self.win_core || self.cv.win || self.win_set || self.win_classes || self.win_owens
             || self.tools.open.iter().any(|o| *o) || self.info.is_some() || self.quit_prompt || self.pane_settings.iter().any(|o| *o)
     }
 
     /// Esc: closes every dialog and pop-out. The Owens window starts from its beginning next time.
     fn close_all_dialogs(&mut self) {
+        self.palette.open = false;
         self.win_table = false;
         self.win_group = false;
         self.win_contour = false;
@@ -1700,6 +1775,15 @@ impl App {
             (Modifiers::NONE, Key::F9, Action::GroupStats),
             (Modifiers::NONE, Key::F12, Action::Contour),
         ];
+        // the palette opens from anywhere, also while a text field has the keyboard; it is consumed before Ctrl+P (previous file)
+        if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT | Modifiers::CTRL, Key::P)) {
+            out.push(Action::Palette);
+            return out;
+        }
+        if self.palette.open {
+            // the palette has the keyboard
+            return out;
+        }
         if ctx.egui_wants_keyboard_input() {
             return out;
         }
@@ -1733,6 +1817,31 @@ impl App {
         }
         out
     }
+}
+
+/// A slider with a thin, square-cornered handle bar and a rail that can be seen in both themes (the rail and the handle
+/// use the fill of an idle widget, which in the dark theme is almost the panel colour, so the ends of the rail vanished).
+pub(crate) fn thin_slider(ui: &mut egui::Ui, slider: egui::Slider<'_>) -> egui::Response {
+    ui.scope(|ui| {
+        let dark = ui.visuals().dark_mode;
+        let v = ui.visuals_mut();
+        v.handle_shape = egui::style::HandleShape::Rect { aspect_ratio: 0.3 };
+        let r = CornerRadius::same(2);
+        v.widgets.inactive.corner_radius = r;
+        v.widgets.hovered.corner_radius = r;
+        v.widgets.active.corner_radius = r;
+        if dark {
+            v.widgets.inactive.bg_fill = Color32::from_rgb(0x5a, 0x62, 0x72);
+            v.widgets.hovered.bg_fill = Color32::from_rgb(0x7c, 0x86, 0x9a);
+            v.widgets.active.bg_fill = Color32::from_rgb(0x9a, 0xa6, 0xbd);
+        } else {
+            v.widgets.inactive.bg_fill = Color32::from_gray(196);
+            v.widgets.hovered.bg_fill = Color32::from_gray(170);
+            v.widgets.active.bg_fill = Color32::from_gray(150);
+        }
+        ui.add(slider)
+    })
+    .inner
 }
 
 /// The dark theme follows TX Studio: a charcoal with a faint blue cast, never black.
@@ -1923,6 +2032,13 @@ impl eframe::App for App {
         if let Some(w) = self.test_window.take() {
             match w.as_str() {
                 "sort" => self.open_win(W_SORT),
+                "palette" => {
+                    // the command palette, with AMS_STUDIO_PALETTE_QUERY typed into it
+                    self.palette_toggle();
+                    if let Ok(q) = std::env::var("AMS_STUDIO_PALETTE_QUERY") {
+                        self.palette.query = q;
+                    }
+                }
                 "gis" | "gis-settings" | "gis-georef" | "gis-table" | "gis-loc" | "gis-manual" | "gis-manual-all" => {
                     self.gis_on = true;
                     if w == "gis-settings" {
@@ -2225,6 +2341,60 @@ impl eframe::App for App {
                         }
                     });
                 });
+                ui.menu_button("GIS", |ui| {
+                    // toggles for the panels of the GIS viewer, and the visibility of every layer in it
+                    ui.label(RichText::new("Panels").weak());
+                    let mut gis_on = self.gis_on;
+                    if ui.checkbox(&mut gis_on, "GIS viewer pane").on_hover_text("Shows or hides the map pane (next to the core viewer when both are on). Nothing is lost: the places stay saved and the settings stay as they are").changed() {
+                        actions.push(Action::ToggleGis);
+                    }
+                    let mut layer_bar = self.gis.show_layers;
+                    if ui.add_enabled(self.gis_on, egui::Checkbox::new(&mut layer_bar, "Layers sidebar   Shift+Ctrl+B")).on_hover_text("The list of layers at the left of the GIS pane").changed() {
+                        actions.push(Action::ToggleLayerBar);
+                    }
+                    let mut popped = self.gis_on && self.gis_popped;
+                    if ui.checkbox(&mut popped, "In its own window   Shift+Ctrl+Space").on_hover_text("The GIS viewer in a window of its own that can be moved to another screen").changed() {
+                        actions.push(Action::PopOutGis);
+                    }
+                    ui.separator();
+                    ui.label(RichText::new("Layers (tick = visible)").weak());
+                    let rows: Vec<(u32, String, bool, bool, usize)> = {
+                        let t = &self.gis.layers;
+                        t.builtin_rows().into_iter().map(|i| (i, 0usize)).chain(t.rows().into_iter()).map(|(i, d)| {
+                            let it = &t.items[i];
+                            let on = if it.kind == gis_layers::Kind::Basemap { self.gis.base_on } else { it.visible };
+                            (it.id, it.name.clone(), on, it.kind == gis_layers::Kind::Group, d)
+                        }).collect()
+                    };
+                    for (id, name, on, is_group, depth) in rows {
+                        let mut v = on;
+                        let label = format!("{}{}{}", "      ".repeat(depth), name, if is_group { "  (group)" } else { "" });
+                        if ui.checkbox(&mut v, label).changed() {
+                            actions.push(Action::GisToggleLayer(id));
+                        }
+                    }
+                    ui.menu_button("Backdrop (satellite imagery or street map)", |ui| {
+                        let mut on = self.gis.base_on;
+                        if ui.checkbox(&mut on, "Backdrop").changed() {
+                            actions.push(Action::GisBasemap);
+                        }
+                        ui.separator();
+                        for src in [gis_data::BaseSource::Streets, gis_data::BaseSource::Satellite] {
+                            if ui.radio(self.gis.tiles.source == src, src.short()).clicked() {
+                                actions.push(Action::GisBackdropSource(src));
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.separator();
+                    if item(ui, "Add layer (map, shapefile, GeoPackage, GeoJSON) ...", "", true) { actions.push(Action::GisAddLayer) }
+                    if item(ui, "Add layers of a QGIS project (.qgz, .qgs) ...", "", true) { actions.push(Action::GisImportQgis) }
+                    if item(ui, "Fit the map to the data", "", true) { actions.push(Action::GisFit) }
+                    ui.separator();
+                    if item(ui, "Specimen locations (from a datasheet) ...", "", true) { actions.push(Action::GisLocations) }
+                    if item(ui, "Enter coordinates manually ...", "", true) { actions.push(Action::GisManual) }
+                    if item(ui, "GIS viewer settings ...", "", true) { actions.push(Action::Gis) }
+                });
                 ui.menu_button("Analysis", |ui| {
                     if item(ui, "Group Statistics", "F9", has) { actions.push(Action::GroupStats) }
                     if item(ui, "Contour Plot", "F12", has) { actions.push(Action::Contour) }
@@ -2397,6 +2567,7 @@ impl eframe::App for App {
 
         // -------------------------------------------------------------- windows
         self.windows(&ctx);
+        self.palette_window(&ctx);
         self.quit_window(&ctx);
         for a in actions {
             self.run(&ctx, a);
@@ -3167,7 +3338,7 @@ impl App {
                                 param_combo(ui, &format!("hist-param{i}"), &mut c.hist.param, dark);
                                 let h = &mut c.hist;
                                 range_fields(ui, &mut h.auto, &mut h.min, &mut h.max, &mut h.log, &format!("hist{i}"));
-                                ui.add(egui::Slider::new(&mut c.bins, 3..=60).text("bins"));
+                                thin_slider(ui, egui::Slider::new(&mut c.bins, 3..=60).text("bins"));
                             } else {
                                 let grouped = matches!(c.kind, XyKind::Bar | XyKind::Box);
                                 if grouped {
