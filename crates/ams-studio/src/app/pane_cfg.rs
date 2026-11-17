@@ -229,11 +229,8 @@ impl App {
         self.reset_snap.as_ref().map(|s| RESET_UNDO_SECS.saturating_sub(s.at.elapsed().as_secs())).filter(|r| *r > 0)
     }
 
-    pub(super) fn save_plots(&self) {
-        let p = plots_path();
-        if let Some(d) = p.parent() {
-            let _ = std::fs::create_dir_all(d);
-        }
+    /// The settings of the plot panes as the text of `plots.txt`.
+    pub(super) fn plots_text(&self) -> String {
         let mut s = String::new();
         for (k, c) in self.panes.iter().enumerate() {
             s += &format!("pane{k}={}\n", c.to_line());
@@ -245,7 +242,15 @@ impl App {
                 s += &format!("spec{k}={}\t{}\n", path.display(), c.to_line());
             }
         }
-        let _ = std::fs::write(p, s);
+        s
+    }
+
+    pub(super) fn save_plots(&self) {
+        let p = plots_path();
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(p, self.plots_text());
     }
 
     pub(super) fn load_plots(&mut self) {

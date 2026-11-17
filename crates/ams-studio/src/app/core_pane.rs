@@ -325,7 +325,7 @@ fn row_pick(row: &CvRow, list: &[Found], eligible: bool) -> Option<usize> {
     dir.and_then(|d| list.iter().position(|f| f.dir == d))
 }
 
-fn link_symbol(ui: &mut Ui, linked: bool) {
+pub(super) fn link_symbol(ui: &mut Ui, linked: bool) {
     let (r, _) = ui.allocate_exact_size(Vec2::new(36.0, 22.0), Sense::hover());
     let col = if linked { Color32::from_rgb(52, 130, 230) } else { ui.visuals().weak_text_color().gamma_multiply(0.7) };
     let (w, h) = (16.0, 10.0);
@@ -855,7 +855,7 @@ impl App {
     pub(super) fn cv_pane(&mut self, ui: &mut Ui, rect: Rect, th: &crate::plots::Theme) -> crate::plots::PlotOut {
         let visuals = ui.visuals().clone();
         ui.painter().rect(rect, 8.0, if th.dark { th.canvas() } else { visuals.extreme_bg_color }, Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color), StrokeKind::Inside);
-        let header = Rect::from_min_size(rect.min + Vec2::new(6.0, 4.0), Vec2::new(rect.width() - 12.0, 24.0));
+        let header = Rect::from_min_size(rect.min + Vec2::new(6.0, super::PANE_TOP), Vec2::new(rect.width() - 12.0, 24.0));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(header).layout(Layout::left_to_right(Align::Center)));
         let (mut change, mut reset, mut close) = (false, false, false);
         child.menu_button("\u{25b8}", |ui| {

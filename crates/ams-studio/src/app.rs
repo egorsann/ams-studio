@@ -2,6 +2,7 @@ use crate::doc::{self, Derived, Doc};
 use crate::icons::{self, Icon};
 use ams_core::georot::GeoRot;
 use pane_cfg::PaneCfg;
+use pane_layout::PaneId;
 use crate::plots::{self, AxisCfg, ColorCfg, NetView, Pt, ScatterSpec, StereoOpts, Theme, XyKind, ZoomView};
 use crate::plots::GroupBy;
 use ams_core::params::{param_class, param_sd, param_values_vol, N_PARAMS, PARAM_LABELS};
@@ -12,10 +13,21 @@ mod core_pane;
 mod stereo_planes;
 mod core_ui;
 mod export_ui;
+mod gis_data;
+mod gis_georef;
+mod gis_layers;
+mod gis_layers_ui;
+mod gis_loc;
+mod gis_loc_ui;
+mod gis_manual_ui;
+mod gis_ui;
 mod pane_cfg;
+mod pane_layout;
+mod prefs_ext;
 mod owens_file_ui;
 mod recombine_ui;
 mod specset_ui;
+mod spec_view;
 mod volume_ui;
 mod tools_ui;
 use ams_core::coords::{CoordSys, Orientation};
@@ -62,6 +74,14 @@ pub enum Action {
     About,
     ToggleBrowser,
     ToggleCoreViewer,
+    Gis,
+    ToggleGis,
+    ToggleLayerBar,
+    PopOutGis,
+    AddPane,
+    RemovePane,
+    RemovePaneAt(PaneId),
+    ResetLayout,
     EnableCoreViewer,
     ToggleTheme,
     StepSpecimen(i32),
@@ -246,6 +266,10 @@ struct ListDrag {
     base: Vec<bool>,
 }
 
+/// The strip at the top of every pane that is kept free for the six-dot grip, so the grip never covers the tick boxes
+/// and buttons of the pane's header.
+pub(super) const PANE_TOP: f32 = 14.0;
+
 // window slots (index into App::win_serial)
 const W_TABLE: usize = 0;
 const W_GROUP: usize = 1;
@@ -263,6 +287,12 @@ const W_RECOMB: usize = 17;
 const W_EXPORT: usize = 18;
 const W_CORE: usize = 19;
 const W_COREVIEW: usize = 20;
+const W_GIS: usize = 21;
+const W_GEOREF: usize = 22;
+const W_SORT: usize = 23;
+const W_GIS_TABLE: usize = 24;
+const W_GIS_LOC: usize = 25;
+const W_GIS_MANUAL: usize = 26;
 
 struct ShotJob {
     copy: bool,
@@ -364,6 +394,24 @@ pub struct App {
 
     hfrac: f32,
     vfrac: f32,
+    /// Column split of a row of two wide panes (core viewer and GIS viewer).
+    gfrac: f32,
+    /// Height of a wide row that holds the GIS viewer (a taller strip than the core viewer's, for its layers sidebar).
+    gis_frac: f32,
+    /// The panes that are shown, in order (see pane_layout.rs); the core viewer and the GIS viewer are in it when on.
+    layout_order: Vec<PaneId>,
+    gis_on: bool,
+    /// The GIS viewer lives in a window of its own (that can be moved to another screen) instead of in the panes, and
+    /// where that window was last: x, y, width, height.
+    gis_popped: bool,
+    gis_win: Option<[f32; 4]>,
+    gis_export: bool,
+    /// The preferences as last written, and when they started to differ (they are written after a short quiet moment).
+    state_saved: String,
+    plots_saved: String,
+    state_changed_at: Option<f64>,
+    pane_rects: Vec<(PaneId, Rect)>,
+    pane_drag: Option<PaneId>,
     browser_open: bool,
     browser_dir: PathBuf,
     browser_back: Vec<PathBuf>,
@@ -466,6 +514,17 @@ pub struct App {
     win_recomb: bool,
     rc: recombine_ui::RecState,
     win_vol: bool,
+    /// Sort and filter of the specimens pane (display only).
+    sv: spec_view::SpecView,
+    win_sort: bool,
+    win_gis: bool,
+    gis: gis_ui::Gis,
+    test_window: Option<String>,
+    test_georef: bool,
+    test_save_links: bool,
+    test_manual: Option<bool>,
+    test_pick: Option<String>,
+    test_bulk_yes: bool,
     win_core: bool,
     /// The core viewer pane (View > Enable core viewer).
     cv: core_pane::CoreViewState,
@@ -507,7 +566,7 @@ pub struct App {
     info: Option<String>,
     hover: [String; 4],
     last_anchor: Option<usize>,
-    win_serial: [u64; 24],
+    win_serial: [u64; 28],
     list_drag: Option<ListDrag>,
     tools: tools_ui::ToolsState,
     tool_copy: Option<Rect>,
@@ -573,6 +632,18 @@ impl App {
             orient: Orientation::default(),
             hfrac: 0.5,
             vfrac: 0.5,
+            gfrac: 0.5,
+            gis_frac: 0.42,
+            layout_order: pane_layout::default_order(),
+            gis_on: false,
+            gis_popped: false,
+            gis_win: None,
+            gis_export: true,
+            state_saved: String::new(),
+            plots_saved: String::new(),
+            state_changed_at: None,
+            pane_rects: vec![],
+            pane_drag: None,
             browser_open: true,
             browser_dir: home_dir(),
             browser_back: vec![],
@@ -648,6 +719,16 @@ impl App {
             win_recomb: false,
             rc: Default::default(),
             win_vol: false,
+            sv: spec_view::SpecView::default(),
+            win_sort: false,
+            win_gis: false,
+            gis: gis_ui::Gis::default(),
+            test_window: std::env::var("AMS_STUDIO_OPEN_WINDOW").ok(),
+            test_georef: false,
+            test_save_links: std::env::var_os("AMS_STUDIO_GIS_SAVE").is_some(),
+            test_manual: None,
+            test_pick: std::env::var("AMS_STUDIO_GIS_PICK").ok(),
+            test_bulk_yes: false,
             win_core: false,
             cv: Default::default(),
             core: Default::default(),
@@ -677,7 +758,7 @@ impl App {
             info: None,
             hover: Default::default(),
             last_anchor: None,
-            win_serial: [0; 24],
+            win_serial: [0; 28],
             list_drag: None,
             tools: Default::default(),
             tool_copy: None,
@@ -687,6 +768,9 @@ impl App {
         };
         app.load_state();
         app.load_plots();
+        // what is in the file now counts as saved: only changes after this are written
+        app.state_saved = app.state_text();
+        app.plots_saved = app.plots_text();
         app.cv.legacy_links = core_links::read_legacy();
         app.planes_legacy = stereo_planes::read_legacy();
         if app.dark {
@@ -755,20 +839,73 @@ impl App {
                 "core_frac" => self.cv.frac = v.parse().unwrap_or(0.28f32).clamp(0.12, 0.6),
                 "hfrac" => self.hfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
                 "vfrac" => self.vfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
+                "gfrac" => self.gfrac = v.parse().unwrap_or(0.5f32).clamp(0.2, 0.8),
+                "gis_frac" => self.gis_frac = v.parse().unwrap_or(0.42f32).clamp(0.12, 0.6),
+                "panes" => self.layout_order = pane_layout::order_from_text(v),
+                "gis_pane" => self.gis_on = v == "1",
+                "gis_popped" => self.gis_popped = v == "1",
+                "gis_win" => {
+                    let p: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    if p.len() == 4 && p.iter().all(|x| x.is_finite()) && p[2] >= 300.0 && p[3] >= 200.0 && p[2] < 10000.0 && p[3] < 10000.0 {
+                        self.gis_win = Some([p[0], p[1], p[2], p[3]]);
+                    }
+                }
+                "show_k" => {
+                    if let Some(b) = prefs_ext::from_bits(v, 3) {
+                        self.show_k = [b[0], b[1], b[2]];
+                    }
+                }
+                "st_data" => self.st_data = v != "0",
+                "st_caption" => self.st_caption = v != "0",
+                "st_legend" => self.st_legend = v != "0",
+                "st_connect" => self.st_connect = v == "1",
+                "st_mf" => self.st_mf = v == "1",
+                "st_overlay" => {
+                    if let Some(b) = prefs_ext::from_bits(v, 7) {
+                        self.st_overlay = analysis_ui::StereoOverlay { mean: b[0], conf: b[1], planes: [b[2], b[3], b[4]], boot: b[5], boot_conf: b[6] };
+                    }
+                }
+                "export" => {
+                    if let Some(b) = prefs_ext::from_bits(v, 4) {
+                        self.export = [b[0], b[1], b[2], b[3]];
+                    }
+                }
+                "core_export" => self.cv.export = v != "0",
+                "gis_export" => self.gis_export = v != "0",
+                "color_own" => {
+                    if let Some(b) = prefs_ext::from_bits(v, 4) {
+                        self.color_own = [b[0], b[1], b[2], b[3]];
+                    }
+                }
+                "color_master" => {
+                    if let Some(c) = prefs_ext::color_from_line(v) {
+                        self.color_master = c;
+                    }
+                }
+                "spec_color_open" => self.spec_color_open = v == "1",
+                "plot_filter" => self.filter = v.parse().unwrap_or(0usize).min(1),
+                "sv" => {
+                    if let Some(sv) = prefs_ext::sv_from_line(v) {
+                        self.sv = sv;
+                    }
+                }
+                _ if k.starts_with("color") && k.len() == 6 && k[5..].parse::<usize>().map_or(false, |i| i < 4) => {
+                    if let Some(c) = prefs_ext::color_from_line(v) {
+                        self.color[k[5..].parse::<usize>().unwrap_or(0)] = c;
+                    }
+                }
+                _ if k.starts_with("gis_") => {
+                    self.gis.load_pref(k, v);
+                }
                 _ => {}
             }
         }
     }
 
-    fn save_state(&self) {
-        let p = state_path();
-        if let Some(d) = p.parent() {
-            let _ = std::fs::create_dir_all(d);
-        }
-        let _ = std::fs::write(
-            p,
-            format!(
-                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nuse_p={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\ncore_on={}\ncore_root={}\ncore_needle={}\ncore_frac={}\ncore_fit_all={}\nst_planes={}\nst_plane_comments={}\nst_plane_conv={}\nst_plane_new_spec={}\noop_highlight={}\n",
+    /// The preferences as text: the layout, the panes and their settings, the specimen list, the GIS pane.
+    fn state_text(&self) -> String {
+        let mut t = format!(
+                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nuse_p={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\ncore_on={}\ncore_root={}\ncore_needle={}\ncore_frac={}\ncore_fit_all={}\nst_planes={}\nst_plane_comments={}\nst_plane_conv={}\nst_plane_new_spec={}\noop_highlight={}\ngfrac={}\npanes={}\ngis_pane={}\ngis_frac={}\ngis_popped={}\n",
                 self.browser_dir.display(),
                 self.dark as u8,
                 self.browser_open as u8,
@@ -794,9 +931,77 @@ impl App {
                 self.st_plane_comments as u8,
                 self.st_plane_conv,
                 self.st_plane_new_spec as u8,
-                self.oop_highlight as u8
-            ),
+                self.oop_highlight as u8,
+                self.gfrac,
+                pane_layout::order_to_text(&self.layout_order),
+                self.gis_on as u8,
+                self.gis_frac,
+                self.gis_popped as u8
+            );
+        let color_lines: String = (0..4).map(|i| format!("color{i}={}\n", prefs_ext::color_to_line(&self.color[i]))).collect();
+        let b = |v: bool| u8::from(v);
+        t += &format!(
+            "show_k={}\nst_data={}\nst_caption={}\nst_legend={}\nst_connect={}\nst_mf={}\nst_overlay={}\nexport={}\ncore_export={}\ngis_export={}\ncolor_own={}\ncolor_master={}\nspec_color_open={}\nplot_filter={}\nsv={}\n",
+            prefs_ext::bits(&self.show_k),
+            b(self.st_data),
+            b(self.st_caption),
+            b(self.st_legend),
+            b(self.st_connect),
+            b(self.st_mf),
+            prefs_ext::bits(&[self.st_overlay.mean, self.st_overlay.conf, self.st_overlay.planes[0], self.st_overlay.planes[1], self.st_overlay.planes[2], self.st_overlay.boot, self.st_overlay.boot_conf]),
+            prefs_ext::bits(&self.export),
+            b(self.cv.export),
+            b(self.gis_export),
+            prefs_ext::bits(&self.color_own),
+            prefs_ext::color_to_line(&self.color_master),
+            b(self.spec_color_open),
+            self.filter,
+            prefs_ext::sv_to_line(&self.sv),
         );
+        t += &color_lines;
+        if let Some(w) = self.gis_win {
+            t += &format!("gis_win={},{},{},{}\n", w[0], w[1], w[2], w[3]);
+        }
+        t += &self.gis.prefs_text();
+        t
+    }
+
+    fn save_state(&self) {
+        let p = state_path();
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(p, self.state_text());
+    }
+
+    /// Writes the preferences whenever they differ from what is in the file, after a quiet moment (not while a mouse
+    /// button is held or a scroll zoom is going on), so that every setting of every pane survives a restart without
+    /// each checkbox having to ask for it.
+    fn autosave_state(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        let cur = self.state_text();
+        let plots = self.plots_text();
+        if cur == self.state_saved && plots == self.plots_saved {
+            self.state_changed_at = None;
+            return;
+        }
+        let since = *self.state_changed_at.get_or_insert(now);
+        if now - since > 0.6 && !ctx.input(|i| i.pointer.any_down()) {
+            let p = state_path();
+            if let Some(d) = p.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            if std::fs::write(p, &cur).is_ok() {
+                self.state_saved = cur;
+            }
+            if plots != self.plots_saved {
+                self.save_plots();
+                self.plots_saved = plots;
+            }
+            self.state_changed_at = None;
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(300));
+        }
     }
 
     /// Keeps the open file with its edits (rotation, deleted records, names, volume ...) while another is opened.
@@ -1308,9 +1513,10 @@ impl App {
                 }
             }
             Action::StepSpecimen(dir) => {
+                let listed = self.list_order();
                 if let Some(d) = &mut self.doc {
-                    // walk the active specimens in list order, starting from the current selection
-                    let order: Vec<usize> = d.order().into_iter().filter(|&i| d.active[i]).collect();
+                    // walk the listed active specimens in list order (sort and filter applied), starting from the current selection
+                    let order: Vec<usize> = listed.into_iter().filter(|&i| d.active[i]).collect();
                     if !order.is_empty() {
                         let cur = self
                             .last_anchor
@@ -1343,7 +1549,29 @@ impl App {
             Action::Colors => self.open_win(W_COLORS),
             Action::About => self.open_win(W_ABOUT),
             Action::ToggleCoreViewer => self.cv_toggle(),
-            Action::EnableCoreViewer => self.cv_enable(),
+            Action::Gis => self.gis_open_window(),
+            Action::ToggleGis => self.toggle_gis(),
+            Action::PopOutGis => self.toggle_popout(),
+            // the sidebar of the pane the mouse is in (only the GIS pane has one); Ctrl+B stays the file browser
+            Action::ToggleLayerBar => {
+                if self.gis_on {
+                    self.gis.show_layers = !self.gis.show_layers;
+                }
+            }
+            Action::AddPane => self.add_pane(),
+            Action::RemovePane => {
+                // the pane the mouse is in
+                let p = ctx.input(|i| i.pointer.latest_pos());
+                if let Some(id) = p.and_then(|p| pane_layout::pane_at(&self.pane_rects, p)) {
+                    self.remove_pane(id);
+                }
+            }
+            Action::RemovePaneAt(id) => self.remove_pane(id),
+            Action::ResetLayout => {
+                self.layout_order = pane_layout::default_order();
+                (self.hfrac, self.vfrac, self.gfrac, self.gis_frac) = (0.5, 0.5, 0.5, 0.42);
+                self.save_state();
+            }            Action::EnableCoreViewer => self.cv_enable(),
             Action::ToggleBrowser => {
                 self.browser_open = !self.browser_open;
                 self.save_state();
@@ -1360,7 +1588,7 @@ impl App {
     /// A dialog, pop-out or message is open (the egui drop-down menus are asked separately).
     fn any_dialog_open(&self) -> bool {
         self.win_table || self.win_group || self.win_contour || self.win_orient || self.win_colors || self.win_factors || self.win_about || self.win_edit
-            || self.win_export || self.win_recomb || self.win_vol || self.win_core || self.cv.win || self.win_set || self.win_classes || self.win_owens
+            || self.win_export || self.win_recomb || self.win_vol || self.win_sort || self.win_gis || self.gis.win_georef || self.gis.win_table || self.gis.loc.win || self.gis.manual.win || self.win_core || self.cv.win || self.win_set || self.win_classes || self.win_owens
             || self.tools.open.iter().any(|o| *o) || self.info.is_some() || self.quit_prompt || self.pane_settings.iter().any(|o| *o)
     }
 
@@ -1377,6 +1605,12 @@ impl App {
         self.win_export = false;
         self.win_recomb = false;
         self.win_vol = false;
+        self.win_sort = false;
+        self.win_gis = false;
+        self.gis.win_georef = false;
+        self.gis.win_table = false;
+        self.gis.loc.win = false;
+        self.gis.manual.win = false;
         self.win_core = false;
         if self.cv.win {
             self.cv_dismiss();
@@ -1427,6 +1661,11 @@ impl App {
             (c, Key::F1, Action::SetClasses),
             (Modifiers::SHIFT | Modifiers::CTRL, Key::O, Action::OpenSet),
             (Modifiers::SHIFT | Modifiers::CTRL, Key::S, Action::ExportAms),
+            (Modifiers::SHIFT | Modifiers::CTRL, Key::B, Action::ToggleLayerBar),
+            // the chord tiling window managers use to make a window float (i3 and sway: Mod+Shift+Space)
+            (Modifiers::SHIFT | Modifiers::CTRL, Key::Space, Action::PopOutGis),
+            (Modifiers::SHIFT | Modifiers::CTRL, Key::N, Action::AddPane),
+            (Modifiers::SHIFT | Modifiers::CTRL, Key::W, Action::RemovePane),
             (c, Key::O, Action::Open),
             (c, Key::P, Action::Prev),
             (c, Key::N, Action::Next),
@@ -1680,6 +1919,65 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         // what draws the window; software rendering is held to 30 frames per second so a computer without a graphics
         // card (or a virtual machine) stays usable while something is dragged
+        // headless test hook: AMS_STUDIO_OPEN_WINDOW=sort opens that window once on the first frame
+        if let Some(w) = self.test_window.take() {
+            match w.as_str() {
+                "sort" => self.open_win(W_SORT),
+                "gis" | "gis-settings" | "gis-georef" | "gis-table" | "gis-loc" | "gis-manual" | "gis-manual-all" => {
+                    self.gis_on = true;
+                    if w == "gis-settings" {
+                        self.open_win(W_GIS);
+                    }
+                    let ctx = ui.ctx().clone();
+                    if let Some(r) = std::env::var_os("AMS_STUDIO_SET") {
+                        // headless test hook: open this folder of specimens without the dialog
+                        self.restore_set(&ctx, PathBuf::from(r), None);
+                    }
+                    if let Some(t) = std::env::var_os("AMS_STUDIO_GIS_TABLE") {
+                        self.gis_load_table(PathBuf::from(t));
+                        if let (Some(z), Some((_, m))) = (std::env::var("AMS_STUDIO_GIS_ZONE").ok().and_then(|z| z.parse::<u8>().ok()), self.gis.draft.as_mut()) {
+                            m.crs.zone = z;
+                        }
+                        if let (Some(q), Some((_, m))) = (std::env::var("AMS_STUDIO_GIS_EPSG_SEARCH").ok(), self.gis.draft.as_mut()) {
+                            m.crs.kind = gis_data::CoordKind::Epsg;
+                            m.crs.search = q;
+                        }
+                        if w != "gis-table" {
+                            // accept the guessed columns
+                            if let Some((t, m)) = self.gis.draft.take() {
+                                let (locs, _) = gis_data::build_locs(t.grid(), &m);
+                                self.gis.table = Some(t);
+                                self.gis.mapping = m;
+                                self.gis.locs = locs;
+                                self.gis.table_ver += 1;
+                            }
+                            self.gis.win_table = false;
+                        }
+                    }
+                    if let Some(m) = std::env::var_os("AMS_STUDIO_GIS_MAP") {
+                        self.gis.load_map_file(&ctx, PathBuf::from(m));
+                    }
+                    if std::env::var_os("AMS_STUDIO_GIS_BASEMAP").is_some() {
+                        self.gis.base_on = true;
+                    }
+                    if w == "gis-georef" {
+                        self.test_georef = true;
+                    }
+                    if w == "gis-loc" {
+                        self.gis_open_loc();
+                    }
+                    if w == "gis-manual" || w == "gis-manual-all" {
+                        self.test_manual = Some(w == "gis-manual-all");
+                    }
+                }
+                "sort-letter" => {
+                    self.sv.kind = spec_view::SortKind::LetterThenNumber;
+                    self.sv.text = "-C".into();
+                    self.open_win(W_SORT);
+                }
+                _ => {}
+            }
+        }
         if self.gpu_info.is_empty() {
             let (s, soft) = gpu_summary(frame);
             self.gpu_info = s;
@@ -1813,6 +2111,9 @@ impl eframe::App for App {
                         if self.cv.on {
                             ui.checkbox(&mut self.cv.export, "Core viewer");
                         }
+                        if self.gis_on {
+                            ui.checkbox(&mut self.gis_export, "GIS viewer");
+                        }
                         for i in 0..4 {
                             ui.checkbox(&mut self.export[i], names[i].as_str());
                         }
@@ -1839,7 +2140,10 @@ impl eframe::App for App {
                     if item(ui, "Paleo-Vertical", "", false) {}
                     ui.separator();
                     if item(ui, "File Browser", "Ctrl+B", true) { actions.push(Action::ToggleBrowser) }
+                    ui.separator();
+                    ui.label(RichText::new("Core viewer").weak());
                     // a pane above the plots with the photos of the cubes on the core
+                    if item(ui, "GIS viewer", "", true) { actions.push(Action::Gis) }
                     // always the same text, always the window where the cube folders are linked
                     if ui.add_enabled(has, egui::Button::new("Enable core viewer")).on_hover_text("Opens the window that links the specimens to their cube photo folders, then shows the photos on the core above the plots; clicking or selecting cubes selects their records and the other way round.").clicked() {
                         actions.push(Action::EnableCoreViewer);
@@ -1853,6 +2157,53 @@ impl eframe::App for App {
                             ui.close();
                         }
                     }
+                    // the GIS viewer: a tick that only shows or hides its pane, and a button that opens its settings
+                    ui.separator();
+                    ui.label(RichText::new("GIS viewer").weak());
+                    let mut gis_on = self.gis_on;
+                    if ui.checkbox(&mut gis_on, "Show GIS viewer pane").on_hover_text("Only shows or hides the map pane (next to the core viewer when both are on). Nothing is lost: the places stay saved and the settings stay as they are").changed() {
+                        actions.push(Action::ToggleGis);
+                        ui.close();
+                    }
+                    let mut popped = self.gis_on && self.gis_popped;
+                    if ui.checkbox(&mut popped, "GIS viewer in its own window   Shift+Ctrl+Space").on_hover_text("Pops the GIS viewer out of the panes into a window of its own that can be moved to another screen; the same entry (or the button at the top of the layers sidebar) puts it back").changed() {
+                        actions.push(Action::PopOutGis);
+                        ui.close();
+                    }
+                    let mut layer_bar = self.gis.show_layers;
+                    if ui.add_enabled(self.gis_on, egui::Checkbox::new(&mut layer_bar, "Layers sidebar of the GIS pane   Shift+Ctrl+B")).on_hover_text("Shows or hides the list of map layers at the left of the GIS pane (Ctrl+B stays the file browser)").changed() {
+                        actions.push(Action::ToggleLayerBar);
+                        ui.close();
+                    }
+                    if ui.button("GIS viewer settings and locations ...").on_hover_text("Opens the window with where the specimens are (input from file or manually), the geologic map, the basemap and the symbols. It works with the pane shown or hidden").clicked() {
+                        actions.push(Action::Gis);
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.menu_button("Panes", |ui| {
+                        ui.label(RichText::new("Drag a pane by the six dots at its top centre").weak().small());
+                        let can_add = pane_layout::next_addable(&self.layout_order, self.cv.on, self.gis_on).is_some();
+                        if item(ui, "Add pane", "Shift+Ctrl+N", can_add) { actions.push(Action::AddPane) }
+                        ui.menu_button("Remove pane", |ui| {
+                            ui.label(RichText::new("Shift+Ctrl+W removes the pane the mouse is in").weak().small());
+                            let names = self.pane_names();
+                            for id in self.layout_order.clone() {
+                                if id == PaneId::Stereo {
+                                    continue;
+                                }
+                                let name = match id {
+                                    PaneId::Plot(k) => names[k].clone(),
+                                    PaneId::Core => "Core viewer".to_string(),
+                                    _ => "GIS viewer".to_string(),
+                                };
+                                if ui.button(name).clicked() {
+                                    actions.push(Action::RemovePaneAt(id));
+                                    ui.close();
+                                }
+                            }
+                        });
+                        if item(ui, "Reset pane layout", "", true) { actions.push(Action::ResetLayout) }
+                    });
                     if item(ui, if self.dark { "Light Theme" } else { "Dark Theme" }, "", true) { actions.push(Action::ToggleTheme) }
                     if ui.checkbox(&mut self.oop_highlight, "Highlight out-of-phase view").on_hover_text("A fat red outline around the Out-of-Phase button while the out-of-phase data are shown, so you do not forget what you are looking at").changed() {
                         self.save_state();
@@ -2192,7 +2543,18 @@ impl App {
             if ui.small_button(arrow).on_hover_text("Colour-coding options").clicked() {
                 self.spec_color_open = !self.spec_color_open;
             }
-            ui.strong("Specimens");
+            ui.strong("Sub-specimens");
+            // sort and filter: an icon at the right end of the header
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let hint = "Sort and filter the list: A1 B1 C1 D1 or A1 A2 A3 A4 order, by name or by a parameter; filter by name, selection or value range. Only the list is changed, not the file.";
+                if spec_view::sort_filter_button(ui, self.sv.is_active(), hint).clicked() {
+                    self.open_win(W_SORT);
+                }
+                if self.sv.is_filtering() {
+                    let (shown, total) = (self.list_order().len(), self.doc.as_ref().map_or(0, |d| d.specs.len()));
+                    ui.label(RichText::new(format!("(n={shown}) of (n={total})")).small().weak()).on_hover_text("Sub-specimens listed of the sub-specimens in the file");
+                }
+            });
         });
         if self.spec_color_open {
             let before = self.color_master.clone();
@@ -2216,11 +2578,11 @@ impl App {
             }
             _ => vec![],
         };
+        let order = self.list_order();
         let Some(doc) = &mut self.doc else {
             ui.label(RichText::new("No file open.\nOpen one with Ctrl+O or pick it in the file browser.").weak());
             return;
         };
-        let order = doc.order();
         let mods = ui.input(|i| i.modifiers);
         let down = ui.input(|i| i.pointer.primary_down());
         let pointer = ui.input(|i| i.pointer.interact_pos());
@@ -2279,71 +2641,64 @@ impl App {
             }
             let _ = d.additive;
         } else if let Some(i) = clicked {
-            select(doc, i, mods, &mut self.last_anchor);
+            select(doc, i, mods, &mut self.last_anchor, &order);
         }
     }
 
     fn plots_ui(&mut self, ui: &mut Ui, th: &Theme) {
         let all = ui.available_rect_before_wrap();
         let gap = 8.0;
-        // the core viewer, when it is on, takes a strip across the top; the four plots share what is left
-        let mut core_rect: Option<Rect> = None;
-        let full = if self.cv.on {
-            let h = (all.height() * self.cv.frac).clamp(90.0, (all.height() - 260.0).max(90.0));
-            core_rect = Some(Rect::from_min_max(all.min, Pos2::new(all.max.x, all.min.y + h - gap / 2.0)));
-            let bar = Rect::from_min_max(Pos2::new(all.min.x, all.min.y + h - gap / 2.0), Pos2::new(all.max.x, all.min.y + h + gap / 2.0));
-            let rc = ui.interact(bar, ui.scope_id().with("split_core"), Sense::drag());
-            if rc.hovered() || rc.dragged() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-                ui.painter().rect_filled(bar.shrink2(Vec2::new(0.0, 2.0)), 2.0, th.accent.gamma_multiply(0.5));
+        // which panes are shown and where: the order of the panes gives the rows (see pane_layout.rs)
+        let order = pane_layout::sync_order(&self.layout_order, self.cv.on, self.gis_on && !self.gis_popped);
+        if order != self.layout_order {
+            self.layout_order = order.clone();
+        }
+        let rows = pane_layout::build_rows(&order);
+        let gis_row = rows.iter().position(|r| r.contains(&PaneId::Gis));
+        let wide_frac = if gis_row.is_some() { self.gis_frac } else { self.cv.frac };
+        let placed = pane_layout::place(&rows, all, gap, wide_frac, self.vfrac, self.hfrac, self.gfrac);
+        let before = (self.hfrac, self.vfrac, self.gfrac, self.cv.frac, self.gis_frac);
+        for sp in &placed.splitters {
+            let resp = ui.interact(sp.rect, ui.scope_id().with(("pane-split", sp.row, sp.between_columns)), Sense::drag());
+            if resp.hovered() || resp.dragged() {
+                ui.ctx().set_cursor_icon(if sp.between_columns { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::ResizeVertical });
+                ui.painter().rect_filled(sp.rect.shrink2(if sp.between_columns { Vec2::new(2.0, 0.0) } else { Vec2::new(0.0, 2.0) }), 2.0, th.accent.gamma_multiply(0.5));
             }
-            if rc.dragged() {
-                if let Some(p) = rc.interact_pointer_pos() {
-                    self.cv.frac = ((p.y - all.min.y) / all.height()).clamp(0.12, 0.6);
-                    self.layout_changed = Some(ui.input(|i| i.time));
+            let Some(p) = resp.interact_pointer_pos().filter(|_| resp.dragged()) else { continue };
+            let row_wide = rows[sp.row][0].is_wide();
+            if sp.between_columns {
+                let rr = placed.rows[sp.row];
+                let frac = ((p.x - rr.min.x) / rr.width()).clamp(0.2, 0.8);
+                if row_wide {
+                    self.gfrac = frac;
+                } else {
+                    self.hfrac = frac;
+                }
+            } else if row_wide {
+                let f = ((p.y - placed.rows[sp.row].min.y) / all.height()).clamp(0.12, 0.6);
+                if gis_row.is_some() {
+                    self.gis_frac = f;
+                } else {
+                    self.cv.frac = f;
+                }
+            } else {
+                // between the two plot rows: their share of the rest
+                let plot_rows: Vec<usize> = (0..rows.len()).filter(|&r| !rows[r][0].is_wide()).collect();
+                if plot_rows.len() == 2 && plot_rows[0] == sp.row {
+                    let (top, bottom) = (placed.rows[plot_rows[0]].min.y, placed.rows[plot_rows[1]].max.y);
+                    self.vfrac = ((p.y - top) / (bottom - top).max(1.0)).clamp(0.2, 0.8);
                 }
             }
-            Rect::from_min_max(Pos2::new(all.min.x, all.min.y + h + gap / 2.0), all.max)
-        } else {
-            all
-        };
-        let sx = full.min.x + full.width() * self.hfrac;
-        let sy = full.min.y + full.height() * self.vfrac;
-        let tl = Rect::from_min_max(full.min, Pos2::new(sx - gap / 2.0, sy - gap / 2.0));
-        let tr = Rect::from_min_max(Pos2::new(sx + gap / 2.0, full.min.y), Pos2::new(full.max.x, sy - gap / 2.0));
-        let bl = Rect::from_min_max(Pos2::new(full.min.x, sy + gap / 2.0), Pos2::new(sx - gap / 2.0, full.max.y));
-        let br = Rect::from_min_max(Pos2::new(sx + gap / 2.0, sy + gap / 2.0), full.max);
-        let before = (self.hfrac, self.vfrac);
-
-        let v = Rect::from_min_max(Pos2::new(sx - gap / 2.0, full.min.y), Pos2::new(sx + gap / 2.0, full.max.y));
-        let hbar = Rect::from_min_max(Pos2::new(full.min.x, sy - gap / 2.0), Pos2::new(full.max.x, sy + gap / 2.0));
-        let rv = ui.interact(v, ui.scope_id().with("split_v"), Sense::drag());
-        let rh = ui.interact(hbar, ui.scope_id().with("split_h"), Sense::drag());
-        if rv.hovered() || rv.dragged() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
-        if rh.hovered() || rh.dragged() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-        }
-        if rv.dragged() {
-            if let Some(p) = rv.interact_pointer_pos() {
-                self.hfrac = ((p.x - full.min.x) / full.width()).clamp(0.2, 0.8);
-            }
-        }
-        if rh.dragged() {
-            if let Some(p) = rh.interact_pointer_pos() {
-                self.vfrac = ((p.y - full.min.y) / full.height()).clamp(0.2, 0.8);
-            }
-        }
-        if before != (self.hfrac, self.vfrac) {
+        if before != (self.hfrac, self.vfrac, self.gfrac, self.cv.frac, self.gis_frac) {
             // saved shortly after the drag ends (see track_layout)
             self.layout_changed = Some(ui.input(|i| i.time));
         }
-        for (r, resp) in [(v, &rv), (hbar, &rh)] {
-            if resp.hovered() || resp.dragged() {
-                ui.painter().rect_filled(r.shrink2(if r == v { Vec2::new(2.0, 0.0) } else { Vec2::new(0.0, 2.0) }), 2.0, th.accent.gamma_multiply(0.5));
-            }
-        }
+        let rect_of = |id: PaneId| placed.panes.iter().find(|(p, _)| *p == id).map(|(_, r)| *r);
+        let slot_rect: [Option<Rect>; 4] = [rect_of(PaneId::Stereo), rect_of(PaneId::Plot(1)), rect_of(PaneId::Plot(2)), rect_of(PaneId::Plot(3))];
+        let core_rect = rect_of(PaneId::Core);
+        let gis_rect = rect_of(PaneId::Gis);
+        self.pane_rects = placed.panes.clone();
 
         let pts = self.points();
         let mut click: Option<usize> = None;
@@ -2354,7 +2709,6 @@ impl App {
             CoordSys::Paleo => "PALEO",
             CoordSys::Tectonic => "TECTO",
         };
-        let rects = [tl, tr, bl, br];
         let names = self.pane_names();
         let class_cols = self.class_colors();
         let mut overlay_gs: Option<ams_core::stats::GroupStats> = None;
@@ -2365,7 +2719,12 @@ impl App {
             overlay_gs = ams_core::stats::group_stats(&tensors, &kms);
         }
         for i in 0..4 {
-            let mut body = self.pane_frame(ui, rects[i], i, &names[i], th);
+            let Some(prect) = slot_rect[i] else {
+                // a removed plot pane: nothing to draw, its settings stay
+                self.hover[i] = Default::default();
+                continue;
+            };
+            let mut body = self.pane_frame(ui, prect, i, &names[i], th);
             // the settings of the three plot panes (the stereonet has none)
             let cfg: Option<PaneCfg> = (i >= 1).then(|| self.cfg(i - 1).clone());
             let coloured = i == 0 || cfg.as_ref().map_or(false, |c| matches!(c.kind, XyKind::Scatter | XyKind::Line) || (i == 3 && c.polar));
@@ -2441,6 +2800,10 @@ impl App {
                 band = out.band;
             }
         }
+        if let Some(gr) = gis_rect {
+            self.gis_pane(ui, gr, th);
+        }
+        self.pane_grips(ui, th, &placed.panes, &names);
         if band.is_some() {
             self.last_band = true;
         } else if click.is_some() {
@@ -2463,9 +2826,12 @@ impl App {
         if let Some(job) = &mut self.shot {
             if job.rects.is_empty() {
                 let tag = |n: &str| -> &'static str { Box::leak(n.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect::<String>().into_boxed_str()) };
-                job.rects = names.iter().zip(rects).enumerate().filter(|(i, _)| self.export[*i]).map(|(_, (n, r))| (tag(n), r)).collect();
+                job.rects = names.iter().enumerate().filter(|(i, _)| self.export[*i]).filter_map(|(i, n)| slot_rect[i].map(|r| (tag(n), r))).collect();
                 if let (Some(cr), true) = (core_rect, self.cv.export) {
                     job.rects.insert(0, ("core_viewer", cr));
+                }
+                if let (Some(gr), true) = (gis_rect, self.gis_export) {
+                    job.rects.insert(0, ("gis_viewer", gr));
                 }
             }
         }
@@ -2474,11 +2840,140 @@ impl App {
             if let (Some(cr), true) = (core_rect, self.cv.export) {
                 ui.painter().rect(cr, 8.0, th.accent.gamma_multiply(0.13), Stroke::new(3.0, th.accent), StrokeKind::Inside);
             }
+            if let (Some(gr), true) = (gis_rect, self.gis_export) {
+                ui.painter().rect(gr, 8.0, th.accent.gamma_multiply(0.13), Stroke::new(3.0, th.accent), StrokeKind::Inside);
+            }
             for i in 0..4 {
-                if self.export[i] {
-                    ui.painter().rect(rects[i], 8.0, th.accent.gamma_multiply(0.13), Stroke::new(3.0, th.accent), StrokeKind::Inside);
+                if let (true, Some(r)) = (self.export[i], slot_rect[i]) {
+                    ui.painter().rect(r, 8.0, th.accent.gamma_multiply(0.13), Stroke::new(3.0, th.accent), StrokeKind::Inside);
                 }
             }
+        }
+    }
+
+    pub(super) fn toggle_gis(&mut self) {
+        self.gis_on = !self.gis_on;
+        if self.gis_on && self.gis.placed.is_empty() && self.gis.n_files == 0 {
+            // the first time the map has nothing to show: its settings open so places can be added
+            self.open_win(W_GIS);
+        }
+        if !self.gis_on {
+            self.win_gis = false;
+            // switched off from its own window: it comes back into the panes the next time
+            self.gis_popped = false;
+        }
+        self.save_state();
+    }
+
+    /// Shift+Ctrl+Space: the GIS viewer into a window of its own, or back into the panes. Switches the viewer on first
+    /// when it is off.
+    pub(super) fn toggle_popout(&mut self) {
+        if !self.gis_on {
+            self.gis_on = true;
+            self.gis_popped = true;
+        } else {
+            self.gis_popped = !self.gis_popped;
+        }
+        self.save_state();
+    }
+
+    /// Shift+Ctrl+N: brings back a removed plot pane, else switches the GIS viewer on, else the core viewer.
+    fn add_pane(&mut self) {
+        match pane_layout::next_addable(&self.layout_order, self.cv.on, self.gis_on) {
+            Some(PaneId::Plot(k)) => self.layout_order.push(PaneId::Plot(k)),
+            Some(PaneId::Gis) => self.toggle_gis(),
+            Some(PaneId::Core) => self.cv_enable(),
+            _ => {}
+        }
+        self.save_state();
+    }
+
+    /// Takes a pane away: a plot pane keeps its settings for when it is added again; the stereonet cannot be removed.
+    fn remove_pane(&mut self, id: PaneId) {
+        match id {
+            PaneId::Stereo => return,
+            PaneId::Plot(k) => {
+                self.layout_order.retain(|p| *p != id);
+                self.pane_settings[k] = false;
+            }
+            PaneId::Gis => {
+                if self.gis_on {
+                    self.toggle_gis();
+                }
+                return;
+            }
+            PaneId::Core => {
+                if self.cv.on {
+                    self.cv_toggle();
+                }
+                return;
+            }
+        }
+        self.save_state();
+    }
+
+    /// The six dots at the top centre of every pane (except the stereonet, which stays where it is): visible while the
+    /// pointer is on that spot; dragging them onto another pane swaps the two.
+    fn pane_grips(&mut self, ui: &mut Ui, th: &Theme, panes: &[(PaneId, Rect)], names: &[String]) {
+        let pointer = ui.input(|i| i.pointer.latest_pos());
+        let name_of = |id: PaneId| match id {
+            PaneId::Stereo => names[0].clone(),
+            PaneId::Plot(k) => names[k].clone(),
+            PaneId::Core => "Core viewer".to_string(),
+            PaneId::Gis => "GIS viewer".to_string(),
+        };
+        for (id, rect) in panes {
+            if *id == PaneId::Stereo {
+                continue;
+            }
+            // in the free strip above the header: nothing of the pane is underneath
+            let grip = Rect::from_center_size(Pos2::new(rect.center().x, rect.min.y + PANE_TOP / 2.0), Vec2::new(54.0, PANE_TOP));
+            let resp = ui.interact(grip, ui.scope_id().with(("pane-grip", *id)), Sense::drag());
+            if resp.drag_started() {
+                self.pane_drag = Some(*id);
+            }
+            // (AMS_STUDIO_SHOW_GRIPS draws them always: a headless test hook, the pointer cannot hover there)
+            if resp.hovered() || resp.dragged() || std::env::var_os("AMS_STUDIO_SHOW_GRIPS").is_some() {
+                ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+                let fill = if th.dark { Color32::from_gray(58) } else { Color32::from_gray(228) };
+                ui.painter().rect(grip, 6.0, fill, Stroke::new(1.0, th.accent.gamma_multiply(0.6)), StrokeKind::Inside);
+                let dot = if th.dark { Color32::from_gray(205) } else { Color32::from_gray(70) };
+                // six dots: two rows of three
+                for row in [-3.0f32, 3.0] {
+                    for col in [-7.0f32, 0.0, 7.0] {
+                        ui.painter().circle_filled(grip.center() + Vec2::new(col, row), 1.6, dot);
+                    }
+                }
+                resp.on_hover_text("Drag onto another pane to swap their places");
+            }
+        }
+        let Some(dragged) = self.pane_drag else { return };
+        let target = pointer.and_then(|p| pane_layout::pane_at(panes, p)).filter(|t| *t != dragged);
+        if !ui.input(|i| i.pointer.primary_down()) {
+            if let Some(t) = target {
+                self.layout_order = pane_layout::move_pane(&self.layout_order, dragged, t);
+                self.save_state();
+            }
+            self.pane_drag = None;
+            return;
+        }
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        ui.ctx().request_repaint();
+        if let Some((_, r)) = panes.iter().find(|(p, _)| *p == dragged) {
+            ui.painter().rect(*r, 8.0, th.accent.gamma_multiply(0.06), Stroke::new(2.0, th.accent.gamma_multiply(0.5)), StrokeKind::Inside);
+        }
+        if let Some((_, r)) = target.and_then(|t| panes.iter().find(|(p, _)| *p == t)) {
+            ui.painter().rect(*r, 8.0, th.accent.gamma_multiply(0.18), Stroke::new(3.5, th.accent), StrokeKind::Inside);
+        }
+        if let Some(p) = pointer {
+            let text = match target {
+                Some(t) => format!("{}  swaps with  {}", name_of(dragged), name_of(t)),
+                None => format!("Moving {}", name_of(dragged)),
+            };
+            let galley = ui.painter().layout_no_wrap(text, FontId::proportional(13.5), Color32::WHITE);
+            let r = Rect::from_min_size(p + Vec2::new(14.0, 14.0), galley.size() + Vec2::new(16.0, 10.0));
+            ui.painter().rect_filled(r, 6.0, th.accent);
+            ui.painter().galley(r.min + Vec2::new(8.0, 5.0), galley, Color32::WHITE);
         }
     }
 
@@ -2486,7 +2981,7 @@ impl App {
     fn pane_frame(&mut self, ui: &mut Ui, rect: Rect, i: usize, name: &str, th: &Theme) -> Rect {
         let visuals = ui.visuals().clone();
         ui.painter().rect(rect, 8.0, if th.dark { th.canvas() } else { visuals.extreme_bg_color }, Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color), StrokeKind::Inside);
-        let header = Rect::from_min_size(rect.min + Vec2::new(6.0, 4.0), Vec2::new(rect.width() - 12.0, 24.0));
+        let header = Rect::from_min_size(rect.min + Vec2::new(6.0, PANE_TOP), Vec2::new(rect.width() - 12.0, 24.0));
         let mut child = ui.new_child(UiBuilder::new().max_rect(header).layout(Layout::left_to_right(Align::Center)));
         let arrow = if self.pane_settings[i] { "▾" } else { "▸" };
         let arrow_resp = child.small_button(arrow).on_hover_text("Plot options");
@@ -2836,14 +3331,16 @@ fn row_text(ui: &Ui, rect: Rect, dx: f32, text: &str, active: bool, _dark: bool)
     galley_rect.width()
 }
 
-fn select(doc: &mut Doc, i: usize, mods: Modifiers, anchor: &mut Option<usize>) {
+fn select(doc: &mut Doc, i: usize, mods: Modifiers, anchor: &mut Option<usize>, order: &[usize]) {
     if mods.shift {
         if let Some(a) = *anchor {
-            let (lo, hi) = (a.min(i), a.max(i));
-            for k in lo..=hi {
-                doc.selected[k] = true;
+            // the range between the two clicks as the list shows it (sorted and filtered), not as the file stores it
+            if let (Some(pa), Some(pi)) = (order.iter().position(|&o| o == a), order.iter().position(|&o| o == i)) {
+                for &k in &order[pa.min(pi)..=pa.max(pi)] {
+                    doc.selected[k] = true;
+                }
+                return;
             }
-            return;
         }
     }
     if mods.command || mods.ctrl {
@@ -2883,6 +3380,7 @@ impl App {
 
     /// Remember the window size and write the layout to disk shortly after it stopped changing.
     fn track_layout(&mut self, ctx: &egui::Context) {
+        self.autosave_state(ctx);
         let now = ctx.input(|i| i.time);
         let (rect, maxd) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().maximized.unwrap_or(false)));
         if maxd != self.win_max {
@@ -2924,6 +3422,8 @@ impl App {
             W_CLASSES => self.win_classes = true,
             W_SET => self.win_set = true,
             W_VOL => self.win_vol = true,
+            W_SORT => self.win_sort = true,
+            W_GIS => self.win_gis = true,
             W_CORE => self.win_core = true,
             W_COREVIEW => self.cv.win = true,
             W_RECOMB => self.win_recomb = true,
@@ -3046,6 +3546,9 @@ impl App {
         self.cv_window(ctx);
         self.recombine_window(ctx);
         self.volume_window(ctx);
+        self.sort_window(ctx);
+        self.gis_window(ctx);
+        self.gis_popout(ctx);
         self.owens_window(ctx);
         self.table_window(ctx);
         self.group_window(ctx);
@@ -3300,10 +3803,11 @@ impl App {
         let (derived, out_phase) = (self.derived.clone(), self.out_phase);
         let mut drag = self.list_drag.take();
         let mut anchor = self.last_anchor;
+        let listed = self.list_order();
         if let Some(doc) = &mut self.doc {
             if derived.len() == doc.specs.len() {
                 win.open(&mut open).show(ctx, |ui| {
-                    let order = doc.order();
+                    let order = listed;
                     egui::ScrollArea::horizontal().show(ui, |ui| {
                         let (hr, _) = ui.allocate_exact_size(Vec2::new(total_w, 24.0), Sense::hover());
                         let mut x = hr.min.x;
@@ -3361,7 +3865,7 @@ impl App {
                             doc.selected[order[pos]] = true;
                         }
                     } else if let Some(i) = clicked {
-                        select(doc, i, mods, &mut anchor);
+                        select(doc, i, mods, &mut anchor, &order);
                     }
                 });
             }

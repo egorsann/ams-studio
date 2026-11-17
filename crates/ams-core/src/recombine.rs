@@ -92,6 +92,15 @@ pub fn split_id(name: &str) -> (String, Option<(String, u64)>) {
             }
         }
     }
+    // a name that is only a sub-specimen: one letter and a number (A1, D12) or a number and one letter (1A). It has no
+    // sample part, so every such name belongs to the same (empty) sample and only the order inside it counts. Two
+    // letters (ZZ01) are a sample name and stay one.
+    let letters: usize = name.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    if letters == 1 {
+        if let Some(t) = tail_parts(name) {
+            return (String::new(), Some(t));
+        }
+    }
     (name.to_string(), None)
 }
 
@@ -124,7 +133,7 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
     ca.len().cmp(&cb.len())
 }
 
-fn order_cmp(a: &str, b: &str, within: Within) -> Ordering {
+pub fn order_cmp(a: &str, b: &str, within: Within) -> Ordering {
     let ((pa, ta), (pb, tb)) = (split_id(a), split_id(b));
     natural_cmp(&pa, &pb).then_with(|| match (ta, tb) {
         (Some((la, na)), Some((lb, nb))) => match within {
@@ -207,6 +216,28 @@ mod tests {
         assert_eq!(names(&f, &b), ["ZZ01-1A", "ZZ01-2A", "ZZ01-1B", "ZZ01-2B"]);
         let g = vec![vec![r("DC26AB002A2", 1), r("DC26AB002B1", 2), r("DC26AB002A1", 3)]];
         assert_ne!(names(&g, &plan(&g, &Options::default())), names(&g, &plan(&g, &Options { within: Within::LetterThenNumber, ..Default::default() })));
+    }
+
+    #[test]
+    fn plain_sub_specimen_names_have_no_sample_part() {
+        assert_eq!(split_id("A1"), (String::new(), Some(("a".into(), 1))));
+        assert_eq!(split_id("D12"), (String::new(), Some(("d".into(), 12))));
+        assert_eq!(split_id("1A"), (String::new(), Some(("a".into(), 1))));
+        // two letters are a sample name; names with a sample part are read as before
+        assert_eq!(split_id("ZZ01"), ("ZZ01".into(), None));
+        assert_eq!(split_id("ZZ01-A1"), ("ZZ01".into(), Some(("a".into(), 1))));
+        assert_eq!(split_id("Spx-3"), ("Spx-3".into(), None));
+    }
+
+    #[test]
+    fn plain_names_sort_differently_in_the_two_orders() {
+        let r = |n: &str| RecInfo { name: n.into(), bytes: vec![] };
+        let f = vec![vec![r("A2"), r("B1"), r("A1"), r("B2"), r("C1"), r("D1"), r("C2"), r("D2")]];
+        let p = plan(&f, &Options { within: Within::NumberThenLetter, ..Default::default() });
+        assert_eq!(names(&f, &p), ["A1", "B1", "C1", "D1", "A2", "B2", "C2", "D2"]);
+        let p = plan(&f, &Options { within: Within::LetterThenNumber, ..Default::default() });
+        assert_eq!(names(&f, &p), ["A1", "A2", "B1", "B2", "C1", "C2", "D1", "D2"]);
+        assert!(is_sorted(&f[0].iter().cloned().collect::<Vec<_>>().into_iter().filter(|_| false).collect::<Vec<_>>(), Within::NumberThenLetter));
     }
 
     #[test]

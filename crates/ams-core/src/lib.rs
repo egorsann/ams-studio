@@ -7,6 +7,7 @@ pub mod depjson;
 pub mod export;
 pub mod georot;
 pub mod ged;
+pub mod gis;
 pub mod import;
 pub mod lab;
 pub mod orient;

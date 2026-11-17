@@ -25,6 +25,8 @@ crates/ams-core/   pure Rust, no GUI, the testable part
   examples/            validate, check_tools (compare with the original), make_demo
 crates/ams-studio/        egui app
   src/app.rs           state, menus, toolbar, plots layout, windows, shortcuts, persistence
+  src/app/gis_*.rs     GIS viewer (View menu): gis_data (tiles, maps, tables), gis_ui (viewer), gis_georef (table + georeference windows + CRS picker), gis_loc / gis_loc_ui (per-specimen places in the dependency file, Specimen locations window), gis_manual_ui (Enter coordinates), gis_layers (the layer tree of the GIS pane, tested) and gis_layers_ui (the layers sidebar), prefs_ext (text forms of pane settings); pane_layout.rs (pane order, rows and rectangles of the main window, tested without a window); maths in ams-core/src/gis.rs
+  src/app/spec_view.rs Sort / filter of the Sub-specimens list
   src/app/tools_ui.rs  GED Editor, Tensor Addition/Subtraction, Fabric Overprint, Intersection, Deform AMS
   src/app/analysis_ui.rs  Group Statistics and Contour Plot
   src/plots.rs         stereonet / histogram / scatter drawing + rubber-band picking
@@ -63,3 +65,5 @@ See `docs/RECREATING.md` section 5 (Xvfb + xdotool + a fresh `XDG_CONFIG_HOME`).
 
 - `ams-studio <folder>` opens the folder as the parent of the specimen folders (the Open Folder of Specimens dialog).
 - `AMS_STUDIO_PICK_FILE=<path>` makes the "Owens from file" file picker return that path instead of opening a dialog, so the flow can be driven on a private X display (Xvfb with `env -u WAYLAND_DISPLAY`, never on the user's desktop).
+
+- `AMS_STUDIO_OPEN_WINDOW=sort|sort-letter|gis|gis-table|gis-georef|gis-loc|gis-manual|gis-manual-all` opens that window on the first frame; with `gis*`, `AMS_STUDIO_GIS_TABLE=<csv>`, `AMS_STUDIO_GIS_MAP=<image>` stand in for the file dialogs, `AMS_STUDIO_GIS_BASEMAP=1` ticks the OpenStreetMap basemap and `AMS_STUDIO_GIS_PAIRS="px,py,lon,lat;..."` pre-fills control points for `gis-georef`. Use only on a private Xvfb with made-up data. `AMS_STUDIO_SET=<folder>` opens a folder of specimens without the dialog, `AMS_STUDIO_GIS_ZONE=<n>` sets the UTM zone of the table draft, `AMS_STUDIO_GIS_SAVE=1` runs *Link and save* once, `AMS_STUDIO_GIS_TYPE="<id>|<first>|<second>"` (or `"<id>=<a>,<b>;..."` for the list) fills the Enter coordinates window (with `gis-manual` / `gis-manual-all`), `AMS_STUDIO_GIS_YES=1` confirms the list's system, `AMS_STUDIO_GIS_PICK="<id>=<datasheet name>;..."` links like a choice in the drop-down. `AMS_STUDIO_SHOW_GRIPS=1` draws the six-dot pane grips always, `AMS_STUDIO_GIS_DEMO_SYMBOLS=1` replaces the places by a grid of made-up symbols with dips and plunges from shallow to steep. The pane layout can be set through `panes=stereo,p3,gis`, `gis_pane=1` and `core_on=1` in `state.txt` of a fresh `XDG_CONFIG_HOME`.
