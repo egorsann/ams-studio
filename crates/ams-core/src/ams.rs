@@ -1,6 +1,6 @@
 //! Reader for AGICO Safyr7 `.ams` files.
 //!
-//! Layout (see the vault note `AMS_binary_format_notes`): fixed 640-byte
+//! Layout (see `docs/FORMATS.md`): fixed 640-byte
 //! records, no header. Per record:
 //! * name at byte 0 (space/NUL padded), `field` A/m at 28, frequency Hz at 40,
 //!   instrument text at 44, program text at 52, reference volume (10.0 cm3) at 68;

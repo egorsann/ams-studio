@@ -105,7 +105,7 @@ pub fn eig_sym(m: &Mat3) -> ([f64; 3], [Vec3; 3]) {
     (out_vals, out_vecs)
 }
 
-/// Declination / inclination (degrees) of an axis, as in the vault notes:
+/// Declination / inclination (degrees) of an axis, as in `docs/ORIGINAL_BEHAVIOUR.md`:
 /// flip to the z >= 0 hemisphere, `inc = asin(z)`, `dec = atan2(x, y)`.
 pub fn dec_inc(v: Vec3) -> (f64, f64) {
     let v = if v[2] < 0.0 { [-v[0], -v[1], -v[2]] } else { v };

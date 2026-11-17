@@ -1,16 +1,16 @@
 # AMS Studio
 
-**AMS Studio is a fast, modern, open application for anisotropy of magnetic susceptibility (AMS) data**, built as a modern alternative to AGICO's Anisoft 6. It reads Safyr7 `.ams` files, gives the same numbers as the original (checked against it), keeps the original's menus, toolbar order and shortcuts, and adds the things the original never had: a **dark mode**, resizable panes, a file browser, drag selection, and a single executable for **Windows and Linux**.
+[AGICO](https://www.agico.com/) of Brno gave rock magnetism its instruments and its software: the Kappabridges, the Safyr data format and **Anisoft 6**, the program that has processed anisotropy of magnetic susceptibility (AMS) data in laboratories around the world for years. Anisoft 6 is the reference, and this project owes everything to it. **AMS Studio is not a replacement for Anisoft 6.** It is a companion for people who already work with it: a modern viewer that reads the same Safyr7 `.ams` files, reproduces the original's numbers (checked against its own output), keeps its menus, toolbar order and shortcuts, and adds a few conveniences around them: a **dark mode**, resizable panes, a file browser, drag selection, a map of where the specimens are, and a single executable for **Windows and Linux**.
 
-> **Download (Windows):** [`dist/ams-studio-windows-x64.exe`](dist/ams-studio-windows-x64.exe), also attached to the [latest release](../../releases/latest). Double-click it, there is no installer. On Linux build from source (below). Try it with the made-up files in [`examples/`](examples).
+> **Download (Windows):** [`ams-studio-windows-x64.exe`](https://github.com/egorsann/ams-studio/releases/latest/download/ams-studio-windows-x64.exe) from the [latest release](../../releases/latest) (the SHA-256 is next to it). Double-click it, there is no installer. After that the program tells you at the top right when a newer version exists and installs it with one click. On Linux, `ams-studio-linux-x64` is on the same page, or build from source (below). Try it with the made-up files in [`examples/`](examples).
 
 | Light | Dark |
 |---|---|
 | ![light](docs/img/main_light.png) | ![dark](docs/img/main_dark.png) |
 
-## What is better than the original
+## Where AMS Studio differs from Anisoft 6
 
-| | Original Anisoft 6 | AMS Studio |
+| | Anisoft 6 | AMS Studio |
 |---|---|---|
 | **Look** | One fixed light look | **Light and dark theme** (View menu, remembered), flat vector icons, rounded cards. The toolbar buttons are in the same places as in the original, so muscle memory carries over |
 | **Layout** | Four plots at a fixed split | **Drag the dividers** between the plots, resize the Specimens list and the file browser. Window size, panel widths and dividers are **remembered** between runs |
@@ -21,7 +21,7 @@
 | **Popups** | Tool windows open in a different place every time | About **twice as large**, always open **centred at the same size** |
 | **Exports** | CSV of one phase | **One CSV with in-phase and out-of-phase together**: one row per specimen, columns `ip_*` and `op_*` (Km, K1-K3 with SD, directions, L F P Pj T U Q E, F-tests, E12/E23/E13, the raw tensor) plus `opKm_over_ipKm_percent`. **Export Selection (CSV)** (Ctrl+Shift+E) does the same for just the selected specimens |
 | **Install** | Windows only; installer that brings the Visual Basic 6 runtime and OCX controls | **One executable**, nothing to install, runs on **Windows and Linux** |
-| **Trust** | Closed source | **Open source**, 42 automated tests, results checked against the original on its own output files (see below) |
+| **Source** | Proprietary | **Open source**, 42 automated tests, results checked against the original on its own output files (see below) |
 
 Also: a new **application icon** (an AMS ellipsoid with its K1/K2/K3 axes); disregarded records **sink to the bottom** of the list and the Data Table, struck through and faded; the colour-coding panel, the Export graphics tick boxes and the status bar colours of the original are kept.
 
@@ -96,13 +96,17 @@ Honest list of the gaps:
 
 ## Run it
 
-**Windows 10 / 11 (64-bit):** download [`dist/ams-studio-windows-x64.exe`](dist/ams-studio-windows-x64.exe) (SHA-256 in `dist/ams-studio-windows-x64.exe.sha256`) and double-click it. The executable is not code-signed, so Windows SmartScreen may say "unknown publisher": choose *More info* then *Run anyway*. Preferences are kept in `%APPDATA%\ams-studio\state.txt` (delete it to reset the layout).
+**Windows 10 / 11 (64-bit):** download [`ams-studio-windows-x64.exe`](https://github.com/egorsann/ams-studio/releases/latest/download/ams-studio-windows-x64.exe) from the [latest release](../../releases/latest) (its SHA-256 is attached as `ams-studio-windows-x64.exe.sha256`) and double-click it. The executable is not code-signed, so Windows SmartScreen may say "unknown publisher": choose *More info* then *Run anyway*. Preferences are kept in `%APPDATA%\ams-studio\state.txt` (delete it to reset the layout).
 
-**Linux:** build from source (below); the binary needs a Wayland or X11 session. Preferences are in `~/.config/ams-studio/state.txt`.
+**Linux:** download `ams-studio-linux-x64` from the latest release (`chmod +x` it) or build from source (below); it needs a Wayland or X11 session. Preferences are in `~/.config/ams-studio/state.txt`.
 
 **From source:** `cargo run --release -p ams-studio -- examples/demo_60_specimens.ams` (a recent stable Rust; no other dependencies).
 
-The program never uses the network.
+### Updates
+
+At the top right of the menu bar the program shows its version and whether a newer one exists. A click on **Update available** asks, shows what is new and, on *Install*, downloads the new executable from this repository's [releases](../../releases), checks its SHA-256 against the checksum attached to the release, replaces the running program (the old one is deleted at the next start) and offers a restart. It works on any computer that has the exe and an internet connection: the certificates it needs are built in, nothing is installed, no account is needed, and nothing but the request for the release page of this repository leaves the computer. If the program sits in a folder you cannot write to, it says so and links to the download. *Settings > Look for a new version at start* turns the automatic check off.
+
+Network use: the update check (github.com, once at start unless switched off), and the map tiles of the GIS viewer when you tick a basemap (OpenStreetMap or Esri). Nothing else.
 
 ### Keyboard
 
@@ -165,7 +169,7 @@ AMS Studio is an independent application written from observed behaviour of AGIC
 
 *Edit > Drill Core to Geo (cubes) ...* rotates cubes cut from drill core into geographic coordinates. The tool is **built for halved core** and says so: it always assumes that the face of each cube that points up the hole carries the blue arrow, with the arrow pointing right as seen from outside (no choice is offered). One question per line, the prompt above its choice: the **drill hole survey** (dip direction and plunge; the top of the core is then shown as the left-hand-rule surface it is, strike = dip direction + 90, dip = 90 - plunge), the **BOH offset** (clockwise looking down the hole, the BOH_ROTA of the AMS dashboard), explained by three small cross-sections of the halved core looking down the hole with the blue arrow and the BOH mark (BOH mark to the left of the arrow: enter 360 - angle, e.g. 356 for 4 degrees; to the right: enter the angle; on the arrow: 0) and the **rows that will be rotated**. Ticking *Separate offsets for intervals of the core* expands a list of intervals (from slice or row, to slice or row, offset), counted by the slice numbers in the names (A12 = slice 12, as in the dashboard) or by rows; the offset above is used outside them. Folders called `_geo`, `_raw`, `_corr` or ending in `_geo` (exported results such as `DC26AB002_AMS_geo`) are not treated as specimens when a folder of specimens is opened. The rotation is the Owens construction applied to the top of the core, `R = Rz(strike) Rx(dip) Rz(offset) M`, and with the defaults it equals the dashboard's `reorient_ams` (tests in `ams-core/src/core.rs`; checked against `_reoriented.ran` made with Anisoft 4.2 to its 0.2 degree rounding). Records that are already rotated to geographic coordinates (Owens or drill core) are refused. *Save as .ams* writes the result as `_geo` files as for Owens.
 
-`cargo run --release -p ams-core --example core_geo_batch -- <source root> <output root> [ID ...]` writes, for every `<ID>_AMS/<ID>_use.ams` and the dashboard's BOREHOLE_CONFIGS (per-slice BOH_ROTA intervals), an exact copy `<output root>/<ID>_AMS/<ID>_AMS_geo/<ID>_use_geo.ams` plus `<ID>_AMS_geo_dependancy.json` with the reorientation of every record, only reading the source and refusing an output folder inside it, and compares the result with the geographic columns of `<ID>_AUTOGENERATED_from_ams.csv` (largest difference of any axis 0.001 degrees for all ten specimens).
+The rotation was checked against the geographic columns of an independent Python implementation to 0.001 degrees on ten real drill cores (the data themselves are not part of this repository).
 
 ## Sort and filter of the Sub-specimens list
 

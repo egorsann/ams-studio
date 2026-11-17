@@ -35,6 +35,7 @@ mod specset_ui;
 mod spec_view;
 mod volume_ui;
 mod tools_ui;
+mod update;
 use ams_core::coords::{CoordSys, Orientation};
 use ams_core::export;
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Key, Layout, Modifiers, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
@@ -505,6 +506,10 @@ pub struct App {
     /// What draws the window, whether that is software rendering, and when the last frame began (for the frame limit).
     gpu_info: String,
     software_render: bool,
+    /// Update checker (top right of the menu bar) and the setting that lets it ask GitHub at start.
+    up: update::Updater,
+    update_check: bool,
+    update_started: bool,
     last_frame_start: Option<std::time::Instant>,
     win_edit: bool,
     /// Files that were edited and left again without saving: kept so that nothing is lost while browsing.
@@ -719,6 +724,9 @@ impl App {
             win_about: false,
             gpu_info: String::new(),
             software_render: false,
+            up: update::Updater::default(),
+            update_check: true,
+            update_started: false,
             last_frame_start: None,
             win_edit: false,
             stash: Default::default(),
@@ -850,6 +858,7 @@ impl App {
                 "core_fit_all" => self.cv.fit_all = v == "1",
                 "st_planes" => self.st_planes_on = v != "0",
                 "oop_highlight" => self.oop_highlight = v != "0",
+                "update_check" => self.update_check = v != "0",
                 "st_plane_comments" => self.st_plane_comments = v != "0",
                 "st_plane_conv" => self.st_plane_conv = v.parse().unwrap_or(0u8).min(2),
                 "st_plane_new_spec" => self.st_plane_new_spec = v == "1",
@@ -922,7 +931,7 @@ impl App {
     /// The preferences as text: the layout, the panes and their settings, the specimen list, the GIS pane.
     fn state_text(&self) -> String {
         let mut t = format!(
-                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nuse_p={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\ncore_on={}\ncore_root={}\ncore_needle={}\ncore_frac={}\ncore_fit_all={}\nst_planes={}\nst_plane_comments={}\nst_plane_conv={}\nst_plane_new_spec={}\noop_highlight={}\ngfrac={}\npanes={}\ngis_pane={}\ngis_frac={}\ngis_popped={}\n",
+                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nuse_p={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\ncore_on={}\ncore_root={}\ncore_needle={}\ncore_frac={}\ncore_fit_all={}\nst_planes={}\nst_plane_comments={}\nst_plane_conv={}\nst_plane_new_spec={}\noop_highlight={}\ngfrac={}\npanes={}\ngis_pane={}\ngis_frac={}\ngis_popped={}\nupdate_check={}\n",
                 self.browser_dir.display(),
                 self.dark as u8,
                 self.browser_open as u8,
@@ -953,7 +962,8 @@ impl App {
                 pane_layout::order_to_text(&self.layout_order),
                 self.gis_on as u8,
                 self.gis_frac,
-                self.gis_popped as u8
+                self.gis_popped as u8,
+                self.update_check as u8
             );
         let color_lines: String = (0..4).map(|i| format!("color{i}={}\n", prefs_ext::color_to_line(&self.color[i]))).collect();
         let b = |v: bool| u8::from(v);
@@ -1661,7 +1671,7 @@ impl App {
 
     /// A dialog, pop-out or message is open (the egui drop-down menus are asked separately).
     fn any_dialog_open(&self) -> bool {
-        self.palette.open || self.win_table || self.win_group || self.win_contour || self.win_orient || self.win_colors || self.win_factors || self.win_about || self.win_edit
+        self.palette.open || self.win_table || self.win_group || self.win_contour || self.win_orient || self.win_colors || self.win_factors || self.win_about || self.up.window || self.win_edit
             || self.win_export || self.win_recomb || self.win_vol || self.win_sort || self.win_gis || self.gis.win_georef || self.gis.win_table || self.gis.loc.win || self.gis.manual.win || self.win_core || self.cv.win || self.win_set || self.win_classes || self.win_owens
             || self.tools.open.iter().any(|o| *o) || self.info.is_some() || self.quit_prompt || self.pane_settings.iter().any(|o| *o)
     }
@@ -2025,6 +2035,13 @@ impl Drop for FrameTimer {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self) {
+        // the new version is started once this one is gone (after *Restart now* in the update window)
+        if self.up.restart_on_exit {
+            update::spawn_new();
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         // what draws the window; software rendering is held to 30 frames per second so a computer without a graphics
         // card (or a virtual machine) stays usable while something is dragged
@@ -2092,6 +2109,14 @@ impl eframe::App for App {
                     self.open_win(W_SORT);
                 }
                 _ => {}
+            }
+        }
+        self.up.poll();
+        if !self.update_started {
+            self.update_started = true;
+            update::clean_leftovers();
+            if self.update_check && std::env::var_os("AMS_STUDIO_NO_UPDATE_CHECK").is_none() {
+                self.up.check(ui.ctx(), false);
             }
         }
         if self.gpu_info.is_empty() {
@@ -2408,8 +2433,13 @@ impl eframe::App for App {
                     if item(ui, "Anisotropy Quantitative Factors", "", true) { actions.push(Action::Factors) }
                     if item(ui, "Orientation Parameters", "", true) { actions.push(Action::OrientParams) }
                     if item(ui, "Default Colors", "", true) { actions.push(Action::Colors) }
+                    ui.separator();
+                    if ui.checkbox(&mut self.update_check, "Look for a new version at start").on_hover_text("When on, the program asks github.com once at start whether a newer release exists (nothing about you or your data is sent). The result is shown at the top right.").changed() {
+                        self.save_state();
+                    }
                 });
                 if ui.button("About").clicked() { actions.push(Action::About) }
+                self.update_indicator(ui);
             });
         });
 
@@ -2567,6 +2597,7 @@ impl eframe::App for App {
 
         // -------------------------------------------------------------- windows
         self.windows(&ctx);
+        self.update_window(&ctx);
         self.palette_window(&ctx);
         self.quit_window(&ctx);
         for a in actions {
@@ -3603,6 +3634,136 @@ impl App {
         }
     }
 
+    /// Top right of the menu bar: the state of the update check; a click checks again or opens the install window.
+    fn update_indicator(&mut self, ui: &mut Ui) {
+        use update::State;
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let green = Color32::from_rgb(54, 160, 90);
+            let amber = Color32::from_rgb(214, 150, 40);
+            match self.up.state.clone() {
+                State::Idle => {
+                    if ui.add(egui::Button::new(RichText::new(format!("v{}  \u{2022}  check for updates", update::CURRENT)).small().weak()).frame(false)).on_hover_text("Ask github.com whether a newer version exists").clicked() {
+                        self.up.check(ui.ctx(), true);
+                    }
+                }
+                State::Checking => {
+                    ui.label(RichText::new(format!("v{}  \u{2022}  checking for updates ...", update::CURRENT)).small().weak());
+                }
+                State::UpToDate => {
+                    if ui.add(egui::Button::new(RichText::new(format!("v{}  \u{2022}  up to date", update::CURRENT)).small().weak()).frame(false)).on_hover_text("You have the newest version. Click to check again.").clicked() {
+                        self.up.check(ui.ctx(), true);
+                    }
+                }
+                State::Available(r) => {
+                    let b = egui::Button::new(RichText::new(format!("\u{2191} Update available: v{}", r.version)).strong().color(Color32::WHITE)).fill(Color32::from_rgb(47, 111, 222));
+                    if ui.add(b).on_hover_text(format!("You have v{}. Click to install v{}.", update::CURRENT, r.version)).clicked() {
+                        self.up.window = true;
+                    }
+                }
+                State::Downloading => {
+                    let (d, t) = (self.up.done.load(std::sync::atomic::Ordering::Relaxed), self.up.total.load(std::sync::atomic::Ordering::Relaxed));
+                    let pct = if t > 0 { format!(" {}%", (d * 100 / t).min(100)) } else { String::new() };
+                    ui.label(RichText::new(format!("Downloading the update ...{pct}")).small().color(amber));
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+                }
+                State::Ready(v) => {
+                    if ui.add(egui::Button::new(RichText::new(format!("v{v} installed  \u{2022}  restart")).strong().color(Color32::WHITE)).fill(green)).on_hover_text("The new version is in place. Click to restart into it.").clicked() {
+                        self.up.window = true;
+                    }
+                }
+                State::Offline(e) => {
+                    if ui.add(egui::Button::new(RichText::new(format!("v{}  \u{2022}  update check offline", update::CURRENT)).small().weak()).frame(false)).on_hover_text(format!("{e}\nClick to try again.")).clicked() {
+                        self.up.check(ui.ctx(), true);
+                    }
+                }
+                State::Failed(e) => {
+                    if ui.add(egui::Button::new(RichText::new("Update failed").small().color(amber)).frame(false)).on_hover_text(format!("{e}\nClick for details.")).clicked() {
+                        self.up.window = true;
+                    }
+                }
+            }
+        });
+    }
+
+    /// The window behind the update button: what is new, the question above its buttons, progress, restart.
+    fn update_window(&mut self, ctx: &egui::Context) {
+        use update::State;
+        if !self.up.window {
+            return;
+        }
+        let state = self.up.state.clone();
+        let (mut install, mut later, mut restart, mut retry) = (false, false, false, false);
+        let mut open = true;
+        egui::Window::new("Update AMS Studio").open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            tools_ui::pop_style(ui, 1.3);
+            ui.set_max_width(620.0);
+            match &state {
+                State::Available(r) => {
+                    ui.label(RichText::new(format!("Version {} is available (you have {}).", r.version, update::CURRENT)).strong());
+                    if !r.notes.is_empty() {
+                        egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| ui.label(RichText::new(&r.notes).small()));
+                    }
+                    ui.label(RichText::new(format!("Download {} from github.com, check it, replace this program with it and restart. Your data and settings are not touched.", update::mb(r.size))).weak());
+                    ui.label("Install it now?");
+                    ui.horizontal(|ui| {
+                        install = ui.add(egui::Button::new(RichText::new("Install").strong().color(Color32::WHITE)).fill(Color32::from_rgb(47, 111, 222))).clicked();
+                        later = ui.button("Later").clicked();
+                        if !r.page.is_empty() {
+                            ui.hyperlink_to("Release page", &r.page);
+                        }
+                    });
+                }
+                State::Downloading => {
+                    let (d, t) = (self.up.done.load(std::sync::atomic::Ordering::Relaxed), self.up.total.load(std::sync::atomic::Ordering::Relaxed));
+                    ui.label(RichText::new("Downloading the update ...").strong());
+                    ui.add(egui::ProgressBar::new(if t > 0 { (d as f32 / t as f32).min(1.0) } else { 0.0 }).show_percentage());
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                }
+                State::Ready(v) => {
+                    ui.label(RichText::new(format!("Version {v} is installed.")).strong());
+                    let n = self.unsaved_count();
+                    if n > 0 {
+                        ui.label(RichText::new(format!("{n} file(s) have edits that are not saved; you are asked about them before the program closes.")).color(Color32::from_rgb(214, 150, 40)));
+                    }
+                    ui.label("Restart AMS Studio now to use it?");
+                    ui.horizontal(|ui| {
+                        restart = ui.add(egui::Button::new(RichText::new("Restart now").strong().color(Color32::WHITE)).fill(Color32::from_rgb(54, 160, 90))).clicked();
+                        later = ui.button("Later").clicked();
+                    });
+                }
+                State::Failed(e) => {
+                    ui.label(RichText::new("The update was not installed.").strong().color(Color32::from_rgb(214, 90, 90)));
+                    ui.label(e);
+                    ui.label(RichText::new("This program is unchanged and works as before.").weak());
+                    ui.label("Try again?");
+                    ui.horizontal(|ui| {
+                        retry = ui.button("Try again").clicked();
+                        later = ui.button("Close").clicked();
+                        ui.hyperlink_to("Download by hand", format!("https://github.com/{}/releases/latest", update::REPO));
+                    });
+                }
+                _ => later = true,
+            }
+        });
+        if !open || (ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !matches!(state, State::Downloading)) {
+            later = true;
+        }
+        if install {
+            if let State::Available(r) = state {
+                self.up.install(ctx, r);
+            }
+        } else if retry {
+            self.up.check(ctx, true);
+            self.up.window = false;
+        } else if restart {
+            self.up.restart_on_exit = true;
+            self.up.window = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if later && !matches!(state, State::Downloading) {
+            self.up.window = false;
+        }
+    }
+
     /// Every window of a kind opens with the same id, size and (centred) position, each time it is opened.
     fn base_window(&self, ctx: &egui::Context, title: &'static str, slot: usize, size: Vec2) -> egui::Window<'static> {
         let c = ctx.content_rect().center();
@@ -3630,7 +3791,8 @@ impl App {
         self.base_window(ctx, "About AMS Studio", W_ABOUT, Vec2::new(760.0, 300.0)).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
             tools_ui::pop_style(ui, 1.4);
             ui.heading("AMS Studio");
-            ui.label("An independent reimplementation of AGICO's Anisoft 6, written in Rust with egui.");
+            ui.label("A companion to AGICO's Anisoft 6, the program this work is built on and owes everything to. It is not a replacement for it.");
+            ui.label(format!("Version {}  (updates: top right of the menu bar)", update::CURRENT));
             ui.label("Reads Safyr7 .ams files; anisotropy results were checked against csv exports of the original program.");
             ui.label(RichText::new("Anisoft is a program of AGICO, Brno. This project is not affiliated with AGICO.").weak());
             ui.separator();

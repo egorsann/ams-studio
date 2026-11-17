@@ -1,6 +1,6 @@
 # Notes for coding agents (and humans in a hurry)
 
-**What this is:** a Rust reimplementation of AGICO Anisoft 6 (anisotropy of magnetic susceptibility, AMS) with the same menus, toolbar order and results, plus a modern UI. Windows and Linux, one executable.
+**What this is:** a Rust companion to AGICO Anisoft 6 (anisotropy of magnetic susceptibility, AMS), the reference program this work owes everything to. It is not a replacement for it and is never described as one. Same menus, toolbar order and results, plus a modern UI. Windows and Linux, one executable.
 
 ## Read in this order
 
@@ -26,6 +26,7 @@ crates/ams-core/   pure Rust, no GUI, the testable part
 crates/ams-studio/        egui app
   src/app.rs           state, menus, toolbar, plots layout, windows, shortcuts, persistence
   src/app/gis_*.rs     GIS viewer (View menu): gis_data (tiles, maps, tables), gis_vector (shapefile / GeoPackage / GeoJSON readers, tested), gis_collar (drill core: collars, depth order, box placement; tested), palette (the Ctrl+Shift+P command list and its filter; tested), gis_qgis (reads a QGIS project's legend, layer paths, filters, labels and systems, no data; tested), gis_filter (the QGIS filter syntax as an expression engine over attribute rows; tested), gis_ui (viewer), gis_georef (table + georeference windows + CRS picker), gis_loc / gis_loc_ui (per-specimen places in the dependency file, Specimen locations window), gis_manual_ui (Enter coordinates), gis_layers (the layer tree of the GIS pane, tested) and gis_layers_ui (the layers sidebar), prefs_ext (text forms of pane settings); pane_layout.rs (pane order, rows and rectangles of the main window, tested without a window); maths in ams-core/src/gis.rs
+  src/app/update.rs    update checker + self-updater (GitHub releases, SHA-256 checked, tested); the indicator and window are in app.rs (`update_indicator`, `update_window`)
   src/app/spec_view.rs Sort / filter of the Sub-specimens list
   src/app/tools_ui.rs  GED Editor, Tensor Addition/Subtraction, Fabric Overprint, Intersection, Deform AMS
   src/app/analysis_ui.rs  Group Statistics and Contour Plot
@@ -48,6 +49,9 @@ cargo run -p ams-core --example validate -- file.ams anisoft_export.csv
 ```
 
 ## Rules that matter
+
+- **Releases:** the updater reads the *latest* GitHub release of `egorsann/ams-studio` and needs the assets `ams-studio-windows-x64.exe` (+ `.sha256`) and `ams-studio-linux-x64` (+ `.sha256`) with exactly these names, and a tag `vX.Y.Z` higher than the workspace version. Bump `version` in the root `Cargo.toml`, build both, attach all four files. Never replace the assets of a published version under the same tag (the checksum would still match the new file, but users who already have it would not be offered it).
+- **Public repository.** Nothing real in it: no specimen names from real projects, no real coordinates or borehole surveys, no screenshots of real data; made-up ids only (ZZ01, DC26AB002 style).
 
 - **Numbers come from the original, not from theory.** Do not "improve" a formula (for example by switching the Jelinek angles to an F-distribution form) without re-checking against the original's output. Regression tests hold the original's printed numbers.
 - **Never use real measurement data in the repository** (tests, examples, screenshots, docs). Use `make_demo`. `*.ams` is git-ignored except `examples/*.ams`.
