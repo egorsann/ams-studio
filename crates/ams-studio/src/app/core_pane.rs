@@ -99,6 +99,18 @@ pub(super) struct CoreViewState {
     pub hover: String,
     /// Where the pane was drawn this frame (`Rect::NOTHING` when it is off).
     pub rect: Rect,
+    /// The hyperspectral parameters of the AMS dashboard code (read in the background the first time one is wanted).
+    pub hy: Option<Arc<crate::hyper::Hyper>>,
+    hy_rx: Option<Receiver<Result<crate::hyper::Hyper, String>>>,
+    /// Why the hyperspectral parameters are not available (empty when they are, or not asked for yet).
+    pub hy_err: String,
+    /// What the cubes show: 0 = the photos, k = the k-th hyperspectral parameter; and the key of that parameter (kept in the
+    /// preferences; empty = photos).
+    pub mode: usize,
+    pub mode_key: String,
+    /// A mode step asked for before the parameters were read (applied when they arrive).
+    hy_step: i32,
+    hy_faces: HashMap<(String, usize), Arc<HashMap<(u32, char), crate::hyper::Faces>>>,
 }
 
 impl Default for CoreViewState {
@@ -133,6 +145,13 @@ impl Default for CoreViewState {
             legacy_links: BTreeMap::new(),
             tried: None,
             note: String::new(),
+            hy: None,
+            hy_rx: None,
+            hy_err: String::new(),
+            mode: 0,
+            mode_key: String::new(),
+            hy_step: 0,
+            hy_faces: HashMap::new(),
             frac: 0.28,
             export: true,
             hover: String::new(),
@@ -570,8 +589,94 @@ impl App {
         self.cv.for_file = Some((d.path.clone(), d.specs.len()));
     }
 
+    /// Starts reading the hyperspectral parameters (the dashboard code and the feature table next to the data).
+    pub(super) fn cv_hyper_load(&mut self, ctx: &egui::Context) {
+        if self.cv.hy.is_some() || self.cv.hy_rx.is_some() {
+            return;
+        }
+        let from = self.doc.as_ref().filter(|d| !d.synthetic).map(|d| d.path.clone()).or_else(|| self.cv.root.clone()).or_else(|| self.set.as_ref().map(|s| s.root.clone())).unwrap_or_else(|| self.browser_dir.clone());
+        let Some(dep) = crate::hyper::locate(&from) else {
+            self.cv.hy_err = "The AMS dashboard code (working_files_doc/Python_doc/dependancies/hyperspectral_dashboard_row_dependancy.py) was not found above the data.".to_string();
+            return;
+        };
+        self.cv.hy_err.clear();
+        let (tx, rx) = channel();
+        let c2 = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::hyper::Hyper::load(&dep));
+            c2.request_repaint();
+        });
+        self.cv.hy_rx = Some(rx);
+    }
+
+    /// What the cubes show next: Ctrl+Shift+E the next parameter, Ctrl+Shift+Q the previous one; the photos come first.
+    pub(super) fn cv_mode_step(&mut self, ctx: &egui::Context, dir: i32) {
+        match &self.cv.hy {
+            Some(h) => {
+                let n = h.rows.len();
+                self.cv_mode_apply(dir, n);
+            }
+            None => {
+                if self.cv.hy_rx.is_none() {
+                    self.cv.hy_err.clear();
+                    self.cv_hyper_load(ctx);
+                }
+                self.cv.hy_step = dir;
+            }
+        }
+    }
+
+    fn cv_mode_apply(&mut self, dir: i32, n_rows: usize) {
+        let modes = n_rows as i32 + 1;
+        self.cv.mode = (self.cv.mode as i32 + dir).rem_euclid(modes.max(1)) as usize;
+        self.cv_mode_set(self.cv.mode);
+    }
+
+    /// Sets what the cubes show (0 = photos) and remembers it.
+    pub(super) fn cv_mode_set(&mut self, mode: usize) {
+        self.cv.mode = mode;
+        self.cv.mode_key = if mode == 0 { String::new() } else { self.cv.hy.as_ref().and_then(|h| h.rows.get(mode - 1)).map(|r| r.key.clone()).unwrap_or_default() };
+        self.save_state();
+    }
+
     /// Every frame: new photos become textures, a new file gets its link (or a search), the search ends.
     pub(super) fn cv_poll(&mut self, ctx: &egui::Context) {
+        // the hyperspectral parameters arrive from their thread
+        if let Some(rx) = &self.cv.hy_rx {
+            match rx.try_recv() {
+                Ok(r) => {
+                    self.cv.hy_rx = None;
+                    match r {
+                        Ok(h) => {
+                            let n = h.rows.len();
+                            self.cv.hy = Some(Arc::new(h));
+                            self.cv.hy_faces.clear();
+                            if let Some(k) = self.cv.hy.as_ref().and_then(|h| h.rows.iter().position(|r| r.key == self.cv.mode_key)) {
+                                self.cv.mode = k + 1;
+                            } else if !self.cv.mode_key.is_empty() {
+                                self.cv.mode_key.clear();
+                            }
+                            let step = std::mem::take(&mut self.cv.hy_step);
+                            if step != 0 {
+                                self.cv_mode_apply(step, n);
+                            }
+                        }
+                        Err(e) => {
+                            self.cv.hy_err = e;
+                            self.cv.mode = 0;
+                            self.cv.hy_step = 0;
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+                Err(_) => self.cv.hy_rx = None,
+            }
+        }
+        // a remembered parameter is read in as soon as the viewer is on, so the cubes come back as they were
+        if self.cv.on && !self.cv.mode_key.is_empty() && self.cv.hy.is_none() && self.cv.hy_rx.is_none() && self.cv.hy_err.is_empty() {
+            self.cv_hyper_load(ctx);
+        }
         if !self.cv.on {
             return;
         }
@@ -858,11 +963,49 @@ impl App {
         let header = Rect::from_min_size(rect.min + Vec2::new(6.0, super::PANE_TOP), Vec2::new(rect.width() - 12.0, 24.0));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(header).layout(Layout::left_to_right(Align::Center)));
         let (mut change, mut reset, mut close) = (false, false, false);
+        let mut pick: Option<usize> = None;
+        let mut load_hy = false;
         child.menu_button("\u{25b8}", |ui| {
             if ui.button("Link cube folders ...").clicked() {
                 change = true;
                 ui.close();
             }
+            ui.menu_button("Show on the cubes", |ui| {
+                if ui.radio(self.cv.mode == 0, "Photos").clicked() {
+                    pick = Some(0);
+                    ui.close();
+                }
+                match &self.cv.hy {
+                    Some(h) => {
+                        ui.separator();
+                        let mut shown_other = false;
+                        for (k, r) in h.rows.iter().enumerate() {
+                            if !r.in_dashboard && !shown_other && k > 0 && h.rows[k - 1].in_dashboard {
+                                shown_other = true;
+                                ui.separator();
+                                ui.label(RichText::new("not printed on the dashboard").weak().small());
+                            }
+                            if ui.radio(self.cv.mode == k + 1, &r.label).on_hover_text(format!("{}   (colour bar: {})", r.key, r.unit)).clicked() {
+                                pick = Some(k + 1);
+                                ui.close();
+                            }
+                        }
+                    }
+                    None => {
+                        ui.separator();
+                        if !self.cv.hy_err.is_empty() {
+                            ui.label(RichText::new(&self.cv.hy_err).small().color(Color32::from_rgb(214, 90, 90)));
+                        } else if self.cv.hy_rx.is_some() {
+                            ui.label(RichText::new("reading the hyperspectral parameters ...").weak().small());
+                        } else if ui.button("Hyperspectral parameters ...").on_hover_text("Reads the parameters of the AMS dashboard code (hyperspectral_dashboard_row_dependancy.py) and the spectral feature table next to the data").clicked() {
+                            load_hy = true;
+                            ui.close();
+                        }
+                    }
+                }
+                ui.separator();
+                ui.label(RichText::new("Ctrl+Shift+E next, Ctrl+Shift+Q previous").weak().small());
+            });
             if ui.button("Reset zoom").clicked() {
                 reset = true;
                 ui.close();
@@ -874,7 +1017,17 @@ impl App {
         });
         let title = if self.cv.hover.is_empty() { format!("Core viewer {}", self.cv.specimen) } else { self.cv.hover.clone() };
         let loading = self.cv.total > 0 && self.cv.loaded < self.cv.total;
-        let right = if loading {
+        let right = if self.cv.mode > 0 && self.cv.hy.is_none() {
+            "reading the hyperspectral parameters ...".to_string()
+        } else if let Some((h, r)) = self.cv.hy.as_ref().filter(|_| self.cv.mode > 0).and_then(|h| h.rows.get(self.cv.mode - 1).map(|r| (h, r))) {
+            if h.has_specimen(&self.cv.specimen) {
+                format!("{}   (Ctrl+Shift+E / Q)", r.label)
+            } else {
+                format!("no hyperspectral data for {}", self.cv.specimen)
+            }
+        } else if !self.cv.hy_err.is_empty() {
+            "no hyperspectral data".to_string()
+        } else if loading {
             format!("loading photos (n={} of {})", self.cv.loaded, self.cv.total)
         } else if self.cv.dir.is_none() {
             "no cube folder linked".to_string()
@@ -885,6 +1038,12 @@ impl App {
         child.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(RichText::new(right).weak().small());
         });
+        if load_hy {
+            self.cv_hyper_load(ui.ctx());
+        }
+        if let Some(m) = pick {
+            self.cv_mode_set(m);
+        }
         if change {
             self.cv_open_window();
         }
@@ -896,7 +1055,27 @@ impl App {
         }
         let body = Rect::from_min_max(Pos2::new(rect.min.x + 4.0, header.max.y + 2.0), Pos2::new(rect.max.x - 4.0, rect.max.y - 4.0));
         let Some(d) = &self.doc else { return Default::default() };
-        let out = core_view::draw(ui, body, &self.cv.cubes, &self.cv.textures, &d.selected, &d.active, &mut self.cv.view, th, &self.cv.specimen);
+        // a hyperspectral parameter on the cubes (their faces coloured as on the dashboard), else the photos
+        let mut hy_faces: Option<Arc<HashMap<(u32, char), crate::hyper::Faces>>> = None;
+        let mut hy_row: Option<crate::hyper::RowDef> = None;
+        let mut hy_look: Option<crate::hyper::Look> = None;
+        if self.cv.mode > 0 {
+            if let Some(h) = self.cv.hy.clone() {
+                let row = self.cv.mode - 1;
+                if let Some(r) = h.rows.get(row) {
+                    let key = (self.cv.specimen.clone(), row);
+                    let f = self.cv.hy_faces.entry(key).or_insert_with(|| Arc::new(h.faces(&self.cv.specimen, row))).clone();
+                    hy_faces = Some(f);
+                    hy_row = Some(r.clone());
+                    hy_look = Some(h.look.clone());
+                }
+            }
+        }
+        let hy = match (&hy_faces, &hy_row, &hy_look) {
+            (Some(f), Some(r), Some(l)) => Some(core_view::HyperDraw { faces: f, row: r, look: l }),
+            _ => None,
+        };
+        let out = core_view::draw(ui, body, &self.cv.cubes, &self.cv.textures, &d.selected, &d.active, &mut self.cv.view, th, &self.cv.specimen, hy.as_ref());
         if self.cv.dir.is_none() && !self.cv.win && self.cv.scan.is_none() {
             ui.painter().text(body.center(), egui::Align2::CENTER_CENTER, format!("No cube photos are linked to {}.   \u{25b8} Link cube folders ...", self.cv_open_id()), egui::FontId::proportional(14.0), th.ink());
         }

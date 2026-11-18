@@ -439,6 +439,19 @@ impl Gis {
         serde_json::json!({"tree": self.layers.to_values(), "maps": maps, "vectors": vectors, "selected": self.sel}).to_string().replace(['\n', '\r'], "")
     }
 
+    /// Forgets the layers and what was loaded for them (before the preferences are read again).
+    pub fn reset_for_reload(&mut self) {
+        self.maps.clear();
+        self.vectors.clear();
+        self.restore_maps.clear();
+        self.restore_vecs.clear();
+        self.loads.clear();
+        self.vloads.clear();
+        self.multi.clear();
+        self.layer_undo.clear();
+        self.sel = None;
+    }
+
     /// Remembers the layer list before something is removed, so that Ctrl+Z can bring it back (the last 30 are kept).
     pub fn snapshot_layers(&mut self, what: impl Into<String>) {
         let j = self.layers_json();

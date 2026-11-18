@@ -373,6 +373,91 @@ pub fn run(out: &Path) -> usize {
         h.step(&format!("window slot {slot} without a file"), move |app, _| app.open_win(slot));
     }
 
+    // ---- hyperspectral parameters on the cubes of the core viewer (a made-up dashboard code and feature table)
+    {
+        let dep = root.join("hyper").join("working_files_doc").join("Python_doc").join("dependancies");
+        let table_dir = root.join("hyper").join("data").join("core_samples_SPECTRAL").join("core_samples_SPECTRAL_extracted");
+        let _ = std::fs::create_dir_all(&dep);
+        let _ = std::fs::create_dir_all(&table_dir);
+        let code = "FEATURES_CSV = os.path.join(_SPEC_OUT, \"ER26PB_spectral_features.csv\")\nCUBE_ROWS = {\n  \"cube_d2200\": (\"D2200\", \"2200_ok\", \"White mica\\nD2200\", \"depth\"),\n  \"cube_w900\": (\"W900_shift\", \"900_ok\", \"Fe3+ pos.\\nW900 shift\", \"nm\"),\n  \"cube_ism\": (\"ISM\", \"ISM_ok\", \"ISM\", \"ISM\"),\n}\nCUBE_ROW_DIVERGING = {\"cube_w900\": [\"#7f0000\", \"#f7f7f7\", \"#7a4a00\"]}\nW900_REF, W900_HALF = 900.0, 30.0\nCUBE_ROW_DIVERGING_HALF = {\"cube_w900\": W900_HALF}\nEDGE_FRAC = 0.24\n";
+        w(&dep.join(crate::hyper::MODULE_FILE), code.as_bytes());
+        w(&dep.join("hyperspectral_extract_asd_dependancy.py"), b"ISM_MIN_D2200 = 0.05\nOUT_DIR = os.path.join(SPECTRAL_ROOT, \"core_samples_SPECTRAL_extracted\")\n");
+        let id = core_pane::spec_id(&root.join("single").join("demo.ams"));
+        let mut csv = String::from("specimen,cube,side,D2200,2200_ok,W900,900_ok,ISM,ISM_ok\n");
+        for sl in 1..=3 {
+            for l in ["A", "B", "C"] {
+                for (side, k) in [("BTM", 1.0), ("BK", 0.5), ("L", 0.2)] {
+                    csv.push_str(&format!("{id},{l}{sl},{side},{:.3},True,{:.1},True,{:.2},True\n", 0.1 * sl as f64 * k, 880.0 + 10.0 * sl as f64, 1.0 + k));
+                }
+            }
+        }
+        w(&table_dir.join("ER26PB_spectral_features.csv"), csv.as_bytes());
+        std::env::set_var("AMS_STUDIO_HYPER_DIR", &dep);
+        h.step("open the demo file for the core viewer", |a, _| a.open_path(demo.clone()));
+        h.app.cv.on = true;
+        h.step("core viewer on", |_, _| {});
+        h.step("Ctrl+Shift+E asks for the hyperspectral parameters", |a, c| a.run(c, Action::CoreMode(1)));
+        for _ in 0..200 {
+            if h.app.cv.hy.is_some() || !h.app.cv.hy_err.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.frames(1, big);
+        }
+        h.frames(3, big);
+        let names: Vec<String> = h.app.cv.hy.as_ref().map(|x| x.rows.iter().map(|r| r.key.clone()).collect()).unwrap_or_default();
+        h.check("the parameters were read from the code", names == ["cube_d2200", "cube_w900", "cube_ism"], format!("{names:?} {}", h.app.cv.hy_err));
+        h.check("the first press went to the first parameter", h.app.cv.mode == 1, format!("mode {}", h.app.cv.mode));
+        h.step("the cubes in colour", |_, _| {});
+        for want in [2usize, 3, 0, 1] {
+            h.step(&format!("next mode -> {want}"), |a, c| a.run(c, Action::CoreMode(1)));
+            h.check(&format!("mode {want}"), h.app.cv.mode == want, format!("mode {}", h.app.cv.mode));
+        }
+        h.step("previous mode", |a, c| a.run(c, Action::CoreMode(-1)));
+        h.check("back to photos", h.app.cv.mode == 0, format!("mode {}", h.app.cv.mode));
+        // the keyboard: Ctrl+Shift+E while the pointer is over the core viewer
+        h.frames(2, big);
+        let c = h.app.cv.rect.center();
+        let m = egui::Modifiers::CTRL | egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        h.queue.push_back(vec![egui::Event::PointerMoved(c)]);
+        h.queue.push_back(vec![egui::Event::ModifiersChanged(m), egui::Event::Key { key: egui::Key::E, physical_key: Some(egui::Key::E), pressed: true, repeat: false, modifiers: m }]);
+        h.queue.push_back(vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)]);
+        h.step("Ctrl+Shift+E over the core viewer", |_, _| {});
+        h.check("the keyboard moved to the next parameter", h.app.cv.mode == 1, format!("mode {}", h.app.cv.mode));
+        h.check("the choice is in the preferences", h.app.state_text().contains("core_mode=cube_d2200"), "not saved".to_string());
+        std::env::remove_var("AMS_STUDIO_HYPER_DIR");
+        h.app.cv.on = false;
+        h.app.cv.mode = 0;
+    }
+
+    // ---- every pane into a window of its own and back, also with the shortcut over the pane under the pointer
+    {
+        h.app.cv.on = true;
+        h.app.gis_on = true;
+        for id in [PaneId::Stereo, PaneId::Plot(1), PaneId::Plot(2), PaneId::Plot(3), PaneId::Core] {
+            h.step(&format!("pop out {id:?}"), move |a, _| a.toggle_pane_pop(id));
+            h.check(&format!("{id:?} is in a window of its own"), h.app.popped.iter().any(|(p, _)| *p == id), "not popped".to_string());
+            h.step(&format!("dock {id:?}"), move |a, _| a.toggle_pane_pop(id));
+            h.check(&format!("{id:?} is back"), !h.app.popped.iter().any(|(p, _)| *p == id), "still popped".to_string());
+        }
+        // the shortcut acts on the pane under the pointer
+        h.frames(3, big);
+        let rects = h.app.pane_rects.clone();
+        for (id, r) in rects {
+            if id == PaneId::Gis {
+                continue;
+            }
+            h.queue.push_back(vec![egui::Event::PointerMoved(r.center())]);
+            h.frames(2, big);
+            h.step(&format!("Shift+Ctrl+Space over {id:?}"), |a, c| a.run(c, Action::PopOutPane));
+            h.check(&format!("{id:?} popped by the shortcut"), h.app.popped.iter().any(|(p, _)| *p == id), "not popped".to_string());
+            h.step(&format!("dock {id:?} again"), move |a, _| a.toggle_pane_pop(id));
+        }
+        h.app.gis_on = false;
+        h.app.cv.on = false;
+        h.app.popped.clear();
+    }
+
     // ---- folder of specimens: the three layouts of the questions
     for (name, dir, kind, layout, expect_specimens, expect_pairs) in [
         ("own folders (.ams)", "own", specset::Kind::Ams, specset::Layout::OwnFolders, 4usize, 0usize),
@@ -488,24 +573,43 @@ pub fn run(out: &Path) -> usize {
             let _ = gis_loc::write_for(&a, None);
             let _ = gis_loc::write_for(&b, None);
         }
-        // a setup written by one computer is taken over once by another with the same Synology folder, and never otherwise
-        let home = root.join("seedhome");
+        // a setup written by one computer into the folder of the specimens is taken over once by another computer that opens it
+        let data = root.join("setupdata").join("SynologyDrive").join("AMS");
         let cfg_a = root.join("seedcfg-a");
         let cfg_b = root.join("seedcfg-b");
-        for d in [home.join("SynologyDrive"), cfg_a.clone(), cfg_b.clone()] {
+        for d in [data.join("ER1_AMS"), cfg_a.clone(), cfg_b.clone()] {
             let _ = std::fs::create_dir_all(d);
         }
-        let st = format!("dark=1\nwin_w=1000\nset_root={}/SynologyDrive/Doc\n", home.to_string_lossy().replace('\\', "/"));
+        let st = format!("dark=1\nwin_w=1000\nset_root={}\n", data.to_string_lossy().replace('\\', "/"));
         w(&cfg_a.join("state.txt"), st.as_bytes());
-        let wrote = seed::write_seed(&cfg_a, &home, false, "selftest");
-        h.check("the seed is written", wrote.is_ok(), format!("{wrote:?}"));
-        h.check("the writing computer does not take it over", seed::take_over(&cfg_a, &home, &seed::host_name()) == seed::Taken::No, "it did".to_string());
+        let wrote = seed::write_setup(&cfg_a, None, false, "selftest");
+        h.check("the setup file is written next to the specimen folders", wrote.is_ok() && data.join(seed::FILE).is_file(), format!("{wrote:?}"));
+        h.check("the writing computer does not take it over", seed::take_over(&cfg_a, &[data.clone()], &seed::host_name()) == seed::Taken::No, "it did".to_string());
         w(&cfg_b.join("state.txt"), b"dark=0\nwin_w=700\n");
-        let first = seed::take_over(&cfg_b, &home, "another-computer");
+        let first = seed::take_over(&cfg_b, &[data.join("ER1_AMS")], "another-computer");
         let got = std::fs::read_to_string(cfg_b.join("state.txt")).unwrap_or_default();
         h.check("another computer takes the setup over", matches!(first, seed::Taken::Yes(_)) && got.contains("dark=1") && got.contains("win_w=700"), format!("{first:?} {got:?}"));
-        h.check("and only once", seed::take_over(&cfg_b, &home, "another-computer") == seed::Taken::No, "twice".to_string());
-        h.check("a computer without a Synology folder is left alone", seed::take_over(&cfg_b, &root.join("nohome"), "x") == seed::Taken::No, "touched".to_string());
+        h.check("and only once", seed::take_over(&cfg_b, &[data.clone()], "another-computer") == seed::Taken::No, "twice".to_string());
+        // taken over while the program runs: the opened folder holds a setup of another computer (also GIS layers)
+        {
+            let dir = root.join("livesetup");
+            let _ = std::fs::create_dir_all(&dir);
+            let layer = dir.join("m.png");
+            w(&layer, b"x");
+            let lp = layer.to_string_lossy().replace('\\', "/");
+            let mut seedv = seed::make_setup(&format!("marker=8\ndark=0\ngis_layers={{\"tree\":[{{\"id\":1,\"kind\":\"map\",\"name\":\"Taken over\",\"visible\":false,\"open\":true}}],\"maps\":[{{\"id\":1,\"path\":\"{lp}\",\"opacity\":0.5}}],\"vectors\":[],\"selected\":null}}\n"), "", &dir, "another-computer", "live-1", "now");
+            seedv["from_host"] = serde_json::json!("another-computer");
+            w(&dir.join(seed::FILE), serde_json::to_string_pretty(&seedv).unwrap_or_default().as_bytes());
+            h.app.gis_on = true;
+            std::env::remove_var("AMS_STUDIO_NO_SEED");
+            let d2 = dir.clone();
+            h.step("a setup file in an opened folder is taken over while running", move |a, _| a.setup_near(&[d2]));
+            let names: Vec<String> = h.app.gis.layers.items.iter().filter(|i| !i.kind.is_builtin()).map(|i| i.name.clone()).collect();
+            h.check("its layers and preferences are in the running program", (h.app.marker - 8.0).abs() < 1e-3 && names == ["Taken over"], format!("marker {} layers {names:?}", h.app.marker));
+            std::env::set_var("AMS_STUDIO_NO_SEED", "1");
+            h.app.gis_on = false;
+        }
+        h.check("a folder without a setup file is left alone", seed::take_over(&cfg_b, &[root.join("flat7")], "x") == seed::Taken::No, "touched".to_string());
     }
 
     // ---- an ArcGIS project: dropped on the window, and chosen; the file itself is never written

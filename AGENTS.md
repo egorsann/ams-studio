@@ -49,7 +49,8 @@ cargo run -p ams-core --example validate -- file.ams anisoft_export.csv
 ```
 
   src/app/phase_join_ui.rs  Recombine questions + joining in-/out-of-phase files (pure functions tested); ams-core/src/phases.rs (phase words, pairing, merge), import.rs (`.ran`), specset.rs (Kind/Layout/IdScheme/Phases, `build`)
-  src/app/seed.rs      one-time take-over of another computer's setup through the shared SynologyDrive folder (`--write-seed`; tested); depjson `specimen_key` / `*_for` = per-specimen location and view in a shared folder
+  src/app/seed.rs      one-time take-over of another computer's setup from `AMS_STUDIO_SETUP_dependancy.json` in the specimen folder (`--write-setup`; tested)
+  src/hyper.rs, src/hyper_py.rs  hyperspectral parameters on the cubes of the core viewer: the parameter list, scales and colour maps are read from the AMS dashboard's Python code (a small evaluator of its top-level assignments, nothing is run) and the spectral feature table; `AMS_STUDIO_TEST_HYPER=<data path> cargo test a_real_dashboard -- --ignored --nocapture` prints what the real code gives; depjson `specimen_key` / `*_for` = per-specimen location and view in a shared folder
   src/app/selftest.rs  `--selftest <report>`: headless walk (every action, window, size, random events, folder/recombine flows); src/crash.rs (panic hook + crash.log); src/fdialog.rs (file dialogs, blocked during the self-test); src/util.rs (`clamp_safe`: never use `clamp` with computed bounds)
 
 ## Rules that matter

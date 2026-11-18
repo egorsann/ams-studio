@@ -162,9 +162,57 @@ fn zoom_to_area(view: &mut View, area: Rect, inner: Rect, u: f32) {
     view.zoom = new;
 }
 
+/// What the cubes show instead of the photos: a hyperspectral parameter (the colours of the faces of every cube, its scale and
+/// how the dashboard draws the cubes).
+pub struct HyperDraw<'a> {
+    pub faces: &'a HashMap<(u32, char), crate::hyper::Faces>,
+    pub row: &'a crate::hyper::RowDef,
+    pub look: &'a crate::hyper::Look,
+}
+
+fn rgb(c: [u8; 3]) -> Color32 {
+    Color32::from_rgb(c[0], c[1], c[2])
+}
+
+fn face_text(f: &crate::hyper::Face) -> String {
+    match f {
+        crate::hyper::Face::Value(v, _) => format!("{v:.3}"),
+        crate::hyper::Face::NoTrough => "no trough".into(),
+        crate::hyper::Face::NotMeasured => "-".into(),
+    }
+}
+
+/// A cube drawn like the dashboard's cube map: the bottom face as the fill and the faces BK (right), FRONT (left), L
+/// (bottom) and R (top) as strips along the edges; grey where a face was measured without a trough, white where it was not
+/// measured.
+fn paint_faces(p: &egui::Painter, r: Rect, faces: Option<&crate::hyper::Faces>, look: &crate::hyper::Look) {
+    use crate::hyper::Face;
+    let colour = |f: &Face| match f {
+        Face::Value(_, c) => Some(rgb(*c)),
+        Face::NoTrough => Some(rgb(look.no_trough)),
+        Face::NotMeasured => None,
+    };
+    let none = [Face::NotMeasured; 5];
+    let f = faces.unwrap_or(&none);
+    p.rect_filled(r, 0.0, colour(&f[0]).unwrap_or(rgb(look.not_measured)));
+    let (ex, ey) = (r.width() * look.edge, r.height() * look.edge);
+    let strips = [
+        (1, Rect::from_min_max(Pos2::new(r.max.x - ex, r.min.y), r.max)),
+        (2, Rect::from_min_max(r.min, Pos2::new(r.min.x + ex, r.max.y))),
+        (3, Rect::from_min_max(Pos2::new(r.min.x, r.max.y - ey), r.max)),
+        (4, Rect::from_min_max(r.min, Pos2::new(r.max.x, r.min.y + ey))),
+    ];
+    for (k, sr) in strips {
+        if let Some(c) = colour(&f[k]) {
+            p.rect_filled(sr, 0.0, c);
+        }
+    }
+    p.rect_stroke(r, 0.0, Stroke::new(0.6, rgb(look.outline)), egui::StrokeKind::Inside);
+}
+
 /// Draws the viewer inside `rect` and returns what the pointer did (click, rubber band, hover text).
 /// `textures` hold the decoded photos; `selected` / `active` are per record of the open file.
-pub fn draw(ui: &mut Ui, rect: Rect, cubes: &[Cube], textures: &HashMap<(u32, char), TextureHandle>, selected: &[bool], active: &[bool], view: &mut View, th: &Theme, specimen: &str) -> PlotOut {
+pub fn draw(ui: &mut Ui, rect: Rect, cubes: &[Cube], textures: &HashMap<(u32, char), TextureHandle>, selected: &[bool], active: &[bool], view: &mut View, th: &Theme, specimen: &str, hy: Option<&HyperDraw>) -> PlotOut {
     let pa = ui.painter_at(rect);
     pa.rect_filled(rect, 2.0, th.canvas());
     let mut out = PlotOut::default();
@@ -230,6 +278,12 @@ pub fn draw(ui: &mut Ui, rect: Rect, cubes: &[Cube], textures: &HashMap<(u32, ch
         }
         let sel = c.recs.iter().any(|&i| selected.get(i).copied().unwrap_or(false));
         let act = c.recs.is_empty() || c.recs.iter().any(|&i| active.get(i).copied().unwrap_or(true));
+        if let Some(h) = hy {
+            // the cubes of the dashboard's cube map: a D cube smaller, about its own centre
+            let k = if c.letter == 'D' { h.look.d_scale } else { 1.0 };
+            let rr = Rect::from_center_size(r.center(), r.size() * k);
+            paint_faces(&clip, rr, h.faces.get(&(c.slice, c.letter)), h.look);
+        } else {
         match textures.get(&(c.slice, c.letter)) {
             Some(t) => {
                 let tint = if act { Color32::WHITE } else { Color32::from_gray(90) };
@@ -243,8 +297,16 @@ pub fn draw(ui: &mut Ui, rect: Rect, cubes: &[Cube], textures: &HashMap<(u32, ch
                 }
             }
         }
+        }
         if !c.recs.is_empty() && side > 20.0 {
-            clip.text(r.left_top() + Vec2::new(3.0, 2.0), Align2::LEFT_TOP, c.name(), FontId::proportional(9.5), Color32::from_rgba_unmultiplied(255, 255, 255, 220));
+            // on colour faces the letter is dark or light as the colour needs; on a photo it is white
+            let ink = match hy.and_then(|h| h.faces.get(&(c.slice, c.letter))).map(|f| &f[0]) {
+                Some(crate::hyper::Face::Value(_, col)) if (0.299 * col[0] as f32 + 0.587 * col[1] as f32 + 0.114 * col[2] as f32) > 150.0 => Color32::from_rgba_unmultiplied(20, 20, 20, 200),
+                Some(crate::hyper::Face::NoTrough) | Some(crate::hyper::Face::NotMeasured) => Color32::from_rgba_unmultiplied(20, 20, 20, 200),
+                None if hy.is_some() => Color32::from_rgba_unmultiplied(20, 20, 20, 200),
+                _ => Color32::from_rgba_unmultiplied(255, 255, 255, 220),
+            };
+            clip.text(r.left_top() + Vec2::new(3.0, 2.0), Align2::LEFT_TOP, c.name(), FontId::proportional(9.5), ink);
         }
         if c.recs.is_empty() {
             // a cube that was cut but has no AMS record here: shown, not selectable
@@ -268,7 +330,11 @@ pub fn draw(ui: &mut Ui, rect: Rect, cubes: &[Cube], textures: &HashMap<(u32, ch
         if !c.recs.is_empty() {
             clip.rect_stroke(r, 2.0, Stroke::new(1.6, th.accent), egui::StrokeKind::Outside);
         }
-        out.hover = Some(format!("{specimen}  {}{}", c.name(), if c.recs.is_empty() { "   (no AMS record)" } else { "" }));
+        let vals = hy.map(|h| match h.faces.get(&(c.slice, c.letter)) {
+            Some(f) => format!("   {}: bottom {}, back {}, front {}, left {}, right {} ({})", h.row.short, face_text(&f[0]), face_text(&f[1]), face_text(&f[2]), face_text(&f[3]), face_text(&f[4]), h.row.unit),
+            None => format!("   {}: not measured", h.row.short),
+        });
+        out.hover = Some(format!("{specimen}  {}{}{}", c.name(), if c.recs.is_empty() { "   (no AMS record)" } else { "" }, vals.unwrap_or_default()));
         if ui.input(|i| i.modifiers.alt) {
             label_box(&pa, rect, r.center(), format!("{}  {specimen}", c.name()), th);
         }
@@ -307,6 +373,22 @@ pub fn draw(ui: &mut Ui, rect: Rect, cubes: &[Cube], textures: &HashMap<(u32, ch
         if x > inner.min.x && x < inner.max.x {
             pa.text(Pos2::new(x, rect.max.y - 2.0), Align2::CENTER_BOTTOM, sl.to_string(), FontId::proportional(10.0), th.faint());
         }
+    }
+    if let Some(h) = hy {
+        // the colour bar of the parameter: its short name, the scale and the unit
+        let bar = Rect::from_min_size(Pos2::new(rect.min.x + 26.0, rect.min.y + 6.0), Vec2::new(110.0, 9.0));
+        let steps = 28;
+        for i in 0..steps {
+            let x0 = bar.min.x + bar.width() * i as f32 / steps as f32;
+            let c = h.row.colour_at((i as f64 + 0.5) / steps as f64);
+            pa.rect_filled(Rect::from_min_max(Pos2::new(x0, bar.min.y), Pos2::new(x0 + bar.width() / steps as f32 + 0.5, bar.max.y)), 0.0, rgb(c));
+        }
+        pa.rect_stroke(bar, 0.0, Stroke::new(0.6, th.faint()), egui::StrokeKind::Inside);
+        let t = |v: f64| if v.abs() >= 100.0 { format!("{v:.0}") } else if v.abs() >= 10.0 { format!("{v:.1}") } else { format!("{v:.2}") };
+        pa.text(Pos2::new(bar.min.x - 3.0, bar.center().y), Align2::RIGHT_CENTER, "", FontId::proportional(9.0), th.faint());
+        pa.text(Pos2::new(bar.min.x, bar.max.y + 1.0), Align2::LEFT_TOP, t(h.row.vmin), FontId::proportional(9.5), th.ink());
+        pa.text(Pos2::new(bar.max.x, bar.max.y + 1.0), Align2::RIGHT_TOP, t(h.row.vmax), FontId::proportional(9.5), th.ink());
+        pa.text(Pos2::new(bar.max.x + 8.0, bar.center().y), Align2::LEFT_CENTER, format!("{}  ({})", h.row.short, h.row.unit), FontId::proportional(10.5), th.ink());
     }
     if view.zoom > 1.0 {
         pa.text(Pos2::new(rect.max.x - 6.0, rect.min.y + 4.0), Align2::RIGHT_TOP, format!("zoom \u{d7}{:.1}   Esc resets", view.zoom), FontId::proportional(10.5), th.faint());

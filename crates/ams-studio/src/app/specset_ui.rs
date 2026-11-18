@@ -501,6 +501,7 @@ impl App {
             }
             let first = set.mains().first().cloned();
             self.browser_dir = set.root.clone();
+            self.setup_near(&[set.root.clone()]);
             self.set = Some(set);
             self.save_state();
             if let Some(p) = first {

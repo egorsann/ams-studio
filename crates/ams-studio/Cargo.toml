@@ -21,6 +21,7 @@ tiff = { version = "0.11.3", default-features = false }
 ureq = "3"
 sha2 = "0.10"
 zip = { version = "9", default-features = false, features = ["deflate"] }
+colorous = "1.0.16"
 
 [build-dependencies]
 embed-resource = "3"

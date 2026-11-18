@@ -6,6 +6,8 @@ mod core_view;
 mod fdialog;
 mod crash;
 mod doc;
+mod hyper;
+mod hyper_py;
 mod icon;
 mod icons;
 mod plots;
@@ -13,11 +15,13 @@ mod util;
 
 fn main() -> eframe::Result {
     crash::install();
-    // `--write-seed [--force]`: writes this computer's setup into its SynologyDrive folder for another computer to take over once
+    // `--write-setup [folder] [--force]`: writes this computer's setup as AMS_STUDIO_SETUP_dependancy.json into the folder of the
+    // specimens, for another computer with the same data to take over once
     {
         let a: Vec<String> = std::env::args().collect();
-        if a.iter().any(|x| x == "--write-seed") {
-            let r = app::write_seed_cli(a.iter().any(|x| x == "--force"));
+        if let Some(i) = a.iter().position(|x| x == "--write-setup") {
+            let folder = a.get(i + 1).filter(|x| !x.starts_with("--")).map(std::path::PathBuf::from);
+            let r = app::write_setup_cli(folder, a.iter().any(|x| x == "--force"));
             match &r {
                 Ok(m) => println!("{m}"),
                 Err(e) => eprintln!("{e}"),

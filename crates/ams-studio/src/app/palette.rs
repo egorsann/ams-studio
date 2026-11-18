@@ -114,6 +114,9 @@ impl App {
         // the GIS menu
         add("GIS", if self.gis_on { "Hide the GIS viewer pane" } else { "Show the GIS viewer pane" }, "", true, Action::ToggleGis);
         add("GIS", if self.gis.show_layers { "Hide the layers sidebar" } else { "Show the layers sidebar" }, "Shift+Ctrl+B", self.gis_on, Action::ToggleLayerBar);
+        add("Core viewer", "Next thing on the cubes: photos, then the hyperspectral parameters", "Ctrl+Shift+E", self.cv.on, Action::CoreMode(1));
+        add("Core viewer", "Previous thing on the cubes", "Ctrl+Shift+Q", self.cv.on, Action::CoreMode(-1));
+        add("Panes", "Pop the pane under the pointer out into its own window, or back", "Shift+Ctrl+Space", true, Action::PopOutPane);
         add("GIS", if self.gis_popped { "Dock the GIS viewer back into the main window" } else { "GIS viewer in its own window" }, "Shift+Ctrl+Space", true, Action::PopOutGis);
         add("GIS", if self.gis.base_on { "Backdrop off" } else { "Backdrop on" }, "", true, Action::GisBasemap);
         add("GIS", "Backdrop: street map", "", true, Action::GisBackdropSource(super::gis_data::BaseSource::Streets));

@@ -89,6 +89,10 @@ pub enum Action {
     ToggleGis,
     ToggleLayerBar,
     PopOutGis,
+    /// Shift+Ctrl+Space: the pane under the pointer into a window of its own, or back.
+    PopOutPane,
+    /// Ctrl+Shift+E / Ctrl+Shift+Q: the next / previous thing shown on the cubes of the core viewer (photos, then the hyperspectral parameters).
+    CoreMode(i32),
     AddPane,
     RemovePane,
     RemovePaneAt(PaneId),
@@ -446,6 +450,8 @@ pub struct App {
     /// The GIS viewer lives in a window of its own (that can be moved to another screen) instead of in the panes, and
     /// where that window was last: x, y, width, height.
     gis_popped: bool,
+    /// Panes other than the GIS viewer that are out of the window, in windows of their own, with the last position and size of each.
+    popped: Vec<(PaneId, Option<[f32; 4]>)>,
     palette: palette::PaletteState,
     gis_win: Option<[f32; 4]>,
     gis_export: bool,
@@ -586,6 +592,8 @@ pub struct App {
     set: Option<specset_ui::SpecSet>,
     last_ident: String,
     set_opts: specset_ui::SetOpts,
+    /// A setup file was applied to the preferences while the program runs: read them again at the next frame.
+    setup_reload: bool,
     /// Zoom and pan of the stereonet.
     st_view: NetView,
     win_classes: bool,
@@ -656,10 +664,10 @@ pub fn demo_tree(dir: &Path) {
     selftest::write_data(dir)
 }
 
-/// `ams-studio --write-seed [--force]`: this computer's setup as the seed for another computer with the same SynologyDrive
-/// folder (see `app/seed.rs`). Returns the text to show.
-pub fn write_seed_cli(force: bool) -> Result<String, String> {
-    seed::write_seed(&config_dir().join("ams-studio"), &home_dir(), force, &chrono::Local::now().format("%Y-%m-%d %H:%M").to_string())
+/// `ams-studio --write-setup [folder] [--force]`: this computer's setup as `AMS_STUDIO_SETUP_dependancy.json` in the folder of
+/// the specimens (see `app/seed.rs`). Returns the text to show.
+pub fn write_setup_cli(folder: Option<PathBuf>, force: bool) -> Result<String, String> {
+    seed::write_setup(&config_dir().join("ams-studio"), folder.as_deref(), force, &chrono::Local::now().format("%Y-%m-%d %H:%M").to_string())
 }
 
 pub fn config_dir_pub() -> PathBuf {
@@ -713,6 +721,7 @@ impl App {
             layout_order: pane_layout::default_order(),
             gis_on: false,
             gis_popped: false,
+            popped: vec![],
             palette: Default::default(),
             gis_win: None,
             gis_export: true,
@@ -821,6 +830,7 @@ impl App {
             set: None,
             last_ident: String::new(),
             set_opts: Default::default(),
+            setup_reload: false,
             st_view: NetView::default(),
             win_classes: false,
             edit: Default::default(),
@@ -851,8 +861,12 @@ impl App {
             shot_box: Default::default(),
             last_title: String::new(),
         };
-        // a setup that another computer with the same SynologyDrive folder left for this one is taken over once
-        let taken = if std::env::var_os("AMS_STUDIO_NO_SEED").is_some() { seed::Taken::No } else { seed::take_over(&config_dir().join("ams-studio"), &home_dir(), &seed::host_name()) };
+        // a setup that another computer left in the folder of the last session's specimens is taken over once
+        let taken = if std::env::var_os("AMS_STUDIO_NO_SEED").is_some() {
+            seed::Taken::No
+        } else {
+            seed::take_over(&config_dir().join("ams-studio"), &seed::candidates_from_state(&read_state_text().unwrap_or_default()), &seed::host_name())
+        };
         app.load_state();
         app.load_plots();
         if let seed::Taken::Yes(m) = taken {
@@ -923,6 +937,7 @@ impl App {
                 "last_file" if Path::new(v).is_file() => self.restore_file = Some(PathBuf::from(v)),
                 "browser" => self.browser_open = v != "0",
                 "core_on" => self.cv.on = v == "1",
+                "core_mode" => self.cv.mode_key = if v == "photos" { String::new() } else { v.to_string() },
                 "core_root" if Path::new(v).is_dir() => self.cv.root = Some(PathBuf::from(v)),
                 "core_needle" if !v.trim().is_empty() => self.cv.needle = v.to_string(),
                 "core_fit_all" => self.cv.fit_all = v == "1",
@@ -1036,6 +1051,7 @@ impl App {
                 self.gis_popped as u8,
                 self.update_check as u8
             );
+        t += &format!("core_mode={}\n", if self.cv.mode_key.is_empty() { "photos" } else { self.cv.mode_key.as_str() });
         let color_lines: String = (0..4).map(|i| format!("color{i}={}\n", prefs_ext::color_to_line(&self.color[i]))).collect();
         let b = |v: bool| u8::from(v);
         t += &format!(
@@ -1307,6 +1323,7 @@ impl App {
                 }
                 if let Some(parent) = p.parent() {
                     self.browser_dir = parent.to_path_buf();
+                    self.setup_near(&[parent.to_path_buf()]);
                 }
                 // the coordinate system this specimen was last shown in; a specimen with none stored keeps the current one
                 if !d.synthetic {
@@ -1711,6 +1728,18 @@ impl App {
                 None => {}
             },
             Action::PopOutGis => self.toggle_popout(),
+            Action::CoreMode(d) => {
+                if self.cv.on {
+                    self.cv_mode_step(ctx, d);
+                }
+            }
+            Action::PopOutPane => {
+                let p = ctx.input(|i| i.pointer.latest_pos());
+                match p.and_then(|p| pane_layout::pane_at(&self.pane_rects, p)) {
+                    Some(id) if id != PaneId::Gis => self.toggle_pane_pop(id),
+                    _ => self.toggle_popout(),
+                }
+            }
             // the sidebar of the pane the mouse is in (only the GIS pane has one); Ctrl+B stays the file browser
             Action::ToggleLayerBar => {
                 if self.gis_on {
@@ -1819,7 +1848,7 @@ impl App {
             (Modifiers::SHIFT | Modifiers::CTRL, Key::S, Action::ExportAms),
             (Modifiers::SHIFT | Modifiers::CTRL, Key::B, Action::ToggleLayerBar),
             // the chord tiling window managers use to make a window float (i3 and sway: Mod+Shift+Space)
-            (Modifiers::SHIFT | Modifiers::CTRL, Key::Space, Action::PopOutGis),
+            (Modifiers::SHIFT | Modifiers::CTRL, Key::Space, Action::PopOutPane),
             (Modifiers::SHIFT | Modifiers::CTRL, Key::N, Action::AddPane),
             (Modifiers::SHIFT | Modifiers::CTRL, Key::W, Action::RemovePane),
             (c, Key::O, Action::Open),
@@ -1885,6 +1914,20 @@ impl App {
                 }
             }
             return out;
+        }
+        // Ctrl+Shift+E / Ctrl+Shift+Q (Cmd on a Mac): the next / previous parameter on the cubes of the core viewer while the
+        // pointer is over it or it was used last (elsewhere Ctrl+Shift+E stays Export Selection)
+        if self.cv.on {
+            let over = ctx.input(|i| i.pointer.latest_pos()).is_some_and(|p| self.cv.rect.contains(p));
+            if over || self.last_focus == Focus::Core {
+                let m = Modifiers::COMMAND | Modifiers::SHIFT;
+                if ctx.input_mut(|i| i.consume_key(m, Key::E)) {
+                    out.push(Action::CoreMode(1));
+                }
+                if ctx.input_mut(|i| i.consume_key(m, Key::Q)) {
+                    out.push(Action::CoreMode(-1));
+                }
+            }
         }
         for (m, k, a) in table {
             if ctx.input_mut(|i| i.consume_key(m, k)) {
@@ -2136,6 +2179,33 @@ pub(crate) struct CrashState {
 }
 
 impl App {
+    /// Looks for a setup file of another computer in these folders (and their parents) and, if there is one not applied
+    /// before, takes it over: the preferences are replaced and read again at the next frame.
+    pub(super) fn setup_near(&mut self, dirs: &[PathBuf]) {
+        if std::env::var_os("AMS_STUDIO_NO_SEED").is_some() {
+            return;
+        }
+        if let seed::Taken::Yes(m) = seed::take_over(&config_dir().join("ams-studio"), dirs, &seed::host_name()) {
+            self.setup_reload = true;
+            self.info = Some(m);
+        }
+    }
+
+    /// Reads the preferences file again (after a setup was taken over).
+    fn reload_setup(&mut self, ctx: &egui::Context) {
+        let was_dark = self.dark;
+        self.gis.reset_for_reload();
+        self.load_state();
+        self.load_plots();
+        if self.dark != was_dark {
+            std::mem::swap(&mut self.k_colors, &mut self.k_other);
+        }
+        apply_style(ctx, self.dark);
+        self.state_saved = self.state_text();
+        self.plots_saved = self.plots_text();
+        ctx.request_repaint();
+    }
+
     /// One frame, protected: an error inside it (a panic) is logged and shown, the windows are closed, and the program
     /// goes on with the next frame instead of closing.
     pub(crate) fn guarded_frame(&mut self, ui: &mut Ui) {
@@ -2214,6 +2284,10 @@ impl App {
     }
 
     fn ui_body(&mut self, ui: &mut Ui) {
+        if self.setup_reload {
+            self.setup_reload = false;
+            self.reload_setup(ui.ctx());
+        }
         // headless test hook: AMS_STUDIO_OPEN_WINDOW=sort opens that window once on the first frame
         if let Some(w) = self.test_window.take() {
             match w.as_str() {
@@ -3035,6 +3109,206 @@ impl App {
         }
     }
 
+    /// What the plot panes need that is the same for all of them in one frame.
+    fn slot_data(&self) -> SlotData {
+        let pts = self.points();
+        let cs_label = match self.coord {
+            CoordSys::Specimen => "SPEC",
+            CoordSys::Geographic => "GEO",
+            CoordSys::Paleo => "PALEO",
+            CoordSys::Tectonic => "TECTO",
+        };
+        let names = self.pane_names();
+        let class_cols = self.class_colors();
+        let mut overlay_gs: Option<ams_core::stats::GroupStats> = None;
+        if self.st_overlay.mean || self.st_overlay.boot {
+            let idx: Vec<usize> = pts.iter().map(|p| p.idx).collect();
+            let tensors: Vec<_> = idx.iter().map(|&i| self.derived[i].tensor).collect();
+            let kms: Vec<f64> = idx.iter().map(|&i| self.derived[i].km).collect();
+            overlay_gs = ams_core::stats::group_stats(&tensors, &kms);
+        }
+        SlotData { pts, cs_label, names, class_cols, overlay_gs }
+    }
+
+    /// One plot pane (slot 0 the stereonet, 1 to 3 the plots) drawn into `prect`, in the main window or in a window of its own.
+    fn plot_slot(&mut self, ui: &mut Ui, i: usize, prect: Rect, d: &SlotData, th: &Theme) -> plots::PlotOut {
+            let mut body = self.pane_frame(ui, prect, i, &d.names[i], th);
+            // the settings of the three plot panes (the stereonet has none)
+            let cfg: Option<PaneCfg> = (i >= 1).then(|| self.cfg(i - 1).clone());
+            let coloured = i == 0 || cfg.as_ref().map_or(false, |c| matches!(c.kind, XyKind::Scatter | XyKind::Line) || (i == 3 && c.polar));
+            let (cpts, crange) = if coloured { Self::colorized(&d.pts, &self.color[i], &d.class_cols) } else { (d.pts.clone(), None) };
+            let show_bar = coloured && crange.is_some() && (i == 0 || cfg.as_ref().map_or(false, |c| c.legend));
+            if show_bar {
+                let bar = Rect::from_min_max(Pos2::new(body.min.x, body.max.y - 30.0), body.max);
+                body.max.y -= 30.0;
+                plots::color_bar(ui, bar, &self.color[i], crange.unwrap(), th);
+            }
+            let out = match i {
+                0 => {
+                    let o = StereoOpts { show: self.show_k, size: self.marker, data: self.st_data, caption: self.st_caption, legend: self.st_legend, connect: self.st_connect, foliation: self.st_mf, planes: self.plane_draws() };
+                    let out = plots::stereonet(ui, body, &cpts, &o, th, d.cs_label, &mut self.st_view);
+                    if let Some(gs) = &d.overlay_gs {
+                        let (c, r) = plots::net_geometry(body, &self.st_view);
+                        let pa = ui.painter_at(body);
+                        analysis_ui::draw_stereo_overlay(&pa, c, r, gs, &self.st_overlay, self.show_k, self.k_colors);
+                    }
+                    out
+                }
+                _ => {
+                    let c = cfg.unwrap_or_else(|| PaneCfg::default_for(0, false));
+                    let k = i - 1;
+                    // "Selection only": just the sub-specimens selected in the specimen list
+                    let shown: Vec<Pt> = if c.sel_only { cpts.iter().filter(|p| p.selected).cloned().collect() } else { cpts.clone() };
+                    const SALT: [&str; 3] = ["xy_a", "xy_b", "xy_c"];
+                    const SALT_BIN: [&str; 3] = ["bn_a", "bn_b", "bn_c"];
+                    // the bottom right pane (T vs Pj) can be a polar plot (T angle, Pj radius)
+                    if k == 2 && c.polar {
+                        plots::polar(ui, body, &shown, if self.use_p { 3 } else { 4 }, c.polar_log, self.marker, th, "polar")
+                    } else {
+                    match c.kind {
+                        XyKind::Histogram => plots::histogram(ui, body, &shown, c.bins, &c.hist, th, SALT[k]),
+                        XyKind::Scatter | XyKind::Line => {
+                            let line = c.kind == XyKind::Line;
+                            let spec = ScatterSpec { x: &c.x, y: &c.y, zero_line: c.zero, diagonal: c.diag, conf: c.conf, connect: c.connect || line, sort_x: line, salt: SALT[k] };
+                            plots::scatter(ui, body, &shown, &spec, self.marker, th, &mut self.views[k])
+                        }
+                        kind => plots::binned_plot(ui, body, &shown, kind, &c.x, &c.y, c.bins, c.group, th, &mut self.views[k], SALT_BIN[k]),
+                    }
+                    }
+                }
+            };
+            out
+    }
+
+    /// A click on a marker or a rubber band over markers selects those specimens.
+    fn apply_pick(&mut self, click: Option<usize>, band: Option<Vec<usize>>) {
+        if band.is_some() {
+            self.last_band = true;
+        } else if click.is_some() {
+            self.last_band = false;
+        }
+        if let Some(b) = band {
+            if let Some(doc) = &mut self.doc {
+                doc.selected.iter_mut().for_each(|s| *s = false);
+                for i in b {
+                    doc.selected[i] = true;
+                }
+            }
+        } else if let (Some(i), Some(doc)) = (click, &mut self.doc) {
+            // a click on a marker selects just that specimen (a second click on it clears)
+            let only = doc.selected[i] && doc.n_selected() == 1;
+            doc.selected.iter_mut().for_each(|s| *s = false);
+            doc.selected[i] = !only;
+            self.last_anchor = Some(i);
+        }
+    }
+
+    /// Ctrl + click on a cube of the core viewer: its records join the selection, or all leave when all were in.
+    fn apply_toggle(&mut self, toggle: &Option<Vec<usize>>) {
+        let out_toggle = toggle;
+            if let Some(doc) = &mut self.doc {
+                let n = doc.selected.len();
+                if let Some(recs) = out_toggle.as_ref().map(|r| r.iter().copied().filter(|&i| i < n).collect::<Vec<_>>()) {
+                    // all of them selected: they go; otherwise they all join
+                    let all = !recs.is_empty() && recs.iter().all(|&i| doc.selected[i]);
+                    for i in recs {
+                        doc.selected[i] = !all;
+                    }
+                    self.last_band = false;
+                }
+            }
+    }
+
+    /// A pane (other than the GIS viewer) into a window of its own, or back into the panes.
+    pub(super) fn toggle_pane_pop(&mut self, id: PaneId) {
+        if id == PaneId::Gis {
+            self.toggle_popout();
+        } else if let Some(i) = self.popped.iter().position(|(p, _)| *p == id) {
+            self.popped.remove(i);
+        } else {
+            self.popped.push((id, None));
+        }
+    }
+
+    /// The panes that are popped out, each in a native window of its own (movable to another screen). Closing the window and
+    /// Shift+Ctrl+Space inside it put the pane back.
+    pub(super) fn pane_popouts(&mut self, ctx: &egui::Context) {
+        // a pane that is no longer there (the core viewer switched off, a removed plot pane) is back in no window
+        let alive: Vec<PaneId> = self.layout_order.clone();
+        self.popped.retain(|(p, _)| match p {
+            PaneId::Core => self.cv.on,
+            PaneId::Gis => false,
+            _ => alive.contains(p),
+        });
+        let list: Vec<(PaneId, Option<[f32; 4]>)> = self.popped.clone();
+        let th = self.theme();
+        for (id, geom) in list {
+            let names = self.pane_names();
+            let title = match id {
+                PaneId::Stereo => names[0].clone(),
+                PaneId::Plot(k) => names.get(k).cloned().unwrap_or_else(|| "Plot".into()),
+                PaneId::Core => "Core viewer".to_string(),
+                PaneId::Gis => continue,
+            };
+            let [x, y, w, h] = geom.unwrap_or([f32::NAN, f32::NAN, 900.0, 640.0]);
+            let mut builder = egui::ViewportBuilder::default().with_title(format!("AMS Studio - {title}")).with_inner_size([w, h]).with_min_inner_size([360.0, 260.0]);
+            if x.is_finite() && y.is_finite() {
+                builder = builder.with_position([x, y]);
+            }
+            let mut dock = false;
+            let mut geometry: Option<[f32; 4]> = None;
+            let mut picked: (Option<usize>, Option<Vec<usize>>) = (None, None);
+            let mut toggled: Option<Vec<usize>> = None;
+            ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(("ams-studio-pop", format!("{id:?}"))), builder, |ui, _class| {
+                let rect = ui.available_rect_before_wrap();
+                ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
+                ui.allocate_rect(rect, Sense::hover());
+                let inner = rect.shrink(6.0);
+                let out = match id {
+                    PaneId::Core => {
+                        self.cv.rect = inner;
+                        let o = self.cv_pane(ui, inner, &th);
+                        toggled = o.toggle.clone();
+                        o
+                    }
+                    PaneId::Stereo => {
+                        let d = self.slot_data();
+                        self.plot_slot(ui, 0, inner, &d, &th)
+                    }
+                    PaneId::Plot(k) => {
+                        let d = self.slot_data();
+                        self.plot_slot(ui, k, inner, &d, &th)
+                    }
+                    PaneId::Gis => plots::PlotOut::default(),
+                };
+                if let PaneId::Stereo | PaneId::Plot(_) = id {
+                    let slot = if let PaneId::Plot(k) = id { k } else { 0 };
+                    self.hover[slot] = out.hover.clone().unwrap_or_default();
+                }
+                picked = (out.click, out.band);
+                let vctx = ui.ctx().clone();
+                dock = vctx.input(|i| i.viewport().close_requested()) || vctx.input_mut(|i| i.consume_key(Modifiers::SHIFT | Modifiers::CTRL, Key::Space));
+                vctx.input(|i| {
+                    let v = i.viewport();
+                    if let (Some(o), Some(inner)) = (v.outer_rect, v.inner_rect) {
+                        geometry = Some([o.min.x, o.min.y, inner.width(), inner.height()]);
+                    }
+                });
+            });
+            if toggled.is_some() {
+                self.apply_toggle(&toggled);
+            }
+            self.apply_pick(picked.0, picked.1);
+            if dock {
+                self.popped.retain(|(p, _)| *p != id);
+            } else if let Some(g) = geometry {
+                if let Some(e) = self.popped.iter_mut().find(|(p, _)| *p == id) {
+                    e.1 = Some(g);
+                }
+            }
+        }
+    }
+
     fn plots_ui(&mut self, ui: &mut Ui, th: &Theme) {
         let all = ui.available_rect_before_wrap();
         let gap = 8.0;
@@ -3043,7 +3317,8 @@ impl App {
         if order != self.layout_order {
             self.layout_order = order.clone();
         }
-        let rows = pane_layout::build_rows(&order);
+        let docked: Vec<PaneId> = order.iter().copied().filter(|p| *p == PaneId::Gis || !self.popped.iter().any(|(q, _)| q == p)).collect();
+        let rows = pane_layout::build_rows(&docked);
         let gis_row = rows.iter().position(|r| r.contains(&PaneId::Gis));
         let wide_frac = if gis_row.is_some() { self.gis_frac } else { self.cv.frac };
         let placed = pane_layout::place(&rows, all, gap, wide_frac, self.vfrac, self.hfrac, self.gfrac);
@@ -3090,75 +3365,17 @@ impl App {
         let gis_rect = rect_of(PaneId::Gis);
         self.pane_rects = placed.panes.clone();
 
-        let pts = self.points();
+        let slot = self.slot_data();
+        let names = slot.names.clone();
         let mut click: Option<usize> = None;
         let mut band: Option<Vec<usize>> = None;
-        let cs_label = match self.coord {
-            CoordSys::Specimen => "SPEC",
-            CoordSys::Geographic => "GEO",
-            CoordSys::Paleo => "PALEO",
-            CoordSys::Tectonic => "TECTO",
-        };
-        let names = self.pane_names();
-        let class_cols = self.class_colors();
-        let mut overlay_gs: Option<ams_core::stats::GroupStats> = None;
-        if self.st_overlay.mean || self.st_overlay.boot {
-            let idx: Vec<usize> = pts.iter().map(|p| p.idx).collect();
-            let tensors: Vec<_> = idx.iter().map(|&i| self.derived[i].tensor).collect();
-            let kms: Vec<f64> = idx.iter().map(|&i| self.derived[i].km).collect();
-            overlay_gs = ams_core::stats::group_stats(&tensors, &kms);
-        }
         for i in 0..4 {
             let Some(prect) = slot_rect[i] else {
                 // a removed plot pane: nothing to draw, its settings stay
                 self.hover[i] = Default::default();
                 continue;
             };
-            let mut body = self.pane_frame(ui, prect, i, &names[i], th);
-            // the settings of the three plot panes (the stereonet has none)
-            let cfg: Option<PaneCfg> = (i >= 1).then(|| self.cfg(i - 1).clone());
-            let coloured = i == 0 || cfg.as_ref().map_or(false, |c| matches!(c.kind, XyKind::Scatter | XyKind::Line) || (i == 3 && c.polar));
-            let (cpts, crange) = if coloured { Self::colorized(&pts, &self.color[i], &class_cols) } else { (pts.clone(), None) };
-            let show_bar = coloured && crange.is_some() && (i == 0 || cfg.as_ref().map_or(false, |c| c.legend));
-            if show_bar {
-                let bar = Rect::from_min_max(Pos2::new(body.min.x, body.max.y - 30.0), body.max);
-                body.max.y -= 30.0;
-                plots::color_bar(ui, bar, &self.color[i], crange.unwrap(), th);
-            }
-            let out = match i {
-                0 => {
-                    let o = StereoOpts { show: self.show_k, size: self.marker, data: self.st_data, caption: self.st_caption, legend: self.st_legend, connect: self.st_connect, foliation: self.st_mf, planes: self.plane_draws() };
-                    let out = plots::stereonet(ui, body, &cpts, &o, th, cs_label, &mut self.st_view);
-                    if let Some(gs) = &overlay_gs {
-                        let (c, r) = plots::net_geometry(body, &self.st_view);
-                        let pa = ui.painter_at(body);
-                        analysis_ui::draw_stereo_overlay(&pa, c, r, gs, &self.st_overlay, self.show_k, self.k_colors);
-                    }
-                    out
-                }
-                _ => {
-                    let c = cfg.unwrap_or_else(|| PaneCfg::default_for(0, false));
-                    let k = i - 1;
-                    // "Selection only": just the sub-specimens selected in the specimen list
-                    let shown: Vec<Pt> = if c.sel_only { cpts.iter().filter(|p| p.selected).cloned().collect() } else { cpts.clone() };
-                    const SALT: [&str; 3] = ["xy_a", "xy_b", "xy_c"];
-                    const SALT_BIN: [&str; 3] = ["bn_a", "bn_b", "bn_c"];
-                    // the bottom right pane (T vs Pj) can be a polar plot (T angle, Pj radius)
-                    if k == 2 && c.polar {
-                        plots::polar(ui, body, &shown, if self.use_p { 3 } else { 4 }, c.polar_log, self.marker, th, "polar")
-                    } else {
-                    match c.kind {
-                        XyKind::Histogram => plots::histogram(ui, body, &shown, c.bins, &c.hist, th, SALT[k]),
-                        XyKind::Scatter | XyKind::Line => {
-                            let line = c.kind == XyKind::Line;
-                            let spec = ScatterSpec { x: &c.x, y: &c.y, zero_line: c.zero, diagonal: c.diag, conf: c.conf, connect: c.connect || line, sort_x: line, salt: SALT[k] };
-                            plots::scatter(ui, body, &shown, &spec, self.marker, th, &mut self.views[k])
-                        }
-                        kind => plots::binned_plot(ui, body, &shown, kind, &c.x, &c.y, c.bins, c.group, th, &mut self.views[k], SALT_BIN[k]),
-                    }
-                    }
-                }
-            };
+            let out = self.plot_slot(ui, i, prect, &slot, th);
             self.hover[i] = out.hover.unwrap_or_default();
             if out.click.is_some() {
                 click = out.click;
@@ -3172,17 +3389,7 @@ impl App {
         self.cv.rect = core_rect.unwrap_or(Rect::NOTHING);
         if let Some(cr) = core_rect {
             let out = self.cv_pane(ui, cr, th);
-            if let Some(doc) = &mut self.doc {
-                let n = doc.selected.len();
-                if let Some(recs) = out.toggle.as_ref().map(|r| r.iter().copied().filter(|&i| i < n).collect::<Vec<_>>()) {
-                    // all of them selected: they go; otherwise they all join
-                    let all = !recs.is_empty() && recs.iter().all(|&i| doc.selected[i]);
-                    for i in recs {
-                        doc.selected[i] = !all;
-                    }
-                    self.last_band = false;
-                }
-            }
+            self.apply_toggle(&out.toggle);
             if out.click.is_some() {
                 click = out.click;
             }
@@ -3194,25 +3401,7 @@ impl App {
             self.gis_pane(ui, gr, th);
         }
         self.pane_grips(ui, th, &placed.panes, &names);
-        if band.is_some() {
-            self.last_band = true;
-        } else if click.is_some() {
-            self.last_band = false;
-        }
-        if let Some(b) = band {
-            if let Some(doc) = &mut self.doc {
-                doc.selected.iter_mut().for_each(|s| *s = false);
-                for i in b {
-                    doc.selected[i] = true;
-                }
-            }
-        } else if let (Some(i), Some(doc)) = (click, &mut self.doc) {
-            // a click on a marker selects just that specimen (a second click on it clears)
-            let only = doc.selected[i] && doc.n_selected() == 1;
-            doc.selected.iter_mut().for_each(|s| *s = false);
-            doc.selected[i] = !only;
-            self.last_anchor = Some(i);
-        }
+        self.apply_pick(click, band);
         if let Some(job) = &mut self.shot {
             if job.rects.is_empty() {
                 let tag = |n: &str| -> &'static str { Box::leak(n.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect::<String>().into_boxed_str()) };
@@ -3706,6 +3895,16 @@ impl App {
     }
 }
 
+/// What every plot pane needs in one frame: the markers, the coordinate system label, the pane names, the class colours and the
+/// mean tensor overlay.
+pub(crate) struct SlotData {
+    pts: Vec<Pt>,
+    cs_label: &'static str,
+    names: [String; 4],
+    class_cols: Vec<Option<Color32>>,
+    overlay_gs: Option<ams_core::stats::GroupStats>,
+}
+
 const ROW_H: f32 = 22.0;
 
 fn faded(c: Color32, active: bool) -> Color32 {
@@ -4089,6 +4288,7 @@ impl App {
         self.sort_window(ctx);
         self.gis_window(ctx);
         self.gis_popout(ctx);
+        self.pane_popouts(ctx);
         self.owens_window(ctx);
         self.table_window(ctx);
         self.group_window(ctx);
