@@ -510,6 +510,9 @@ pub struct App {
     planes_legacy: Vec<stereo_planes::StPlane>,
     /// New planes are added specimen specific (off: global).
     st_plane_new_spec: bool,
+    /// The veins and hole surveys of the AMS dashboard code (read when a file is opened), and the note after adding them.
+    st_dash: Option<crate::veins::Dash>,
+    st_dash_msg: String,
     st_connect: bool,
     st_mf: bool,
     st_overlay: analysis_ui::StereoOverlay,
@@ -763,6 +766,8 @@ impl App {
             planes_dirty: None,
             planes_legacy: vec![],
             st_plane_new_spec: false,
+            st_dash: None,
+            st_dash_msg: String::new(),
             st_connect: false,
             st_mf: false,
             st_overlay: Default::default(),

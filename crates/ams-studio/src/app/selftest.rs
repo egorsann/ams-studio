@@ -430,6 +430,37 @@ pub fn run(out: &Path) -> usize {
         h.app.cv.mode = 0;
     }
 
+    // ---- vein planes from alpha / beta (made-up dashboard code with VEIN_PLANES and a notebook cell with BOREHOLE_CONFIGS)
+    {
+        let dep = root.join("veins").join("working_files_doc").join("Python_doc").join("dependancies");
+        let _ = std::fs::create_dir_all(&dep);
+        let id = core_pane::spec_id(&root.join("single").join("demo.ams"));
+        let code = format!("VEIN_PLANES = {{\n    \"{id}\": [{{\"name\": \"vein 2 (main)\", \"alpha\": 35, \"beta\": 315, \"zones\": (2, 4)}},\n        {{\"name\": \"vein 3\", \"alpha\": 22.5, \"beta\": 330, \"zones\": (6,)}}],\n}}\n");
+        w(&dep.join(crate::hyper::MODULE_FILE), code.as_bytes());
+        let cell = format!("BOREHOLE_CONFIGS = {{\n    \"{id}\": {{\n        \"DIP_DIR\": 305.0,\n        \"PLUNGE\": 69.0,\n        \"INTERVALS\": [\n            (0, 32, 45.0)  # turn\n        ]\n    }}\n}}\n");
+        let nb = serde_json::json!({ "cells": [{ "cell_type": "code", "source": [cell] }] });
+        w(&dep.parent().unwrap().join("dashboard_from_dot_ams.ipynb"), nb.to_string().as_bytes());
+        std::env::set_var("AMS_STUDIO_HYPER_DIR", &dep);
+        h.app.st_planes.clear();
+        h.app.planes_for = None;
+        h.step("open the demo file for the vein planes", |a, _| a.open_path(demo.clone()));
+        h.check("the dashboard tables were read", h.app.st_dash.as_ref().map_or(false, |d| d.specimen(&id).veins.len() == 2), "not read".to_string());
+        h.step("add the veins of the dashboard", |a, _| a.add_dashboard_veins());
+        h.check("two vein planes", h.app.st_planes.iter().filter(|q| q.ab.is_some()).count() == 2, format!("{}", h.app.st_planes.len()));
+        h.step("add the veins again", |a, _| a.add_dashboard_veins());
+        h.check("none twice", h.app.st_planes.iter().filter(|q| q.ab.is_some()).count() == 2, format!("{}", h.app.st_planes.len()));
+        let (dd, dp) = h.app.st_planes.first().map_or((0.0, 0.0), |q| (q.dip_dir, q.dip));
+        h.check("the plane is the dashboard's", (dd - 87.184).abs() < 0.01 && (dp - 70.858).abs() < 0.01, format!("{dd} {dp}"));
+        h.app.st_planes_on = true;
+        h.app.coord = ams_core::coords::CoordSys::Geographic;
+        h.check("the stereonet draws them", h.app.plane_draws().len() == 2, format!("{}", h.app.plane_draws().len()));
+        h.step("the stereonet with vein planes", |_, _| {});
+        std::env::remove_var("AMS_STUDIO_HYPER_DIR");
+        h.app.st_planes.clear();
+        h.app.st_dash = None;
+        h.app.st_planes_on = false;
+    }
+
     // ---- every pane into a window of its own and back, also with the shortcut over the pane under the pointer
     {
         h.app.cv.on = true;

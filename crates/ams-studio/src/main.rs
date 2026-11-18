@@ -12,6 +12,7 @@ mod icon;
 mod icons;
 mod plots;
 mod util;
+mod veins;
 
 fn main() -> eframe::Result {
     crash::install();

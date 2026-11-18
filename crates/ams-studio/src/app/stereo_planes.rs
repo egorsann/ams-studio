@@ -28,6 +28,23 @@ pub(super) struct StPlane {
     /// The specimen (id of the file, `DC26AB002`) the plane belongs to; `None` = global, drawn for every specimen.
     /// Chosen when the plane is added and kept; it is not changed afterwards.
     pub spec: Option<String>,
+    /// A plane given by the alpha / beta angles of its trace on the core (and the survey of the hole) instead of typed
+    /// in as strike / dip; `dip_dir` and `dip` are then worked out from it (`recompute`).
+    pub ab: Option<AlphaBeta>,
+}
+
+/// The measurement a vein plane is calculated from: the angles on the whole core and the survey of the hole.
+#[derive(Clone, PartialEq, Debug)]
+pub(super) struct AlphaBeta {
+    /// Angle between the plane and the core axis, 0 to 90 degrees.
+    pub alpha: f64,
+    /// Clockwise looking downhole from the BOH line to the downhole apex of the trace, 0 to 360 degrees.
+    pub beta: f64,
+    /// Direction the hole goes down towards, and its plunge below the horizontal.
+    pub hole_dip_dir: f64,
+    pub plunge: f64,
+    /// The name of the vein in the dashboard code it was taken from (`None` = entered here).
+    pub src: Option<String>,
 }
 
 /// Colours that are not the K1 / K2 / K3 ones.
@@ -41,7 +58,25 @@ fn fresh_id() -> u64 {
 
 impl StPlane {
     pub fn new(n: usize, spec: Option<String>) -> StPlane {
-        StPlane { id: fresh_id(), on: true, dip_dir: 90.0, dip: 60.0, comment: String::new(), color: PALETTE[n % PALETTE.len()], spec }
+        StPlane { id: fresh_id(), on: true, dip_dir: 90.0, dip: 60.0, comment: String::new(), color: PALETTE[n % PALETTE.len()], spec, ab: None }
+    }
+
+    /// A vein plane from alpha / beta and the survey of the hole.
+    pub fn from_alpha_beta(n: usize, spec: Option<String>, ab: AlphaBeta, comment: &str) -> StPlane {
+        let mut q = StPlane::new(n, spec);
+        q.comment = comment.to_string();
+        q.ab = Some(ab);
+        q.recompute();
+        q
+    }
+
+    /// Works the geographic dip direction and dip out of the alpha / beta of a vein plane (nothing for a typed plane).
+    pub fn recompute(&mut self) {
+        if let Some(a) = &self.ab {
+            let (dd, dip) = crate::veins::plane_geographic(a.alpha, a.beta, a.hole_dip_dir, a.plunge);
+            self.dip_dir = dd;
+            self.dip = dip.clamp(0.0, 90.0);
+        }
     }
 
     /// Drawn for the specimen with this id (`None` = no file open: only the global planes).
@@ -96,7 +131,17 @@ pub(super) fn side_letter(dip_dir: f64) -> &'static str {
 // ---------------------------------------------------------------- the dependency file
 
 fn plane_json(q: &StPlane) -> Value {
-    json!({ "id": q.id.to_string(), "on": q.on, "dip_direction": q.dip_dir, "dip": q.dip, "comment": q.comment, "color": q.color })
+    let mut v = json!({ "id": q.id.to_string(), "on": q.on, "dip_direction": q.dip_dir, "dip": q.dip, "comment": q.comment, "color": q.color });
+    if let Some(a) = &q.ab {
+        v["alpha"] = json!(a.alpha);
+        v["beta"] = json!(a.beta);
+        v["hole_dip_direction"] = json!(a.hole_dip_dir);
+        v["hole_plunge"] = json!(a.plunge);
+        if let Some(n) = &a.src {
+            v["dashboard_vein"] = json!(n);
+        }
+    }
+    v
 }
 
 fn parse_planes(list: Option<&Value>, spec: Option<&str>) -> Vec<StPlane> {
@@ -107,7 +152,19 @@ fn parse_planes(list: Option<&Value>, spec: Option<&str>) -> Vec<StPlane> {
             let num = |k: &str| p.get(k).and_then(|x| x.as_f64());
             let col = p.get("color").and_then(|c| c.as_array()).filter(|c| c.len() == 3).map(|c| [0, 1, 2].map(|i| c[i].as_u64().unwrap_or(128).min(255) as u8)).unwrap_or(PALETTE[n % PALETTE.len()]);
             let id = p.get("id").and_then(|x| x.as_str()).and_then(|x| x.parse::<u64>().ok()).unwrap_or_else(fresh_id);
-            Some(StPlane { id, on: p.get("on").and_then(|x| x.as_bool()).unwrap_or(true), dip_dir: num("dip_direction")?.rem_euclid(360.0), dip: num("dip")?.clamp(0.0, 90.0), comment: p.get("comment").and_then(|c| c.as_str()).unwrap_or("").to_string(), color: col, spec: spec.map(|s| s.to_string()) })
+            let ab = match (num("alpha"), num("beta"), num("hole_dip_direction"), num("hole_plunge")) {
+                (Some(alpha), Some(beta), Some(hole_dip_dir), Some(plunge)) => Some(AlphaBeta { alpha: alpha.clamp(0.0, 90.0), beta: beta.rem_euclid(360.0), hole_dip_dir: hole_dip_dir.rem_euclid(360.0), plunge: plunge.clamp(0.0, 90.0), src: p.get("dashboard_vein").and_then(|x| x.as_str()).map(|x| x.to_string()) }),
+                _ => None,
+            };
+            // a vein plane without its own dip direction / dip in the file is still worked out from the angles
+            let (dd, dp) = match (num("dip_direction"), num("dip")) {
+                (Some(a), Some(b)) => (a.rem_euclid(360.0), b.clamp(0.0, 90.0)),
+                _ if ab.is_some() => (0.0, 0.0),
+                _ => return None,
+            };
+            let mut q = StPlane { id, on: p.get("on").and_then(|x| x.as_bool()).unwrap_or(true), dip_dir: dd, dip: dp, comment: p.get("comment").and_then(|c| c.as_str()).unwrap_or("").to_string(), color: col, spec: spec.map(|s| s.to_string()), ab };
+            q.recompute();
+            Some(q)
         })
         .collect()
 }
@@ -146,7 +203,7 @@ pub(super) fn read_legacy() -> Vec<StPlane> {
             let num = |k: &str| p.get(k).and_then(|x| x.as_f64());
             let col = p.get("color").and_then(|c| c.as_array()).filter(|c| c.len() == 3).map(|c| [0, 1, 2].map(|i| c[i].as_u64().unwrap_or(128).min(255) as u8)).unwrap_or(PALETTE[n % PALETTE.len()]);
             let spec = p.get("specimen").and_then(|c| c.as_str()).filter(|c| !c.is_empty()).map(|c| c.to_string());
-            let mut q = StPlane { id: 0, on: p.get("on").and_then(|x| x.as_bool()).unwrap_or(true), dip_dir: num("dip_direction")?.rem_euclid(360.0), dip: num("dip")?.clamp(0.0, 90.0), comment: p.get("comment").and_then(|c| c.as_str()).unwrap_or("").to_string(), color: col, spec };
+            let mut q = StPlane { id: 0, on: p.get("on").and_then(|x| x.as_bool()).unwrap_or(true), dip_dir: num("dip_direction")?.rem_euclid(360.0), dip: num("dip")?.clamp(0.0, 90.0), comment: p.get("comment").and_then(|c| c.as_str()).unwrap_or("").to_string(), color: col, spec, ab: None };
             // FNV-1a over what identifies the plane
             let key = format!("{}|{}|{}|{:?}|{:?}", q.dip_dir, q.dip, q.comment, q.color, q.spec);
             q.id = key.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3));
@@ -172,7 +229,13 @@ impl App {
             .filter(|q| q.on && q.applies_to(open_id.as_deref()))
             .map(|q| {
                 let comment = q.comment.trim().to_string();
-                let name = if comment.is_empty() { format!("plane: dip direction {:.0}\u{b0}, dip {:.0}\u{b0}", q.dip_dir, q.dip) } else { comment.clone() };
+                let name = if !comment.is_empty() {
+                    comment.clone()
+                } else if let Some(a) = &q.ab {
+                    format!("vein plane: alpha {:.0}\u{b0}, beta {:.0}\u{b0} (dip direction {:.0}\u{b0}, dip {:.0}\u{b0})", a.alpha, a.beta, q.dip_dir, q.dip)
+                } else {
+                    format!("plane: dip direction {:.0}\u{b0}, dip {:.0}\u{b0}", q.dip_dir, q.dip)
+                };
                 PlaneDraw { dip_dir: q.dip_dir, dip: q.dip, color: Color32::from_rgb(q.color[0], q.color[1], q.color[2]), name, show_label: self.st_plane_comments && !comment.is_empty() }
             })
             .collect()
@@ -191,6 +254,8 @@ impl App {
                 self.planes_dirty = None;
             }
             self.planes_for = cur.clone();
+            self.st_dash_msg.clear();
+            self.st_dash = cur.as_ref().and_then(|p| crate::hyper::locate(p)).and_then(|d| crate::veins::Dash::load(&d)).filter(|d| !d.is_empty());
             match cur {
                 Some(p) => self.planes_load(&p, now),
                 None => self.st_planes.retain(|q| q.spec.is_none()),
@@ -256,6 +321,53 @@ impl App {
         }
     }
 
+    /// The survey of the open specimen's hole for a new vein plane: from the dashboard code, else the position saved for
+    /// the specimen (GIS viewer), else the values of the Drill Core to Geo window. Says where it came from.
+    fn hole_survey(&self) -> ((f64, f64), &'static str) {
+        let id = self.open_spec_id().unwrap_or_default();
+        if let Some(sv) = self.st_dash.as_ref().and_then(|d| d.specimen(&id).survey) {
+            return (sv, "the AMS dashboard code");
+        }
+        if let Some(h) = self.doc.as_ref().filter(|d| !d.synthetic).and_then(|d| super::gis_loc::read_for(&d.path)).and_then(|l| l.hole) {
+            return ((h.dip_dir, h.plunge), "the position saved for this specimen");
+        }
+        ((self.core.setup.dip_dir, self.core.setup.plunge), "the Drill Core to Geo window")
+    }
+
+    /// Adds the veins the dashboard code lists for the open specimen (alpha / beta from `VEIN_PLANES`, the survey from
+    /// `BOREHOLE_CONFIGS`), as planes of this specimen; veins that are already there are left as they are.
+    pub(super) fn add_dashboard_veins(&mut self) {
+        let Some(id) = self.open_spec_id() else { return };
+        // read the code again, so a vein added to it since the file was opened is found
+        let fresh = self.doc.as_ref().filter(|d| !d.synthetic).and_then(|d| crate::hyper::locate(&d.path)).and_then(|d| crate::veins::Dash::load(&d));
+        if fresh.is_some() {
+            self.st_dash = fresh;
+        }
+        let Some(dash) = self.st_dash.clone() else {
+            self.st_dash_msg = "The AMS dashboard code was not found above the data.".into();
+            return;
+        };
+        let sp = dash.specimen(&id);
+        if sp.veins.is_empty() {
+            self.st_dash_msg = format!("The dashboard code lists no veins for {id}.");
+            return;
+        }
+        let ((dd, pl), _) = self.hole_survey();
+        let (dd, pl) = sp.survey.unwrap_or((dd, pl));
+        let (mut added, mut there) = (0, 0);
+        for v in &sp.veins {
+            if self.st_planes.iter().any(|q| q.applies_to(Some(&id)) && q.spec.is_some() && q.ab.as_ref().map_or(false, |a| a.src.as_deref() == Some(v.name.as_str()))) {
+                there += 1;
+                continue;
+            }
+            let ab = AlphaBeta { alpha: v.alpha, beta: v.beta, hole_dip_dir: dd, plunge: pl, src: Some(v.name.clone()) };
+            let n = self.st_planes.len();
+            self.st_planes.push(StPlane::from_alpha_beta(n, Some(id.clone()), ab, &v.name));
+            added += 1;
+        }
+        self.st_dash_msg = format!("Added {added} vein plane{} for {id}{}.", if added == 1 { "" } else { "s" }, if there > 0 { format!(" ({there} already there)") } else { String::new() });
+    }
+
     /// The "Planes" part of the stereonet's options.
     pub(super) fn planes_ui(&mut self, ui: &mut Ui) {
         let before = self.st_planes.clone();
@@ -289,6 +401,20 @@ impl App {
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut q.on, "");
+                        if q.ab.is_some() {
+                            // a vein plane: the angles are typed, the strike / dip follow from them and the hole's survey
+                            let mut ch = false;
+                            if let Some(ab) = q.ab.as_mut() {
+                                ui.label("Alpha");
+                                ch |= ui.add(egui::DragValue::new(&mut ab.alpha).range(0.0..=90.0).speed(0.5).max_decimals(1).suffix(" \u{b0}")).changed();
+                                ui.label("Beta");
+                                ch |= ui.add(egui::DragValue::new(&mut ab.beta).range(0.0..=360.0).speed(0.5).max_decimals(1).suffix(" \u{b0}")).changed();
+                            }
+                            if ch {
+                                q.recompute();
+                            }
+                            ui.label(RichText::new(format!("\u{2192} {} {:.0}\u{b0} / {:.0}\u{b0}", if conv == 2 { "dip dir." } else { "strike" }, from_dip_dir(conv, q.dip_dir), q.dip)).weak());
+                        } else {
                         let mut a = from_dip_dir(conv, q.dip_dir);
                         ui.label(if conv == 2 { "Dip dir." } else { "Strike" });
                         if ui.add(egui::DragValue::new(&mut a).range(0.0..=360.0).speed(0.5).max_decimals(1).suffix(" \u{b0}")).changed() {
@@ -296,6 +422,7 @@ impl App {
                         }
                         ui.label("Dip");
                         ui.add(egui::DragValue::new(&mut q.dip).range(0.0..=90.0).speed(0.5).max_decimals(1).suffix(" \u{b0}"));
+                        }
                         let side = side_letter(q.dip_dir);
                         ui.label(RichText::new(side).strong().size(15.0)).on_hover_text(format!("Read as dipping towards {side}: dip direction {:.1}\u{b0} ({}).", q.dip_dir, CONV_NAMES[conv as usize]));
                         let mut c = Color32::from_rgb(q.color[0], q.color[1], q.color[2]);
@@ -306,6 +433,24 @@ impl App {
                             remove = Some(i);
                         }
                     });
+                    if q.ab.is_some() {
+                        let mut ch = false;
+                        if let Some(ab) = q.ab.as_mut() {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Hole: dip direction").weak().small());
+                                ch |= ui.add(egui::DragValue::new(&mut ab.hole_dip_dir).range(0.0..=360.0).speed(0.5).max_decimals(1).suffix(" \u{b0}")).changed();
+                                ui.label(RichText::new("plunge").weak().small());
+                                ch |= ui.add(egui::DragValue::new(&mut ab.plunge).range(0.0..=90.0).speed(0.5).max_decimals(1).suffix(" \u{b0}")).changed();
+                                info_icon(ui, "The survey of the hole the core came from: the azimuth it goes down towards and its plunge below the horizontal. The vein plane is worked out from alpha, beta and these two numbers only, the same way as the AMS dashboard does it, so the turn of the cubes (BOH rotation) plays no part.");
+                                if let Some(n) = ab.src.as_ref() {
+                                    ui.label(RichText::new(format!("from the dashboard: {n}")).weak().small());
+                                }
+                            });
+                        }
+                        if ch {
+                            q.recompute();
+                        }
+                    }
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut q.comment).hint_text("comment (for example: phyllic vein V3)").desired_width(ui.available_width() - 120.0));
                         // the type is fixed when the plane is added
@@ -330,6 +475,30 @@ impl App {
                 };
                 if ui.add_enabled(open_id.is_some(), egui::Button::new(label)).on_hover_text("A file has to be open: the plane is stored next to its data").clicked() {
                     self.st_planes.push(StPlane::new(n_planes, if specific { open_id.clone() } else { None }));
+                }
+                // a vein plane from the angles measured on the core
+                ui.horizontal(|ui| {
+                    let label = if specific { "Add a vein plane (alpha / beta) for this specimen only" } else { "Add a vein plane (alpha / beta)" };
+                    if ui.add_enabled(open_id.is_some(), egui::Button::new(label)).on_hover_text("A file has to be open: the plane is stored next to its data").clicked() {
+                        let (sv, _) = self.hole_survey();
+                        let ab = AlphaBeta { alpha: 45.0, beta: 0.0, hole_dip_dir: sv.0, plunge: sv.1, src: None };
+                        self.st_planes.push(StPlane::from_alpha_beta(n_planes, if specific { open_id.clone() } else { None }, ab, ""));
+                    }
+                    info_icon(ui, "For a vein you measured on the whole core before it was cut: alpha is the angle between the vein and the core axis (0 to 90 degrees), beta is the angle clockwise looking downhole from the line of the BOH mark to the downhole end of the vein's trace on the core (0 to 360 degrees). The plane is worked out with the survey of the hole and drawn like any other plane. The survey is taken from the AMS dashboard code, else from the position saved for the specimen, else from the Drill Core to Geo window; it is shown under the plane and can be changed for each plane.");
+                });
+                if let Some(id) = open_id.clone() {
+                    let sp = self.st_dash.as_ref().map(|d| d.specimen(&id)).unwrap_or_default();
+                    if !sp.veins.is_empty() {
+                        ui.horizontal(|ui| {
+                            if ui.button(format!("Add the veins of the dashboard (n={})", sp.veins.len())).clicked() {
+                                self.add_dashboard_veins();
+                            }
+                            info_icon(ui, "The AMS dashboard code lists the veins you measured for this specimen (VEIN_PLANES: name, alpha, beta) and the survey of its hole (BOREHOLE_CONFIGS). This adds each one as a plane of this specimen, named after the vein; a vein that is already there is left as it is, so nothing you changed is overwritten. The code is read from the same place relative to your data on every computer.");
+                        });
+                    }
+                    if !self.st_dash_msg.is_empty() {
+                        ui.label(RichText::new(self.st_dash_msg.clone()).weak().small());
+                    }
                 }
             });
         });
@@ -379,6 +548,23 @@ mod tests {
                 assert!((from_dip_dir(conv, to_dip_dir(conv, a)) - a).abs() < 1e-9, "{conv} {a}");
             }
         }
+    }
+
+    #[test]
+    fn a_vein_plane_keeps_its_angles_in_the_file_and_is_worked_out_again_on_reading() {
+        let ab = AlphaBeta { alpha: 35.0, beta: 315.0, hole_dip_dir: 305.0, plunge: 69.0, src: Some("vein 2 (main)".into()) };
+        let q = StPlane::from_alpha_beta(0, Some("ER26PB012".into()), ab, "vein 2 (main)");
+        assert!((q.dip_dir - 87.18405718301699).abs() < 1e-6 && (q.dip - 70.85845480209002).abs() < 1e-6);
+        let back = parse_planes(Some(&Value::Array(vec![plane_json(&q)])), Some("ER26PB012"));
+        assert_eq!(back, vec![q.clone()]);
+        // a file with the angles but no dip direction / dip (written by hand) still gives the plane
+        let mut v = plane_json(&q);
+        v.as_object_mut().unwrap().remove("dip_direction");
+        v.as_object_mut().unwrap().remove("dip");
+        let again = parse_planes(Some(&Value::Array(vec![v])), Some("ER26PB012"));
+        assert!(again.len() == 1 && (again[0].dip - q.dip).abs() < 1e-9);
+        // a typed plane has no angles
+        assert!(parse_planes(Some(&Value::Array(vec![plane_json(&StPlane::new(0, None))])), None)[0].ab.is_none());
     }
 
     #[test]
