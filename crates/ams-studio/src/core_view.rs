@@ -236,6 +236,33 @@ fn paint_faces(p: &egui::Painter, r: Rect, faces: Option<&crate::hyper::Faces>, 
 }
 
 /// Draws the viewer inside `rect` and returns what the pointer did (click, rubber band, hover text).
+/// The cubes (indices into `cubes`) that `draw` would show in `rect` with `view`, and the side of one cube in points.
+/// Same maths as `draw` (the export decodes just these photos, at the size they are drawn at).
+pub fn cubes_in_view(rect: Rect, cubes: &[Cube], view: &View) -> (f32, Vec<usize>) {
+    if cubes.is_empty() {
+        return (0.0, vec![]);
+    }
+    let (smin, smax) = (cubes.iter().map(|c| c.slice).min().unwrap_or(0), cubes.iter().map(|c| c.slice).max().unwrap_or(0));
+    let (ylo, yhi) = (cubes.iter().map(|c| c.y).fold(f32::MAX, f32::min), cubes.iter().map(|c| c.y).fold(f32::MIN, f32::max) + 1.0);
+    let (n_sl, rows) = ((smax - smin + 1) as f32, yhi - ylo);
+    let inner = Rect::from_min_max(Pos2::new(rect.min.x + 22.0, rect.min.y + 4.0), Pos2::new(rect.max.x - 4.0, rect.max.y - 16.0));
+    let base = (inner.width() / n_sl).min(inner.height() / rows).max(3.0);
+    let u = base * view.zoom;
+    let (cw, ch) = (n_sl * u, rows * u);
+    let mut off = view.off;
+    off.x = off.x.clamp_safe(-(cw / 2.0 + inner.width() / 2.0 - 20.0), cw / 2.0 + inner.width() / 2.0 - 20.0);
+    off.y = off.y.clamp_safe(-(ch / 2.0 + inner.height() / 2.0 - 20.0), ch / 2.0 + inner.height() / 2.0 - 20.0);
+    let (x0, y0) = (inner.center().x + off.x - cw / 2.0, inner.center().y + off.y - ch / 2.0);
+    let side = u * (1.0 - CUBE_GAP);
+    let seen = cubes
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| Rect::from_center_size(Pos2::new(x0 + (c.slice - smin) as f32 * u + u / 2.0, y0 + (yhi - c.y - 0.5) * u), Vec2::splat(side)).intersects(inner))
+        .map(|(i, _)| i)
+        .collect();
+    (side, seen)
+}
+
 /// `textures` hold the decoded photos; `selected` / `active` are per record of the open file.
 pub fn draw(ui: &mut Ui, rect: Rect, cubes: &[Cube], textures: &HashMap<(u32, char), TextureHandle>, selected: &[bool], active: &[bool], view: &mut View, th: &Theme, specimen: &str, hy: Option<&HyperDraw>) -> PlotOut {
     let pa = ui.painter_at(rect);

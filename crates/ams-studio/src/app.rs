@@ -35,6 +35,7 @@ mod owens_file_ui;
 mod phase_join_ui;
 mod seed;
 mod selftest;
+mod shot_ui;
 mod recombine_ui;
 mod specset_ui;
 mod spec_view;
@@ -321,11 +322,15 @@ const W_GIS_LOC: usize = 25;
 const W_GIS_MANUAL: usize = 26;
 const W_PHASE: usize = 27;
 const W_RECOMB_ASK: usize = 28;
+const W_SHOT: usize = 29;
 
 struct ShotJob {
     copy: bool,
     base: Option<PathBuf>,
-    rects: Vec<(&'static str, Rect)>,
+    /// file name part, the pane's rectangle in the window, and the plot slot (0 to 3) if it is a plot pane
+    rects: Vec<(&'static str, Rect, Option<usize>)>,
+    /// dpi of each pane: the four plot slots, then the core viewer
+    dpi: [f32; 5],
 }
 
 /// A switch like the ones on a phone: a rounded track with a knob that slides to the right when on.
@@ -455,6 +460,10 @@ pub struct App {
     palette: palette::PaletteState,
     gis_win: Option<[f32; 4]>,
     gis_export: bool,
+    /// Save Graphics To File: dpi of each plot pane, the window that asks, and the graphics card handle for the render
+    shot_dpi: [f32; 5],
+    shot_dlg: bool,
+    wgpu_rs: Option<eframe::egui_wgpu::RenderState>,
     /// The preferences as last written, and when they started to differ (they are written after a short quiet moment).
     state_saved: String,
     plots_saved: String,
@@ -728,6 +737,9 @@ impl App {
             palette: Default::default(),
             gis_win: None,
             gis_export: true,
+            shot_dpi: [shot_ui::DPI_DEFAULT; 5],
+            shot_dlg: false,
+            wgpu_rs: None,
             state_saved: String::new(),
             plots_saved: String::new(),
             state_changed_at: None,
@@ -986,6 +998,15 @@ impl App {
                         self.export = [b[0], b[1], b[2], b[3]];
                     }
                 }
+                "export_dpi" => {
+                    let d: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).collect();
+                    // four values from before the core viewer had its own; the core viewer then takes the default
+                    if d.len() == 4 || d.len() == 5 {
+                        for i in 0..d.len() {
+                            self.shot_dpi[i] = d[i].clamp(shot_ui::DPI_MIN, shot_ui::DPI_MAX);
+                        }
+                    }
+                }
                 "core_export" => self.cv.export = v != "0",
                 "gis_export" => self.gis_export = v != "0",
                 "color_own" => {
@@ -1056,6 +1077,7 @@ impl App {
                 self.gis_popped as u8,
                 self.update_check as u8
             );
+        t += &format!("export_dpi={}\n", self.shot_dpi.iter().map(|d| format!("{d:.0}")).collect::<Vec<_>>().join(","));
         t += &format!("core_mode={}\n", if self.cv.mode_key.is_empty() { "photos" } else { self.cv.mode_key.as_str() });
         let color_lines: String = (0..4).map(|i| format!("color{i}={}\n", prefs_ext::color_to_line(&self.color[i]))).collect();
         let b = |v: bool| u8::from(v);
@@ -1619,25 +1641,16 @@ impl App {
                     d.selected.iter_mut().for_each(|a| *a = false);
                 }
             }
-            Action::CopyGraphics | Action::SaveGraphics => {
+            Action::CopyGraphics => {
                 if has {
-                    let copy = a == Action::CopyGraphics;
-                    let base = if copy {
-                        None
-                    } else {
-                        let stem = self.doc.as_ref().and_then(|d| d.path.file_stem()).map(|s| s.to_string_lossy().to_string()).unwrap_or("ams-studio".into());
-                        match crate::fdialog::FileDialog::new().add_filter("PNG base name", &["png"]).set_file_name(format!("{stem}.png")).set_title("Save Graphics To File").save_file() {
-                            Some(p) => Some(p),
-                            None => return,
-                        }
-                    };
-                    self.shot = Some(ShotJob { copy, base, rects: vec![] });
-                    let slot = self.shot_box.clone();
-                    let c2 = ctx.clone();
-                    ctx.request_screenshot(move |img| {
-                        *slot.lock().unwrap() = Some(img);
-                        c2.request_repaint();
-                    });
+                    self.shot = Some(ShotJob { copy: true, base: None, rects: vec![], dpi: self.shot_dpi });
+                    self.request_shot(ctx);
+                }
+            }
+            Action::SaveGraphics => {
+                // the window asks which panes and how many dpi, then for the file name
+                if has {
+                    self.open_win(W_SHOT);
                 }
             }
             Action::DataTable => self.open_win(W_TABLE),
@@ -1781,7 +1794,7 @@ impl App {
     /// A dialog, pop-out or message is open (the egui drop-down menus are asked separately).
     fn any_dialog_open(&self) -> bool {
         self.palette.open || self.win_table || self.win_group || self.win_contour || self.win_orient || self.win_colors || self.win_factors || self.win_about || self.up.window || self.win_edit
-            || self.win_export || self.win_recomb || self.win_recomb_ask || self.win_phase || self.win_vol || self.win_sort || self.win_gis || self.gis.win_georef || self.gis.win_table || self.gis.loc.win || self.gis.manual.win || self.win_core || self.cv.win || self.win_set || self.win_classes || self.win_owens
+            || self.win_export || self.shot_dlg || self.win_recomb || self.win_recomb_ask || self.win_phase || self.win_vol || self.win_sort || self.win_gis || self.gis.win_georef || self.gis.win_table || self.gis.loc.win || self.gis.manual.win || self.win_core || self.cv.win || self.win_set || self.win_classes || self.win_owens
             || self.tools.open.iter().any(|o| *o) || self.info.is_some() || self.quit_prompt || self.pane_settings.iter().any(|o| *o)
     }
 
@@ -1797,6 +1810,7 @@ impl App {
         self.win_about = false;
         self.win_edit = false;
         self.win_export = false;
+        self.shot_dlg = false;
         self.win_recomb = false;
         self.win_recomb_ask = false;
         self.win_phase = false;
@@ -2159,6 +2173,9 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         // what draws the window; software rendering is held to 30 frames per second so a computer without a graphics
         // card (or a virtual machine) stays usable while something is dragged
+        if self.wgpu_rs.is_none() {
+            self.wgpu_rs = frame.wgpu_render_state().cloned();
+        }
         if self.gpu_info.is_empty() {
             let (s, soft) = gpu_summary(frame);
             self.gpu_info = s;
@@ -2297,6 +2314,17 @@ impl App {
         if let Some(w) = self.test_window.take() {
             match w.as_str() {
                 "sort" => self.open_win(W_SORT),
+                "shot" => self.open_win(W_SHOT),
+                "save-graphics" => {
+                    // saves the ticked panes to AMS_STUDIO_SAVE_BASE (no file dialog) at AMS_STUDIO_SAVE_DPI (default: the saved dpi)
+                    if let Some(base) = std::env::var_os("AMS_STUDIO_SAVE_BASE") {
+                        if let Some(d) = std::env::var("AMS_STUDIO_SAVE_DPI").ok().and_then(|v| v.parse::<f32>().ok()) {
+                            self.shot_dpi = [d; 5];
+                        }
+                        self.shot = Some(ShotJob { copy: false, base: Some(PathBuf::from(base)), rects: vec![], dpi: self.shot_dpi });
+                        self.request_shot(ui.ctx());
+                    }
+                }
                 "recombine" => self.open_win(W_RECOMB_ASK),
                 "phase-one" | "phase-many" => {
                     self.pj.goal = if w == "phase-one" { phase_join_ui::Goal::One } else { phase_join_ui::Goal::Many };
@@ -3426,12 +3454,12 @@ impl App {
         if let Some(job) = &mut self.shot {
             if job.rects.is_empty() {
                 let tag = |n: &str| -> &'static str { Box::leak(n.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect::<String>().into_boxed_str()) };
-                job.rects = names.iter().enumerate().filter(|(i, _)| self.export[*i]).filter_map(|(i, n)| slot_rect[i].map(|r| (tag(n), r))).collect();
+                job.rects = names.iter().enumerate().filter(|(i, _)| self.export[*i]).filter_map(|(i, n)| slot_rect[i].map(|r| (tag(n), r, Some(i)))).collect();
                 if let (Some(cr), true) = (core_rect, self.cv.export) {
-                    job.rects.insert(0, ("core_viewer", cr));
+                    job.rects.insert(0, ("core_viewer", cr, Some(4)));
                 }
                 if let (Some(gr), true) = (gis_rect, self.gis_export) {
-                    job.rects.insert(0, ("gis_viewer", gr));
+                    job.rects.insert(0, ("gis_viewer", gr, None));
                 }
             }
         }
@@ -3899,18 +3927,36 @@ impl App {
             return;
         }
         if job.copy {
-            let union = job.rects.iter().skip(1).fold(job.rects[0].1, |a, (_, r)| a.union(*r));
+            let union = job.rects.iter().skip(1).fold(job.rects[0].1, |a, (_, r, _)| a.union(*r));
             ctx.copy_image(crop(union));
         } else if let Some(base) = job.base {
             let stem = base.with_extension("");
-            for (name, r) in &job.rects {
-                let c = crop(*r);
+            let mut shrunk: Vec<String> = Vec::new();
+            for (name, r, slot) in &job.rects {
                 let path = PathBuf::from(format!("{}_{name}.png", stem.display()));
-                let raw: Vec<u8> = c.pixels.iter().flat_map(|p| p.to_array()).collect();
-                if let Err(e) = image::save_buffer(&path, &raw, c.width() as u32, c.height() as u32, image::ColorType::Rgba8) {
-                    self.info = Some(format!("Could not save {}: {e}", path.display()));
-                    return;
+                // a plot pane is drawn again at its dpi; the other panes (and a computer without wgpu) are cut out of the window
+                let hires = slot.map(|i| (i, job.dpi[i]));
+                let (w, h, raw, dpi) = match hires.map(|(i, d)| (d, self.render_pane_hires(i, r.size(), d))) {
+                    Some((d, Ok((w, h, raw)))) => (w, h, raw, d),
+                    other => {
+                        if let Some((_, Err(e))) = other {
+                            shrunk.push(format!("{name}: {e}"));
+                        }
+                        let c = crop(*r);
+                        let raw: Vec<u8> = c.pixels.iter().flat_map(|p| p.to_array()).collect();
+                        (c.width() as u32, c.height() as u32, raw, shot_ui::REF_DPI * ppp)
+                    }
+                };
+                match shot_ui::png_bytes(w, h, &raw, dpi).and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        self.info = Some(format!("Could not save {}: {e}", path.display()));
+                        return;
+                    }
                 }
+            }
+            if !shrunk.is_empty() {
+                self.info = Some(format!("Saved, but at screen resolution only:\n{}", shrunk.join("\n")));
             }
         }
     }
@@ -4053,6 +4099,7 @@ impl App {
             W_RECOMB_ASK => self.win_recomb_ask = true,
             W_PHASE => self.win_phase = true,
             W_EXPORT => self.win_export = true,
+            W_SHOT => self.shot_dlg = true,
             _ => {}
         }
     }
@@ -4300,6 +4347,7 @@ impl App {
         self.classes_window(ctx);
         self.poll_restore(ctx);
         self.export_window(ctx);
+        self.shot_window(ctx);
         self.core_window(ctx);
         self.cv_window(ctx);
         self.recombine_window(ctx);

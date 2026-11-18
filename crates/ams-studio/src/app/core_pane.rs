@@ -961,6 +961,60 @@ impl App {
     }
 
     /// The pane itself, above the plots.
+    /// Where the cubes are drawn inside the pane `rect` (below the header).
+    pub(super) fn cv_body(rect: Rect) -> Rect {
+        let header_bottom = rect.min.y + super::PANE_TOP + 24.0;
+        Rect::from_min_max(Pos2::new(rect.min.x + 4.0, header_bottom + 2.0), Pos2::new(rect.max.x - 4.0, rect.max.y - 4.0))
+    }
+
+    /// The photos of the cubes in view, decoded again at the size they are drawn at (`scale` = pixels per point, never more
+    /// than the photo has, at most 4096 px) as textures of `ctx2`, for the export. Swaps them in for the thumbnails of the
+    /// window; `cv_swap_textures` puts the thumbnails back.
+    pub(super) fn cv_hires_textures(&self, ctx2: &egui::Context, rect: Rect, scale: f32) -> HashMap<(u32, char), TextureHandle> {
+        let (side, seen) = core_view::cubes_in_view(Self::cv_body(rect), &self.cv.cubes, &self.cv.view);
+        let want = ((side * scale).ceil() as u32).clamp(8, 4096);
+        let specimen = self.cv.specimen.clone();
+        let items: Vec<((u32, char), PathBuf, i32)> = seen.iter().filter_map(|&i| self.cv.cubes.get(i)).filter_map(|c| c.photo.clone().map(|p| ((c.slice, c.letter), p, core_view::photo_turn(&specimen, c.letter, c.slice)))).collect();
+        let next = AtomicUsize::new(0);
+        let done = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::SeqCst);
+                    let Some((key, path, turn)) = items.get(i) else { break };
+                    let Some(img) = open_photo(path) else { continue };
+                    // a sharper photo than the screen's thumbnail, but never stretched beyond what the file has
+                    let img = if img.width().max(img.height()) > want { img.resize(want, want, image::imageops::FilterType::Lanczos3) } else { img };
+                    let mut rgba = img.to_rgba8();
+                    rgba = match turn.rem_euclid(360) {
+                        90 => image::imageops::rotate270(&rgba),
+                        180 => image::imageops::rotate180(&rgba),
+                        270 => image::imageops::rotate90(&rgba),
+                        _ => rgba,
+                    };
+                    let ci = ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw());
+                    done.lock().unwrap().push((*key, ci));
+                });
+            }
+        });
+        done.into_inner().unwrap().into_iter().map(|(k, ci)| (k, ctx2.load_texture(format!("cube-{}{}", k.1, k.0), ci, TextureOptions::LINEAR))).collect()
+    }
+
+    /// Exchanges the cube textures with `t` (used around the export's own drawing).
+    pub(super) fn cv_swap_textures(&mut self, t: HashMap<(u32, char), TextureHandle>) -> HashMap<(u32, char), TextureHandle> {
+        std::mem::replace(&mut self.cv.textures, t)
+    }
+
+    /// The view of the cubes (zoom, offset) and the text under the pointer, saved and put back around the export's drawing.
+    pub(super) fn cv_export_state(&self) -> (core_view::View, String) {
+        (self.cv.view, self.cv.hover.clone())
+    }
+
+    pub(super) fn cv_restore_state(&mut self, s: (core_view::View, String)) {
+        self.cv.view = s.0;
+        self.cv.hover = s.1;
+    }
+
     pub(super) fn cv_pane(&mut self, ui: &mut Ui, rect: Rect, th: &crate::plots::Theme) -> crate::plots::PlotOut {
         let visuals = ui.visuals().clone();
         ui.painter().rect(rect, 8.0, if th.dark { th.canvas() } else { visuals.extreme_bg_color }, Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color), StrokeKind::Inside);
@@ -1057,7 +1111,7 @@ impl App {
         if close {
             self.cv_toggle();
         }
-        let body = Rect::from_min_max(Pos2::new(rect.min.x + 4.0, header.max.y + 2.0), Pos2::new(rect.max.x - 4.0, rect.max.y - 4.0));
+        let body = Self::cv_body(rect);
         let Some(d) = &self.doc else { return Default::default() };
         // a hyperspectral parameter on the cubes (their faces coloured as on the dashboard), else the photos
         let mut hy_faces: Option<Arc<HashMap<(u32, char), crate::hyper::Faces>>> = None;
