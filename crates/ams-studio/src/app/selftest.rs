@@ -449,6 +449,21 @@ pub fn run(out: &Path) -> usize {
         h.check("two vein planes", h.app.st_planes.iter().filter(|q| q.ab.is_some()).count() == 2, format!("{}", h.app.st_planes.len()));
         h.step("add the veins again", |a, _| a.add_dashboard_veins());
         h.check("none twice", h.app.st_planes.iter().filter(|q| q.ab.is_some()).count() == 2, format!("{}", h.app.st_planes.len()));
+        // Ctrl + click on markers: each joins the selection, a second Ctrl + click takes it out again
+        if let Some(d) = h.app.doc.as_mut() {
+            d.selected.iter_mut().for_each(|x| *x = false);
+        }
+        for i in [0usize, 2] {
+            h.app.apply_toggle(&Some(vec![i]));
+        }
+        let picked = h.app.doc.as_ref().map(|d| d.selected.iter().filter(|x| **x).count()).unwrap_or(0);
+        h.check("Ctrl + click adds markers to the selection", picked == 2, format!("{picked}"));
+        h.app.apply_toggle(&Some(vec![0]));
+        let picked = h.app.doc.as_ref().map(|d| d.selected.iter().filter(|x| **x).count()).unwrap_or(0);
+        h.check("Ctrl + click on a selected marker takes it out", picked == 1, format!("{picked}"));
+        if let Some(d) = h.app.doc.as_mut() {
+            d.selected.iter_mut().for_each(|x| *x = false);
+        }
         // adding a plane with the same numbers again adds nothing; removing works
         h.app.st_planes_on = true;
         let n0 = h.app.st_planes.len();

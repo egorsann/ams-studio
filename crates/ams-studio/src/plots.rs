@@ -30,6 +30,16 @@ pub struct PlotOut {
     pub toggle: Option<Vec<usize>>,
 }
 
+/// A click on the marker of specimen `idx`: it selects just that specimen; with Ctrl (Cmd on a Mac) it joins the
+/// selection, or leaves it when it is in, like a cube of the core viewer.
+pub(crate) fn pick(ui: &Ui, out: &mut PlotOut, idx: usize) {
+    if ui.input(|i| i.modifiers.ctrl || i.modifiers.command) {
+        out.toggle = Some(vec![idx]);
+    } else {
+        out.click = Some(idx);
+    }
+}
+
 /// Marker types a selection may touch: no modifier = all shown types; Ctrl = K1, Alt = K2, Shift = K3
 /// (combinations select the union).
 pub fn axis_mask(m: Modifiers) -> [bool; 3] {
@@ -780,7 +790,7 @@ pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Th
             resp.clone().on_hover_text(format!("{} K{}", p.name, a + 1));
         }
         if resp.clicked() {
-            out.click = Some(p.idx);
+            pick(ui, &mut out, p.idx);
         }
     }
     out
@@ -987,7 +997,7 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
             }
         }
         if resp.clicked() {
-            out.click = Some(p.idx);
+            pick(ui, &mut out, p.idx);
         }
     }
     out
@@ -1122,7 +1132,7 @@ pub fn polar(ui: &mut Ui, rect: Rect, pts: &[Pt], p_param: usize, log: bool, siz
             label_box(&pa, rect, s, p.name.clone(), th);
         }
         if resp.clicked() {
-            out.click = Some(p.idx);
+            pick(ui, &mut out, p.idx);
         }
     }
     out

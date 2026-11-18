@@ -3292,6 +3292,7 @@ impl App {
                     self.hover[slot] = out.hover.clone().unwrap_or_default();
                 }
                 picked = (out.click, out.band);
+                toggled = out.toggle.clone();
                 let vctx = ui.ctx().clone();
                 dock = vctx.input(|i| i.viewport().close_requested()) || vctx.input_mut(|i| i.consume_key(Modifiers::SHIFT | Modifiers::CTRL, Key::Space));
                 // the window of the core viewer holds nothing else: Ctrl+Shift+E / Q (Cmd on a Mac) always mean the cubes here
@@ -3395,7 +3396,8 @@ impl App {
                 continue;
             };
             let out = self.plot_slot(ui, i, prect, &slot, th);
-            self.hover[i] = out.hover.unwrap_or_default();
+            self.hover[i] = out.hover.clone().unwrap_or_default();
+            self.apply_toggle(&out.toggle);
             if out.click.is_some() {
                 click = out.click;
             }
