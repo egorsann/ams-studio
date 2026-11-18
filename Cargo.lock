@@ -153,7 +153,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "ams-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "crs-definitions",
  "proj4rs",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "ams-studio"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "ams-core",
  "calamine",
