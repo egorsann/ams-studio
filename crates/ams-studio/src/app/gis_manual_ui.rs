@@ -10,6 +10,7 @@
 //! something to fill in. Specimens of one collar are typed with the same two coordinates and different depths; the map
 //! then lists them in a box beside the collar.
 
+use crate::util::SafeClamp;
 use super::gis_data::CrsChoice;
 use super::gis_georef::crs_picker;
 use super::gis_loc::{valid_depth, valid_elevation, Hole, Location};
@@ -359,14 +360,14 @@ impl App {
         let mut save_many: Vec<(usize, Location)> = vec![];
         let scr = ctx.content_rect();
         let size = if m.all {
-            Vec2::new((scr.width() - 80.0).clamp(760.0, if m.core_all { 1180.0 } else { 900.0 }), (300.0 + 46.0 * ids.len() as f32).clamp(480.0, scr.height() - 70.0))
+            Vec2::new((scr.width() - 80.0).clamp_safe(760.0, if m.core_all { 1180.0 } else { 900.0 }), (300.0 + 46.0 * ids.len() as f32).clamp_safe(480.0, scr.height() - 70.0))
         } else {
             Vec2::new(720.0, 360.0)
         };
         // the window follows its content: the single entry is small, the list makes it grow towards the bottom
         let win = self.base_window(ctx, "Enter coordinates", W_GIS_MANUAL, size).auto_sized();
         let mut open = true;
-        let list_max = (scr.height() - 470.0).clamp(180.0, 46.0 * ids.len().max(1) as f32 + 40.0);
+        let list_max = (scr.height() - 470.0).clamp_safe(180.0, 46.0 * ids.len().max(1) as f32 + 40.0);
         win.open(&mut open).show(ctx, |ui| {
             tools_ui::pop_style(ui, 1.15);
             ui.set_width(if m.all && m.core_all { 1180.0 } else { 900.0 });

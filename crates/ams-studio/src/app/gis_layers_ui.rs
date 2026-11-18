@@ -23,6 +23,11 @@ fn opacity_slider(ui: &mut egui::Ui, value: &mut f32) {
 
 enum Act {
     Select(u32),
+    /// A click with Shift (range) or Ctrl (toggle) held.
+    SelectMods(u32, bool, bool),
+    SelectAll,
+    RemoveMany(Vec<u32>),
+    Undo,
     ToggleVisible(u32),
     ToggleOpen(u32),
     Rename(u32),
@@ -108,13 +113,13 @@ impl App {
         }
         ui.horizontal(|ui| {
             ui.label(RichText::new("Layers").strong());
-            info_icon(ui, "Like the layer list of QGIS. The tick box switches a layer or a whole group on and off; drag a layer or a group to move it (onto the upper or lower edge of a row to put it before or after, onto the middle of a group to put it inside); double-click renames; right-click has the rest. What is higher in the list is drawn above what is lower. Shift+Ctrl+B shows and hides this sidebar.");
+            info_icon(ui, "Like the layer list of QGIS. The tick box switches a layer or a whole group on and off; drag a layer or a group to move it (onto the upper or lower edge of a row to put it before or after, onto the middle of a group to put it inside); double-click renames; right-click has the rest. What is higher in the list is drawn above what is lower. Shift+Ctrl+B shows and hides this sidebar.\nSeveral layers at once: Shift+drag a rectangle over the rows, Shift+click for a range, Ctrl+click for single ones, Ctrl+A for all; Delete removes the selected layers and Ctrl+Z puts them back. Removing only takes a layer out of this list; no map file and no QGIS or ArcGIS project is ever changed.");
         });
         ui.horizontal_wrapped(|ui| {
             if ui.small_button("Add layer ...").on_hover_text("A map image or a GeoTIFF, or vector data: a shapefile (.shp, with its .prj), a GeoPackage (.gpkg, every feature table becomes a layer) or a GeoJSON file").clicked() {
                     acts.push(Act::AddMap);
                 }
-            if ui.small_button("QGIS project ...").on_hover_text("Adds the layers of a QGIS project (.qgz or .qgs) with its groups, order, tick boxes and names. Only the paths in the project are used: the files are read when a layer is switched on, styles are not carried over, online layers (the satellite basemap is built in) and missing files are left out and listed here").clicked() {
+            if ui.small_button("QGIS / ArcGIS project ...").on_hover_text("Adds the layers of a QGIS project (.qgz, .qgs) or an ArcGIS project (ArcGIS Pro: .aprx, .lyrx, .mapx; ArcMap: .mxd, .lyr) with its groups, order, tick boxes, names, transparency, filters (definition queries) and label fields. You can also drop the file onto the window. ArcMap files keep no readable ticks, groups or filters, so only their layers are found. Only the paths in the project are used: the files are read when a layer is switched on, styles are not carried over, online layers (the satellite basemap is built in) and missing files are left out and listed here").clicked() {
                     acts.push(Act::ImportQgis);
                 }
             if ui.small_button("Add group").clicked() {
@@ -132,6 +137,9 @@ impl App {
         let rows = self.gis.layers.rows();
         let mut row_rects: Vec<(u32, Rect)> = vec![];
         let all: Vec<(usize, usize, bool)> = self.gis.layers.builtin_rows().into_iter().map(|i| (i, 0, true)).chain(rows.iter().map(|&(i, d)| (i, d, false))).collect();
+        let mods = ui.input(|i| i.modifiers);
+        let multi_menu: Option<Vec<u32>> = (self.gis.multi.len() > 1).then(|| self.gis.multi.clone());
+        let undo_label: Option<String> = self.gis.layer_undo.last().map(|(w, _)| w.clone());
         let mut separated = false;
         let separator = |ui: &mut Ui| {
             ui.add_space(2.0);
@@ -150,7 +158,7 @@ impl App {
                 if !is_builtin {
                     row_rects.push((it.id, rect));
                 }
-                let selected = self.gis.sel == Some(it.id);
+                let selected = self.gis.sel == Some(it.id) || self.gis.multi.contains(&it.id);
                 if selected {
                     ui.painter().rect_filled(rect, 4.0, th.accent.gamma_multiply(0.22));
                 } else if resp.hovered() {
@@ -228,21 +236,43 @@ impl App {
                         acts.push(Act::ToggleOpen(it.id));
                     } else if cb.expand(3.0).contains(pos) {
                         acts.push(Act::ToggleVisible(it.id));
+                    } else if mods.shift || mods.command {
+                        acts.push(Act::SelectMods(it.id, mods.shift, mods.command));
                     } else {
                         acts.push(Act::Select(it.id));
                     }
                 }
-                // a right click selects the row too, and its menu has the delete
-                if resp.secondary_clicked() {
+                // a right click selects the row too (unless it is one of several selected), and its menu has the delete
+                if resp.secondary_clicked() && !self.gis.multi.contains(&it.id) {
                     acts.push(Act::Select(it.id));
                 }
                 if resp.double_clicked() && !is_builtin && !cb.expand(3.0).contains(pos) {
                     acts.push(Act::Rename(it.id));
                 }
-                if resp.drag_started() && !is_builtin && !cb.expand(3.0).contains(pos) && !renaming && !self.gis.drag_reorder && self.gis.layer_drag.is_none() {
+                // Shift+drag over the rows selects every row the rectangle touches; a drag without Shift moves the layer
+                if resp.drag_started() && !is_builtin && mods.shift && !renaming && self.gis.layer_drag.is_none() {
+                    self.gis.band = Some(ui.input(|i| i.pointer.press_origin()).unwrap_or(pos));
+                    if !mods.command {
+                        self.gis.multi.clear();
+                    }
+                } else if resp.drag_started() && !is_builtin && !cb.expand(3.0).contains(pos) && !renaming && !self.gis.drag_reorder && self.gis.layer_drag.is_none() && self.gis.band.is_none() {
                     self.gis.layer_drag = Some(it.id);
                 }
                 resp.context_menu(|ui| {
+                    if let Some(m) = &multi_menu {
+                        if ui.button(RichText::new(format!("Delete the selected layers (n={})", m.len())).color(Color32::from_rgb(210, 70, 60))).on_hover_text("Takes them out of the list; no file is touched. Ctrl+Z puts them back").clicked() {
+                            acts.push(Act::RemoveMany(m.clone()));
+                            ui.close();
+                        }
+                        ui.separator();
+                    }
+                    if let Some(w) = &undo_label {
+                        if ui.button(format!("Undo: {w}")).on_hover_text("Ctrl+Z over this list").clicked() {
+                            acts.push(Act::Undo);
+                            ui.close();
+                        }
+                        ui.separator();
+                    }
                     match it.kind {
                         Kind::Map => {
                             if ui.button("Rename").clicked() {
@@ -358,11 +388,57 @@ impl App {
             separator(ui);
             ui.label(RichText::new("No layers added yet: Add layer ... above.").small().weak());
         }
-        // the Delete key removes the selected layer while the pointer is over the sidebar and nothing is being typed
-        if ui.rect_contains_pointer(rect) && self.gis.renaming.is_none() && !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
-            if let Some(id) = self.gis.sel.filter(|id| self.gis.layers.get(*id).map_or(false, |i| !i.kind.is_builtin())) {
-                acts.push(Act::Remove(id));
+        // keys while the pointer is over the sidebar and nothing is being typed: Delete removes the selected layers, Ctrl+A
+        // selects every layer, Ctrl+Z puts removed layers back, Escape drops the selection
+        let over_bar = ui.rect_contains_pointer(rect) && self.gis.renaming.is_none() && !ui.ctx().egui_wants_keyboard_input();
+        if over_bar {
+            if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+                if self.gis.multi.len() > 1 {
+                    acts.push(Act::RemoveMany(self.gis.multi.clone()));
+                } else if let Some(id) = self.gis.sel.filter(|id| self.gis.layers.get(*id).map_or(false, |i| !i.kind.is_builtin())) {
+                    acts.push(Act::Remove(id));
+                }
             }
+            if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+                acts.push(Act::SelectAll);
+            }
+            if ui.input(|i| i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Z)) {
+                acts.push(Act::Undo);
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) && !self.gis.multi.is_empty() {
+                self.gis.multi.clear();
+            }
+        }
+        // the rectangle of a Shift+drag: the rows it touches are the selection
+        if let Some(start) = self.gis.band {
+            if ui.input(|i| i.pointer.primary_down()) {
+                if let Some(p) = ui.input(|i| i.pointer.latest_pos()) {
+                    let band = Rect::from_two_pos(start, p);
+                    let keep: Vec<u32> = if mods.command { self.gis.multi.clone() } else { vec![] };
+                    let mut hit: Vec<u32> = keep;
+                    for (id, r) in &row_rects {
+                        if r.intersects(band) && !hit.contains(id) {
+                            hit.push(*id);
+                        }
+                    }
+                    self.gis.multi = hit;
+                    ui.painter().rect(band, 2.0, th.accent.gamma_multiply(0.18), Stroke::new(1.2, th.accent), StrokeKind::Inside);
+                    ui.ctx().request_repaint();
+                }
+            } else {
+                self.gis.band = None;
+                if let Some(first) = self.gis.multi.first().copied() {
+                    self.gis.sel = Some(first);
+                    self.gis.multi_anchor = Some(first);
+                }
+                if self.gis.multi.len() == 1 {
+                    self.gis.multi.clear();
+                }
+            }
+        }
+        self.gis.row_hits = row_rects.clone();
+        if self.gis.multi.len() > 1 {
+            ui.label(RichText::new(format!("Selected layers (n={}): Delete removes them, Ctrl+Z puts them back", self.gis.multi.len())).small().color(th.accent));
         }
 
         // ---- a drag in progress: where it would land, and the drop
@@ -581,7 +657,63 @@ impl App {
         // ---- what was asked
         for a in acts {
             match a {
-                Act::Select(id) => self.gis.sel = Some(id),
+                Act::Select(id) => {
+                    self.gis.sel = Some(id);
+                    self.gis.multi.clear();
+                    self.gis.multi_anchor = Some(id);
+                }
+                Act::SelectMods(id, shift, ctrl) => {
+                    let order: Vec<u32> = self.gis.layers.rows().iter().map(|&(i, _)| self.gis.layers.items[i].id).collect();
+                    if shift {
+                        let a = self.gis.multi_anchor.or(self.gis.sel).and_then(|a| order.iter().position(|x| *x == a)).unwrap_or(0);
+                        let b = order.iter().position(|x| *x == id).unwrap_or(a);
+                        let (lo, hi) = (a.min(b), a.max(b));
+                        self.gis.multi = order[lo..=hi].to_vec();
+                    } else if ctrl {
+                        if self.gis.multi.is_empty() {
+                            if let Some(s) = self.gis.sel.filter(|s| order.contains(s)) {
+                                self.gis.multi.push(s);
+                            }
+                        }
+                        if let Some(pos) = self.gis.multi.iter().position(|x| *x == id) {
+                            self.gis.multi.remove(pos);
+                        } else {
+                            self.gis.multi.push(id);
+                        }
+                        self.gis.multi_anchor = Some(id);
+                    }
+                    self.gis.sel = Some(id);
+                }
+                Act::SelectAll => {
+                    let order: Vec<u32> = self.gis.layers.rows().iter().map(|&(i, _)| self.gis.layers.items[i].id).filter(|id| self.gis.layers.get(*id).map_or(false, |i| !i.kind.is_builtin())).collect();
+                    self.gis.multi = order;
+                }
+                Act::RemoveMany(ids) => {
+                    self.gis.snapshot_layers(format!("removed {} layer(s)", ids.len()));
+                    let mut n = 0;
+                    for id in ids {
+                        if self.gis.layers.get(id).is_none() {
+                            continue;
+                        }
+                        let gone = self.gis.layers.remove_subtree(id);
+                        n += gone.len().max(1);
+                        for g in gone {
+                            self.gis.maps.retain(|m| m.id != g);
+                            self.gis.restore_maps.remove(&g);
+                            self.gis.vectors.retain(|v| v.id != g);
+                            self.gis.restore_vecs.remove(&g);
+                        }
+                    }
+                    self.gis.multi.clear();
+                    self.gis.sel = self.gis.sel.filter(|s| self.gis.layers.get(*s).is_some());
+                    self.gis.info = format!("Removed layers (n={n}) from the list. Ctrl+Z over the list puts them back; no file was changed.");
+                }
+                Act::Undo => {
+                    self.gis.info = match self.gis.undo_layers(&ctx) {
+                        Some(w) => format!("Undone: {w}."),
+                        None => "Nothing to undo.".to_string(),
+                    };
+                }
                 Act::ToggleVisible(id) => {
                     self.gis.sel = Some(id);
                     if self.gis.layers.get(id).map(|i| i.kind) == Some(Kind::Basemap) {
@@ -611,6 +743,9 @@ impl App {
                     }
                 }
                 Act::Remove(id) => {
+                    let what = self.gis.layers.get(id).map(|i| format!("removed \"{}\"", i.name)).unwrap_or_else(|| "removed a layer".into());
+                    self.gis.snapshot_layers(what);
+                    self.gis.multi.clear();
                     for gone in self.gis.layers.remove(id) {
                         self.gis.maps.retain(|m| m.id != gone);
                         self.gis.restore_maps.remove(&gone);
@@ -627,8 +762,11 @@ impl App {
                     }
                 }
                 Act::ImportQgis => {
-                    if let Some(p) = pick_file("QGIS project", "QGIS project", &["qgz", "qgs"], "AMS_STUDIO_GIS_QGIS") {
+                    if let Some(p) = pick_file("QGIS or ArcGIS project", "QGIS and ArcGIS projects", &["qgz", "qgs", "aprx", "lyrx", "mapx", "mxd", "lyr"], "AMS_STUDIO_GIS_QGIS") {
+                        // the project file is only read; the layers it adds can be undone as one block
+                        self.gis.snapshot_layers("added the layers of a project");
                         if let Err(e) = self.gis.import_qgis(&p) {
+                            self.gis.layer_undo.pop();
                             self.gis.info.clear();
                             self.gis.map_err = e;
                         }
@@ -657,6 +795,9 @@ impl App {
                 Act::SymbolSettings => self.open_win(W_GIS),
                 Act::PopOut => self.toggle_popout(),
                 Act::RemoveAll(id) => {
+                    let what = self.gis.layers.get(id).map(|i| format!("removed \"{}\" with its layers", i.name)).unwrap_or_else(|| "removed a group".into());
+                    self.gis.snapshot_layers(what);
+                    self.gis.multi.clear();
                     for gone in self.gis.layers.remove_subtree(id) {
                         self.gis.maps.retain(|m| m.id != gone);
                         self.gis.restore_maps.remove(&gone);

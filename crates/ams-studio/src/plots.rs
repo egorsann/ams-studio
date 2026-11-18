@@ -1,5 +1,6 @@
 //! The four plots of the main window, drawn directly with egui's painter.
 
+use crate::util::SafeClamp;
 use ams_core::density::project;
 use ams_core::params::{N_PARAMS, PARAM_LABELS};
 use egui::{Align2, Color32, FontId, Modifiers, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2};
@@ -300,13 +301,13 @@ impl ZoomView {
     fn zoom_axis(a: (f64, f64), u: f64, factor: f64) -> (f64, f64) {
         let w = a.1 - a.0;
         let nw = (w / factor).clamp(1.0 / Self::MAX, 1.0);
-        let na = (a.0 + u * w - u * nw).clamp(0.0, 1.0 - nw);
+        let na = (a.0 + u * w - u * nw).clamp_safe(0.0, 1.0 - nw);
         (na, na + nw)
     }
 
     fn pan_axis(a: (f64, f64), d: f64) -> (f64, f64) {
         let w = a.1 - a.0;
-        let na = (a.0 + d * w).clamp(0.0, 1.0 - w);
+        let na = (a.0 + d * w).clamp_safe(0.0, 1.0 - w);
         (na, na + w)
     }
 
@@ -1244,7 +1245,7 @@ pub fn binned_plot(ui: &mut Ui, rect: Rect, pts: &[Pt], kind: XyKind, x: &AxisCf
     let pa = ui.painter_at(f.plot);
     let mut out = PlotOut::default();
     let hover = resp.hover_pos();
-    let base = f.to_screen(xr.0, 0.0_f64.clamp(yr.0, yr.1)).y;
+    let base = f.to_screen(xr.0, 0.0_f64.clamp_safe(yr.0, yr.1)).y;
     if by_sample {
         // the sample names under their groups (every other one when they would touch)
         let outer = ui.painter_at(rect);
@@ -1357,8 +1358,8 @@ impl NetView {
             return;
         }
         let r = base_radius(rect) * self.zoom;
-        self.off.x = self.off.x.clamp(-r, r);
-        self.off.y = self.off.y.clamp(-r, r);
+        self.off.x = self.off.x.clamp_safe(-r, r);
+        self.off.y = self.off.y.clamp_safe(-r, r);
     }
 }
 

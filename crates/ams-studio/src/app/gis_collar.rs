@@ -4,6 +4,7 @@
 //! covers another symbol, collar dot, hole line or box. The maths of this (grouping, order, size, place) is here and
 //! tested without a window; the drawing is in `gis_ui.rs`.
 
+use crate::util::SafeClamp;
 use super::gis_loc::Hole;
 use super::gis_ui::Placed;
 use egui::{Pos2, Rect, Vec2};
@@ -91,7 +92,7 @@ impl Obstacle {
     fn hits(&self, r: Rect) -> bool {
         match *self {
             Obstacle::Circle(c, rad) => {
-                let nearest = Pos2::new(c.x.clamp(r.min.x, r.max.x), c.y.clamp(r.min.y, r.max.y));
+                let nearest = Pos2::new(c.x.clamp_safe(r.min.x, r.max.x), c.y.clamp_safe(r.min.y, r.max.y));
                 nearest.distance(c) < rad
             }
             Obstacle::Rect(o) => o.intersects(r),
@@ -150,7 +151,7 @@ pub fn place_box(anchor: Pos2, size: Vec2, obstacles: &[Obstacle], canvas: Rect)
 
 /// The point of `r` nearest to `p`: where the lead from the dot meets the box.
 pub fn nearest_on(r: Rect, p: Pos2) -> Pos2 {
-    Pos2::new(p.x.clamp(r.min.x, r.max.x), p.y.clamp(r.min.y, r.max.y))
+    Pos2::new(p.x.clamp_safe(r.min.x, r.max.x), p.y.clamp_safe(r.min.y, r.max.y))
 }
 
 #[cfg(test)]

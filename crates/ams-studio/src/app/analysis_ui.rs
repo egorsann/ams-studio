@@ -273,6 +273,7 @@ impl App {
         let mut msg: Option<String> = None;
         let ink = if dark { Color32::from_gray(225) } else { Color32::from_gray(25) };
         self.base_window(ctx, "Group Statistics", W_GROUP, Vec2::new(1080.0, 740.0)).open(&mut open).resizable(true).show(ctx, |ui| {
+            super::guide(ui, "Statistics of the active specimens (only the selected ones when the toolbar filter is set to selected).", "The net shows K1, K2 and K3 of every specimen, the mean tensor with its confidence ellipses (Jelinek) and a bootstrap cloud. The tables give the mean tensor, the average and standard deviation of the shape parameters and the ellipse sizes. Use the Display tick boxes to choose what is drawn; Export Data saves the numbers as a csv.");
             let n = idx.len();
             ui.horizontal_top(|ui| {
                 // ------------------------------------------------ left: net and display options
@@ -351,16 +352,16 @@ impl App {
                                 for a in 0..3 {
                                     kcheck(ui, &mut g.k[a], KNAMES[a], bg(dark, a), 96.0);
                                 }
-                                ui.checkbox(&mut g.caption, "Caption");
-                                ui.checkbox(&mut g.legend, "Legend");
+                                super::check_i(ui, &mut g.caption, "Caption", "The coordinate system and the number of specimens written in the corners of the net.");
+                                super::check_i(ui, &mut g.legend, "Legend", "The K1, K2, K3 symbols named at the bottom left of the net.");
                             });
                             ui.add_space(10.0);
                             ui.vertical(|ui| {
-                                ui.checkbox(&mut g.data, "Data points");
-                                ui.checkbox(&mut g.mean, "Mean tensor");
+                                super::check_i(ui, &mut g.data, "Data points", "One grey marker per specimen and axis (K1, K2, K3) that is ticked at the left.");
+                                super::check_i(ui, &mut g.mean, "Mean tensor", "The axes of the average tensor of all the specimens, drawn as large markers, with the options below.");
                                 ui.add_enabled_ui(g.mean, |ui| {
                                     ui.indent("mt", |ui| {
-                                        ui.checkbox(&mut g.conf, "Conf. ellipses");
+                                        super::check_i(ui, &mut g.conf, "Conf. ellipses", "The 95 % confidence ellipse of each mean axis by the Jelinek method (the one the original program draws).");
                                         kcheck(ui, &mut g.planes[0], "K2-K3 plane", bg(dark, 0), 130.0);
                                         kcheck(ui, &mut g.planes[1], "K1-K3 plane", bg(dark, 1), 130.0);
                                         kcheck(ui, &mut g.planes[2], "K1-K2 plane", bg(dark, 2), 130.0);
@@ -369,10 +370,10 @@ impl App {
                             });
                             ui.add_space(10.0);
                             ui.vertical(|ui| {
-                                ui.checkbox(&mut g.boot, "Bootstrap");
+                                super::check_i(ui, &mut g.boot, "Bootstrap", "500 resamples of the specimens (drawn with replacement); every resample gives one point per axis. The cloud shows how well the mean axes are determined.");
                                 ui.add_enabled_ui(g.boot, |ui| {
                                     ui.indent("bt", |ui| {
-                                        ui.checkbox(&mut g.boot_conf, "Conf. ellipses");
+                                        super::check_i(ui, &mut g.boot_conf, "Conf. ellipses", "The 95 % ellipse around the bootstrap cloud of each axis.");
                                     });
                                 });
                             });
@@ -456,7 +457,7 @@ impl App {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if big_btn(ui, Icon::Save, "Export Data", true, dark) {
-                            if let Some(p) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(format!("{name}_groupstats_{suffix}.csv")).save_file() {
+                            if let Some(p) = crate::fdialog::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(format!("{name}_groupstats_{suffix}.csv")).save_file() {
                                 let text = group_csv(s, n);
                                 msg = Some(match std::fs::write(&p, text) {
                                     Ok(()) => format!("Saved {}", p.display()),
@@ -505,6 +506,7 @@ impl App {
         let (derived, _) = (self.derived.clone(), 0);
         let win = self.base_window(ctx, "Contour Plot", W_CONTOUR, Vec2::new(900.0, 800.0));
         win.open(&mut open).resizable(true).show(ctx, |ui| {
+            super::guide(ui, "Density contours of the K1, K2 or K3 directions of the active specimens.", "Pick which axis to contour under Input, choose continuous or discrete Levels and the smoothing, and tick what to show. The plot uses the active specimens, like the other plots (only the selected ones when the toolbar filter is set to selected).");
             if recalc {
                 let axes: Vec<Vec3> = idx.iter().map(|&i| { let (d, n) = derived[i].axes.dec_inc[axis]; from_dec_inc(d, n) }).collect();
                 let k = ui_state.smooth.max(1) as f64;
@@ -630,16 +632,25 @@ impl App {
                         }
                     });
                     titled(ui, "Levels", |ui| {
-                        ui.radio_value(&mut ui_state.discrete, false, "Continuous");
-                        ui.radio_value(&mut ui_state.discrete, true, "Discrete");
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut ui_state.discrete, false, "Continuous");
+                            super::info_icon(ui, "The colour shades smoothly with the density of the points.");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut ui_state.discrete, true, "Discrete");
+                            super::info_icon(ui, "The density is cut into a few levels, each drawn with its own colour band.");
+                        });
                         ui.add_space(4.0);
-                        ui.label("Smoothing");
+                        ui.horizontal(|ui| {
+                            ui.label("Smoothing");
+                            super::info_icon(ui, "The sharpness k of the density that each point adds (exp(k (cos\u{b2} angle - 1)), the original's smoothing value): a larger number lets each point spread less and follows the single points, a smaller number gives a broad, smooth picture. 1 to 1000.");
+                        });
                         ui.add(egui::DragValue::new(&mut ui_state.smooth).range(1..=1000).speed(0.5));
                     });
                     titled(ui, "Show", |ui| {
-                        ui.checkbox(&mut ui_state.contours, "Contours");
-                        ui.checkbox(&mut ui_state.points, "Data Points");
-                        ui.checkbox(&mut ui_state.eigen, "Eigenvectors");
+                        super::check_i(ui, &mut ui_state.contours, "Contours", "The density contour lines.");
+                        super::check_i(ui, &mut ui_state.points, "Data Points", "One marker per specimen for the chosen axis.");
+                        super::check_i(ui, &mut ui_state.eigen, "Eigenvectors", "The three principal directions of the distribution of the chosen axis (the orientation tensor of the points).");
                     });
                 });
             });

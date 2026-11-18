@@ -3,6 +3,7 @@
 //! the plunge at the arrow head), on a satellite (or street map) basemap and / or georeferenced geologic maps. The
 //! georeferencing window and the coordinates table window are in `gis_georef.rs`.
 
+use crate::util::SafeClamp;
 use super::gis_data::{self as gd, CoordKind, CrsChoice, Loc, Mapping, TableFile, Tiles};
 use super::gis_layers::{Kind, LayerTree};
 use super::gis_vector as gv;
@@ -282,6 +283,16 @@ pub struct Gis {
     /// The vector layer whose filter box is to be opened (from its right-click menu).
     pub filter_focus: Option<u32>,
     pub renaming: Option<(u32, String)>,
+    /// The layers selected together (Shift+click, Shift+drag a rectangle, Ctrl+click, Ctrl+A); `sel` is the one whose
+    /// properties show. Empty or one entry = an ordinary single selection.
+    pub multi: Vec<u32>,
+    pub multi_anchor: Option<u32>,
+    /// A rectangle is being dragged over the rows (Shift+drag): where it started.
+    pub band: Option<Pos2>,
+    /// The rows of the layers sidebar as drawn last (layer, rectangle).
+    pub row_hits: Vec<(u32, Rect)>,
+    /// Layer lists as they were before a removal (what it was, the list as the preferences text it); Ctrl+Z puts the last back.
+    pub layer_undo: Vec<(String, String)>,
     // the coordinates table in use, and the one being set up in the columns window
     pub table: Option<TableFile>,
     pub mapping: Mapping,
@@ -348,6 +359,11 @@ impl Default for Gis {
             bar_w: 244.0,
             filter_focus: None,
             renaming: None,
+            multi: vec![],
+            multi_anchor: None,
+            band: None,
+            row_hits: vec![],
+            layer_undo: vec![],
             table: None,
             mapping: Mapping::default(),
             locs: vec![],
@@ -384,12 +400,9 @@ impl Default for Gis {
 impl Gis {
     /// The settings of the GIS pane as lines of the preferences file: the switches, the basemap, the map layer with its
     /// georeference, the datasheet with its column assignment and where the map was looking.
-    pub fn prefs_text(&self) -> String {
-        let b = |v: bool| u8::from(v);
-        let mut t = format!(
-            "gis_osm={}\ngis_basemap={}\ngis_fol={}\ngis_lin={}\ngis_num={}\ngis_names={}\ngis_size={}\ngis_grow={},{}\ngis_boxes={}\ngis_barw={}\ngis_view={},{},{}\ngis_zone={},{}\ngis_layerbar={}\n",
-            b(self.base_on), self.tiles.source.token(), b(self.show_fol), b(self.show_lin), b(self.show_num), b(self.show_names), self.size, b(self.grow), self.grow_mpp, b(self.boxes), self.bar_w, self.view.cx, self.view.cy, self.view.mpp, self.manual.zone, b(self.manual.north), b(self.show_layers)
-        );
+    /// The layer list as the preferences keep it (one line of JSON): the tree, the maps and vector layers with their paths,
+    /// filters and looks.
+    pub fn layers_json(&self) -> String {
         // the layer list with the data of every map layer (loaded ones live, the others as the preferences had them)
         let maps: Vec<serde_json::Value> = self
             .layers
@@ -423,7 +436,42 @@ impl Gis {
                 Some(serde_json::json!({"id": i.id, "path": path.display().to_string(), "table": table, "opacity": opacity, "color": color, "crs": crs, "filter": filter, "label": label, "size": psize, "width": lwidth}))
             })
             .collect();
-        t += &format!("gis_layers={}\n", serde_json::json!({"tree": self.layers.to_values(), "maps": maps, "vectors": vectors, "selected": self.sel}).to_string().replace(['\n', '\r'], ""));
+        serde_json::json!({"tree": self.layers.to_values(), "maps": maps, "vectors": vectors, "selected": self.sel}).to_string().replace(['\n', '\r'], "")
+    }
+
+    /// Remembers the layer list before something is removed, so that Ctrl+Z can bring it back (the last 30 are kept).
+    pub fn snapshot_layers(&mut self, what: impl Into<String>) {
+        let j = self.layers_json();
+        self.layer_undo.push((what.into(), j));
+        if self.layer_undo.len() > 30 {
+            self.layer_undo.remove(0);
+        }
+    }
+
+    /// Puts the layer list back as it was before the last removal. The files of the layers are read again when they are
+    /// switched on; layers that are still there keep what is loaded. Returns what was undone.
+    pub fn undo_layers(&mut self, ctx: &egui::Context) -> Option<String> {
+        let (what, json) = self.layer_undo.pop()?;
+        self.load_layers(&json);
+        let keep: Vec<u32> = self.layers.items.iter().map(|i| i.id).collect();
+        self.maps.retain(|m| keep.contains(&m.id));
+        self.vectors.retain(|v| keep.contains(&v.id));
+        self.multi.clear();
+        self.restore(ctx);
+        Some(what)
+    }
+
+    pub fn prefs_text(&self) -> String {
+        self.prefs_text_inner()
+    }
+
+    fn prefs_text_inner(&self) -> String {
+        let b = |v: bool| u8::from(v);
+        let mut t = format!(
+            "gis_osm={}\ngis_basemap={}\ngis_fol={}\ngis_lin={}\ngis_num={}\ngis_names={}\ngis_size={}\ngis_grow={},{}\ngis_boxes={}\ngis_barw={}\ngis_view={},{},{}\ngis_zone={},{}\ngis_layerbar={}\n",
+            b(self.base_on), self.tiles.source.token(), b(self.show_fol), b(self.show_lin), b(self.show_num), b(self.show_names), self.size, b(self.grow), self.grow_mpp, b(self.boxes), self.bar_w, self.view.cx, self.view.cy, self.view.mpp, self.manual.zone, b(self.manual.north), b(self.show_layers)
+        );
+        t += &format!("gis_layers={}\n", self.layers_json());
         if let Some(p) = self.table.as_ref().map(|t| t.path.clone()).or_else(|| self.restore_table.clone()) {
             t += &format!("gis_table={}\n", p.display().to_string().replace(['\n', '\r'], ""));
             let m = if self.table.is_some() { Some(self.mapping.to_line()) } else { self.restore_mapping.as_ref().map(|m| m.to_line()) };
@@ -587,7 +635,8 @@ impl Gis {
     /// ticks, folding and names, as a block at the top of the added layers. Only paths are used; the files are read when a
     /// layer is switched on (see `restore`). Returns what was added and what was left out.
     pub fn import_qgis(&mut self, path: &std::path::Path) -> Result<String, String> {
-        let project = super::gis_qgis::read_project(path)?;
+        // a QGIS project, or an ArcGIS Pro / ArcMap project or layer file: only ever read, never written
+        let project = if super::gis_arcgis::is_arcgis(path) { super::gis_arcgis::read_project(path)? } else { super::gis_qgis::read_project(path)? };
         let rows = project.rows();
         if project.layer_count() == 0 {
             return Err(format!("{}: no layer that the viewer can show. {}", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), project.summary()));
@@ -781,7 +830,7 @@ pub fn pick_file(title: &str, filter_name: &str, exts: &[&str], env: &str) -> Op
     if let Some(p) = std::env::var_os(env) {
         return Some(PathBuf::from(p));
     }
-    rfd::FileDialog::new().add_filter(filter_name, exts).set_title(title).pick_file()
+    crate::fdialog::FileDialog::new().add_filter(filter_name, exts).set_title(title).pick_file()
 }
 
 fn dirvec(az_deg: f64) -> Vec2 {
@@ -1677,7 +1726,7 @@ impl App {
             // the pane
             let max_w = (body.width() * 0.7).max(120.0);
             let min_w = 150.0f32.min(max_w);
-            let w = self.gis.bar_w.clamp(min_w, max_w);
+            let w = self.gis.bar_w.clamp_safe(min_w, max_w);
             let bar = Rect::from_min_max(body.min, Pos2::new(body.min.x + w, body.max.y));
             let grip = Rect::from_min_max(Pos2::new(bar.max.x, body.min.y), Pos2::new(bar.max.x + 7.0, body.max.y));
             body.min.x = grip.max.x;
@@ -1687,7 +1736,7 @@ impl App {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
             if gr.dragged() {
-                self.gis.bar_w = (w + gr.drag_delta().x).clamp(min_w, max_w);
+                self.gis.bar_w = (w + gr.drag_delta().x).clamp_safe(min_w, max_w);
             }
             let line = if gr.hovered() || gr.dragged() { th.accent } else { ui.visuals().widgets.noninteractive.bg_stroke.color };
             ui.painter().line_segment([Pos2::new(grip.center().x, grip.min.y + 8.0), Pos2::new(grip.center().x, grip.max.y - 8.0)], Stroke::new(if gr.hovered() || gr.dragged() { 2.5 } else { 1.5 }, line));
@@ -1902,6 +1951,36 @@ mod tests {
     }
 
     #[test]
+    fn a_removal_of_layers_can_be_undone_and_no_file_is_touched() {
+        let dir = std::env::temp_dir().join(format!("gis-undo-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let files: Vec<PathBuf> = (0..3).map(|i| dir.join(format!("m{i}.png"))).collect();
+        for f in &files {
+            std::fs::write(f, b"original").unwrap();
+        }
+        let mut g = Gis::default();
+        let ids: Vec<u32> = (0..3).map(|i| g.layers.add_map(&format!("Layer {i}"))).collect();
+        for (id, f) in ids.iter().zip(&files) {
+            g.restore_maps.insert(*id, MapSpec { path: f.clone(), opacity: 0.5, georef: None, crs: None });
+        }
+        let ctx = egui::Context::default();
+        // remove all three at once, then bring them back
+        g.snapshot_layers("removed 3 layer(s)");
+        for id in &ids {
+            for gone in g.layers.remove_subtree(*id) {
+                g.restore_maps.remove(&gone);
+            }
+        }
+        assert!(ids.iter().all(|id| g.layers.get(*id).is_none()) && g.restore_maps.is_empty());
+        assert_eq!(g.undo_layers(&ctx).as_deref(), Some("removed 3 layer(s)"));
+        assert!(ids.iter().all(|id| g.layers.get(*id).is_some()) && g.restore_maps.len() == 3);
+        assert_eq!(g.undo_layers(&ctx), None, "nothing left to undo");
+        // the files are exactly as they were
+        assert!(files.iter().all(|f| std::fs::read(f).unwrap() == b"original"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_gis_pane_settings_survive_the_preferences_file() {
         use super::super::gis_layers::Drop;
         let dir = std::env::temp_dir().join(format!("gis-prefs-test-{}", std::process::id()));
@@ -2045,4 +2124,9 @@ mod tests {
         assert_eq!(v.proj.as_ref().unwrap().points.len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// A QGIS or ArcGIS project or layer file (what can be dropped on the window or chosen in the project import).
+pub fn is_project_file(p: &std::path::Path) -> bool {
+    matches!(p.extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref(), Some("qgz" | "qgs")) || super::gis_arcgis::is_arcgis(p)
 }

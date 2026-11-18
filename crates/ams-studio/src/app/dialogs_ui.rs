@@ -272,7 +272,7 @@ impl App {
             ui.label(RichText::new("Geographic coordinates (G) use these values; use Save Active Records As afterwards to keep them in a file.").weak().small());
         });
         if load {
-            if let Some(p) = rfd::FileDialog::new().add_filter("GED files", &["ged"]).set_title("Open GED File(s)").pick_file() {
+            if let Some(p) = crate::fdialog::FileDialog::new().add_filter("GED files", &["ged"]).set_title("Open GED File(s)").pick_file() {
                 match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|t| GedFile::parse(&t)) {
                     Ok(g) if !g.rows.is_empty() => {
                         st.pair = vec![None; st.rows.len()];
@@ -372,6 +372,7 @@ impl App {
         let mut crit_changed = false;
         self.base_window(ctx, "Data Classes", W_CLASSES, Vec2::new(760.0, 560.0)).open(&mut open).resizable(false).show(ctx, |ui| {
             tools_ui::pop_style(ui, 1.2);
+            super::guide(ui, "Give groups of specimens a colour: choose how to group them, then the colour of each class.", "A class is a name and a colour. With the criterion Custom you assign specimens to classes yourself; the other criteria group them by their file or specimen name. The plots and the list then colour the specimens by class.");
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 7.0);
             ui.columns(2, |cols| {
                 let ui = &mut cols[0];
@@ -504,7 +505,7 @@ impl App {
         if save {
             if let Some(d) = &self.doc {
                 let stem = d.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("data".into());
-                if let Some(p) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(format!("{stem}_classes.csv")).save_file() {
+                if let Some(p) = crate::fdialog::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(format!("{stem}_classes.csv")).save_file() {
                     let mut s = String::from("Specimen,Class,R,G,B\n");
                     for (i, sp) in d.specs.iter().enumerate() {
                         match self.class_of.get(i).copied().flatten().and_then(|k| classes.get(k)) {
@@ -533,7 +534,7 @@ impl App {
     // ------------------------------------------------------------------ Import
 
     pub(super) fn import_files(&mut self) {
-        let mut dlg = rfd::FileDialog::new()
+        let mut dlg = crate::fdialog::FileDialog::new()
             .add_filter("Anisoft 4.2 / AGICO binary (*.ran)", &["ran"])
             .add_filter("Comma-delimited (*.csv)", &["csv"])
             .set_title("Import Data File(s)");
@@ -543,8 +544,13 @@ impl App {
         let Some(p) = dlg.pick_file() else { return };
         let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         let read = std::fs::read(&p).map_err(|e| e.to_string());
+        let mut joined_note: Option<String> = None;
         let res = read.and_then(|bytes| match ext.as_str() {
-            "ran" => ams_core::import::ran_to_records(&bytes).map(|r| (r, 0usize)),
+            // a .ran with its out-of-phase partner next to it (X.ran + X_Im.ran) comes in as full records
+            "ran" => crate::doc::read_records(&p, None).map(|(r, note)| {
+                joined_note = note.filter(|n| n.contains("joined"));
+                (r, 0usize)
+            }).or_else(|_| ams_core::import::ran_to_records(&bytes).map(|r| (r, 0usize))),
             "csv" => ams_core::import::csv_to_records(&String::from_utf8_lossy(&bytes)),
             _ => Err("Import reads .ran (Anisoft 4.2) and .csv (written by Anisoft or AMS Studio) files. The other lab formats of the original's list (ASC, SI2B, AMSSpin, SushiBar, TorqueZurich, AMSBurgos, IODP, BillMorris, Toulouse, Molyneux) are not supported.".to_string()),
         });
@@ -555,7 +561,11 @@ impl App {
                     Ok(d) => {
                         let n = d.specs.len();
                         self.set_doc(d);
-                        self.info = Some(format!("Imported {n} specimen(s) from {}{}.\nUse File > Save Active Records As to keep them as an .ams file.{}", p.display(), if skipped > 0 { format!(" ({skipped} unreadable row(s) skipped)") } else { String::new() }, if ext == "ran" { "\nA .ran file has no out-of-phase data, no standard deviations and no F-tests." } else { "" }));
+                        self.info = Some(format!("Imported {n} specimen(s) from {}{}.\nUse File > Save Active Records As to keep them as an .ams file.{}", p.display(), if skipped > 0 { format!(" ({skipped} unreadable row(s) skipped)") } else { String::new() }, match (&joined_note, ext == "ran") {
+                            (Some(n), _) => format!("\n{n}. A .ran file has no standard deviations and no F-tests."),
+                            (None, true) => "\nThis .ran file has no out-of-phase partner next to it (named like X_Im.ran), so it has no out-of-phase data; use Edit > Recombine to join a pair. A .ran file has no standard deviations and no F-tests.".to_string(),
+                            _ => String::new(),
+                        }));
                     }
                     Err(e) => self.info = Some(e),
                 }

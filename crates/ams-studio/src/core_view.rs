@@ -3,6 +3,7 @@
 //! along the core, the rows follow the letters (A at the bottom), and a slice cut with fewer cubes can be centred on the
 //! core axis. Everything is kept in memory: the photos are decoded into textures, no file is written.
 
+use crate::util::SafeClamp;
 use crate::plots::{band, label_box, paint_band, PlotOut, Theme};
 use ams_core::core::slice_of;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, TextureHandle, Ui, Vec2};
@@ -202,8 +203,8 @@ pub fn draw(ui: &mut Ui, rect: Rect, cubes: &[Cube], textures: &HashMap<(u32, ch
     let u = base * view.zoom;
     let (cw, ch) = (n_sl * u, rows * u);
     // keep the core from being pushed out of the pane
-    view.off.x = view.off.x.clamp(-(cw / 2.0 + inner.width() / 2.0 - 20.0), cw / 2.0 + inner.width() / 2.0 - 20.0);
-    view.off.y = view.off.y.clamp(-(ch / 2.0 + inner.height() / 2.0 - 20.0), ch / 2.0 + inner.height() / 2.0 - 20.0);
+    view.off.x = view.off.x.clamp_safe(-(cw / 2.0 + inner.width() / 2.0 - 20.0), cw / 2.0 + inner.width() / 2.0 - 20.0);
+    view.off.y = view.off.y.clamp_safe(-(ch / 2.0 + inner.height() / 2.0 - 20.0), ch / 2.0 + inner.height() / 2.0 - 20.0);
     let (x0, y0) = (inner.center().x + view.off.x - cw / 2.0, inner.center().y + view.off.y - ch / 2.0);
     let side = u * (1.0 - CUBE_GAP);
     let cube_rect = |c: &Cube| Rect::from_center_size(Pos2::new(x0 + (c.slice - smin) as f32 * u + u / 2.0, y0 + (yhi - c.y - 0.5) * u), Vec2::splat(side));

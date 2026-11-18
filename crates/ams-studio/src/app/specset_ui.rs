@@ -3,14 +3,100 @@
 //! picks, and can be replaced by a string the user types. See `ams_core::specset`.
 
 use super::{App, W_SET};
-use ams_core::specset::{self, Detection, Pick, SpecFolder};
+use ams_core::specset::{self, Built, Detection, IdScheme, Kind, Layout as FileLayout, Phases, Pick, RawScan, SpecFolder};
 use egui::{Align, Color32, Layout, RichText, Sense, Ui, Vec2};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 
+/// What the user said about how the files are stored (the questions before the list of main files).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum SchemeChoice {
+    Auto,
+    Digits(usize),
+    FirstWord,
+    Chars(usize),
+}
+
+impl SchemeChoice {
+    pub fn scheme(self) -> Option<IdScheme> {
+        match self {
+            SchemeChoice::Auto => None,
+            SchemeChoice::Digits(n) => Some(IdScheme::Digits(n)),
+            SchemeChoice::FirstWord => Some(IdScheme::FirstWord),
+            SchemeChoice::Chars(n) => Some(IdScheme::Chars(n)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) struct SetOpts {
+    pub kind: Kind,
+    pub layout: FileLayout,
+    pub phases: Phases,
+    pub scheme: SchemeChoice,
+}
+
+impl Default for SetOpts {
+    fn default() -> Self {
+        SetOpts { kind: Kind::Ams, layout: FileLayout::Auto, phases: Phases::ByName, scheme: SchemeChoice::Auto }
+    }
+}
+
+impl SetOpts {
+    pub fn to_text(&self) -> String {
+        let k = match self.kind { Kind::Ams => "ams", Kind::Ran => "ran" };
+        let l = match self.layout { FileLayout::Auto => "auto", FileLayout::OwnFolders => "own", FileLayout::OneFolder => "one" };
+        let p = match self.phases { Phases::Off => "off", Phases::ByName => "name", Phases::Yes => "yes" };
+        let s = match self.scheme {
+            SchemeChoice::Auto => "auto".to_string(),
+            SchemeChoice::Digits(n) => format!("d{n}"),
+            SchemeChoice::FirstWord => "first".to_string(),
+            SchemeChoice::Chars(n) => format!("c{n}"),
+        };
+        format!("{k}|{l}|{p}|{s}")
+    }
+
+    pub fn from_text(t: &str) -> Option<SetOpts> {
+        let v: Vec<&str> = t.trim().split('|').collect();
+        if v.len() != 4 {
+            return None;
+        }
+        Some(SetOpts {
+            kind: if v[0] == "ran" { Kind::Ran } else { Kind::Ams },
+            layout: match v[1] { "own" => FileLayout::OwnFolders, "one" => FileLayout::OneFolder, _ => FileLayout::Auto },
+            phases: match v[2] { "off" => Phases::Off, "yes" => Phases::Yes, _ => Phases::ByName },
+            scheme: match v[3] {
+                "first" => SchemeChoice::FirstWord,
+                s if s.starts_with('d') => s[1..].parse().map(SchemeChoice::Digits).unwrap_or(SchemeChoice::Auto),
+                s if s.starts_with('c') => s[1..].parse().map(SchemeChoice::Chars).unwrap_or(SchemeChoice::Auto),
+                _ => SchemeChoice::Auto,
+            },
+        })
+    }
+
+    /// The specimens these answers give for a scan.
+    pub fn build(&self, root: &Path, raw: &RawScan) -> Built {
+        let mut b = specset::build(root, raw, self.kind, self.layout, self.scheme.scheme(), self.phases);
+        if self.phases == Phases::Yes {
+            // two files per specimen and no phase word in the names: the one with the small Km is the out-of-phase one
+            specset::pair_two_by_content(&mut b.folders, &|p: &Path| {
+                let bytes = std::fs::read(p).ok()?;
+                if crate::doc::is_ran(p) {
+                    ams_core::import::ran_to_records(&bytes).ok()
+                } else {
+                    Some(bytes)
+                }
+            });
+        }
+        b
+    }
+}
+
 /// The confirmed set shown in the file browser.
 pub(super) struct SpecSet {
     pub root: PathBuf,
+    pub raw: RawScan,
+    pub opts: SetOpts,
     pub folders: Vec<SpecFolder>,
     /// The identifier the user confirmed (empty when every folder holds a single file).
     pub ident: String,
@@ -36,7 +122,17 @@ pub(super) struct SetDialog {
     pub custom: bool,
     pub input: String,
     pub picks: Vec<Pick>,
-    pub rx: Option<Receiver<Vec<SpecFolder>>>,
+    pub rx: Option<Receiver<RawScan>>,
+    /// Every .ams / .ran file found under the folder, before the questions are answered.
+    pub raw: RawScan,
+    /// How the files are stored (answers to the first questions).
+    pub opts: SetOpts,
+    /// The questions are showing (first step); off = the list of main files.
+    pub ask: bool,
+    /// What the answers gave: shared folders split by ID, and the scheme that did it.
+    pub split_dirs: usize,
+    pub split_scheme: Option<IdScheme>,
+    pub n_pairs: usize,
     /// The string was typed by the user, not detected.
     pub typed: bool,
     /// The scan is the silent restore of the folder that was open last time.
@@ -47,6 +143,21 @@ impl SetDialog {
     fn rematch(&mut self) {
         self.picks = specset::matches(&self.folders, &self.ident);
     }
+
+    /// Builds the specimens from the answers, finds the identifier of the main file and matches it.
+    pub fn rebuild(&mut self, hint: Option<&str>) {
+        let b = self.opts.build(&self.root, &self.raw);
+        self.split_dirs = b.split_dirs;
+        self.split_scheme = b.scheme;
+        self.n_pairs = b.folders.iter().map(|f| f.pairs.len()).sum();
+        let det = specset::detect(&b.folders, hint);
+        self.ident = det.ident.clone().unwrap_or_default();
+        self.input = self.ident.clone();
+        self.typed = false;
+        self.folders = b.folders;
+        self.detection = Some(det);
+        self.rematch();
+    }
 }
 
 fn file_list(f: &SpecFolder, idx: &[usize]) -> String {
@@ -56,7 +167,7 @@ fn file_list(f: &SpecFolder, idx: &[usize]) -> String {
 impl App {
     /// Asks for the parent folder and starts scanning it.
     pub(super) fn open_folder_of_specimens(&mut self, ctx: &egui::Context) {
-        let mut dlg = rfd::FileDialog::new().set_title("Open Folder of Specimens (the parent of the specimen folders)");
+        let mut dlg = crate::fdialog::FileDialog::new().set_title("Open Folder of Specimens (the parent of the specimen folders)");
         if self.browser_dir.is_dir() {
             dlg = dlg.set_directory(&self.browser_dir);
         }
@@ -68,10 +179,10 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         let (r2, c2) = (root.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(specset::scan(&r2));
+            let _ = tx.send(specset::scan_raw(&r2));
             c2.request_repaint();
         });
-        self.sd = SetDialog { scanning: true, root, rx: Some(rx), ..Default::default() };
+        self.sd = SetDialog { scanning: true, root, rx: Some(rx), opts: self.set_opts, ask: true, ..Default::default() };
         self.open_win(W_SET);
     }
 
@@ -81,10 +192,10 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         let (r2, c2) = (root.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(specset::scan(&r2));
+            let _ = tx.send(specset::scan_raw(&r2));
             c2.request_repaint();
         });
-        self.sd = SetDialog { scanning: true, root, rx: Some(rx), restore: true, ..Default::default() };
+        self.sd = SetDialog { scanning: true, root, rx: Some(rx), restore: true, opts: self.set_opts, ..Default::default() };
         self.restore_file = file;
     }
 
@@ -94,7 +205,7 @@ impl App {
             return;
         }
         let Some(rx) = &self.sd.rx else { return };
-        let folders = match rx.try_recv() {
+        let raw = match rx.try_recv() {
             Ok(f) => f,
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 ctx.request_repaint_after(std::time::Duration::from_millis(150));
@@ -106,7 +217,10 @@ impl App {
             }
         };
         let root = self.sd.root.clone();
+        let opts = self.set_opts;
         self.sd = SetDialog::default();
+        let built = opts.build(&root, &raw);
+        let folders = built.folders;
         if folders.is_empty() {
             return; // the folder is gone or empty: start as usual
         }
@@ -116,11 +230,11 @@ impl App {
         let matched = picks.iter().filter(|p| p.file().is_some()).count();
         if matched == 0 {
             // nothing to go by: let the user choose, as when opening the folder by hand
-            self.sd = SetDialog { root, ident, picks, detection: Some(det), folders, ..Default::default() };
+            self.sd = SetDialog { root, ident, picks, detection: Some(det), folders, raw, opts, ..Default::default() };
             self.open_win(W_SET);
             return;
         }
-        let set = SpecSet { root: root.clone(), folders, ident, picks };
+        let set = SpecSet { root: root.clone(), raw, opts, folders, ident, picks };
         let mains = set.mains();
         let file = self.restore_file.take().filter(|p| p.is_file()).or_else(|| mains.first().cloned());
         self.browser_dir = root;
@@ -134,7 +248,8 @@ impl App {
     /// Reads the folders of the open set again (after files were moved or written) with the same identifier.
     pub(super) fn refresh_set(&mut self) {
         if let Some(s) = &mut self.set {
-            s.folders = specset::scan(&s.root);
+            s.raw = specset::scan_raw(&s.root);
+            s.folders = s.opts.build(&s.root, &s.raw).folders;
             s.picks = specset::matches(&s.folders, &s.ident);
         }
     }
@@ -145,6 +260,8 @@ impl App {
         let det = specset::detect(&s.folders, Some(&self.last_ident));
         self.sd = SetDialog {
             root: s.root.clone(),
+            raw: s.raw.clone(),
+            opts: s.opts,
             folders: s.folders.clone(),
             detection: Some(det),
             ident: s.ident.clone(),
@@ -155,6 +272,12 @@ impl App {
         };
         self.sd.rematch();
         self.open_win(W_SET);
+    }
+
+    /// The out-of-phase file of a specimen whose phases are two files, as the open set found them.
+    pub(super) fn partner_in_set(&self, p: &Path) -> Option<PathBuf> {
+        let s = self.set.as_ref()?;
+        s.folders.iter().find_map(|f| f.pairs.iter().find(|(m, _)| f.dir.join(m) == p).map(|(_, o)| f.dir.join(o)))
     }
 
     /// Previous / next main file, position and count: through the set when the file belongs to it.
@@ -176,14 +299,18 @@ impl App {
         // scan result arrives from the thread
         if let Some(rx) = &sd.rx {
             match rx.try_recv() {
-                Ok(folders) => {
+                Ok(raw) => {
                     sd.rx = None;
                     sd.scanning = false;
-                    let det = specset::detect(&folders, Some(&self.last_ident));
-                    sd.ident = det.ident.clone().unwrap_or_default();
-                    sd.folders = folders;
-                    sd.detection = Some(det);
-                    sd.rematch();
+                    // the questions start from what the folder holds: .ams unless there are only .ran files
+                    let (n_ams, n_ran) = raw.counts();
+                    if n_ams == 0 && n_ran > 0 {
+                        sd.opts.kind = Kind::Ran;
+                    } else if n_ran == 0 {
+                        sd.opts.kind = Kind::Ams;
+                    }
+                    sd.raw = raw;
+                    sd.rebuild(Some(&self.last_ident));
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
                     ctx.request_repaint_after(std::time::Duration::from_millis(120));
@@ -195,6 +322,7 @@ impl App {
             }
         }
         let dark = self.dark;
+        let hint = self.last_ident.clone();
         let warn = Color32::from_rgb(214, 150, 40);
         let bad = Color32::from_rgb(214, 90, 90);
         let ok = Color32::from_rgb(70, 170, 90);
@@ -213,10 +341,30 @@ impl App {
                 });
                 return;
             }
-            if sd.folders.is_empty() {
-                ui.label(RichText::new("No .ams files were found under this folder.").color(bad).strong().size(18.0));
-                ui.label("Pick the folder that contains one sub-folder per specimen, each with its .ams files.");
+            if sd.raw.dirs.is_empty() && sd.folders.is_empty() {
+                ui.label(RichText::new("No .ams or .ran files were found under this folder.").color(bad).strong().size(18.0));
+                ui.label("Pick the folder that holds your specimens: either one sub-folder per specimen, or all the data files next to each other.");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| cancel = ui.button("Close").clicked());
+                return;
+            }
+            if sd.ask {
+                let (go, no) = ask_ui(ui, &mut sd, dark, &hint);
+                cancel = no;
+                if go {
+                    sd.ask = false;
+                    sd.rebuild(Some(&hint));
+                }
+                return;
+            }
+            if sd.folders.is_empty() {
+                ui.label(RichText::new("With these answers no specimens were found.").color(bad).strong().size(18.0));
+                ui.label("Go back and try another file type or another way the files are stored.");
+                ui.horizontal(|ui| {
+                    if ui.button("Back to the questions").clicked() {
+                        sd.ask = true;
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| cancel = ui.button("Close").clicked());
+                });
                 return;
             }
             let n_files: usize = sd.folders.iter().map(|f| f.files.len()).sum();
@@ -231,7 +379,18 @@ impl App {
                     if det.needed && !sd.ident.trim().is_empty() && !sd.typed { format!("\nFound in {} of the {} folders that hold more than one file.", det.covered, det.multi) } else { String::new() }
                 ));
             });
-            ui.label(RichText::new(format!("Specimen folders (n={}) with .ams files (n={n_files})", sd.folders.len())).weak());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(format!("Specimens (n={}) with .{} files (n={n_files})", sd.folders.len(), sd.opts.kind.ext())).weak());
+                if sd.split_dirs > 0 {
+                    ui.label(RichText::new(format!("\u{b7} files in one folder told apart by {}", sd.split_scheme.map_or("their names".to_string(), |s| s.describe()))).weak());
+                }
+                if sd.n_pairs > 0 {
+                    ui.label(RichText::new(format!("\u{b7} in- and out-of-phase files joined (n={})", sd.n_pairs)).weak());
+                }
+                if ui.small_button("Change how the files are stored ...").on_hover_text("Back to the questions: one folder or one folder per specimen, .ams or .ran, split phases").clicked() {
+                    sd.ask = true;
+                }
+            });
             egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(14)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 if !det.needed {
@@ -335,7 +494,8 @@ impl App {
             sd.rematch();
         }
         if use_it {
-            let set = SpecSet { root: sd.root.clone(), folders: sd.folders.clone(), ident: sd.ident.trim().to_string(), picks: sd.picks.clone() };
+            let set = SpecSet { root: sd.root.clone(), raw: sd.raw.clone(), opts: sd.opts, folders: sd.folders.clone(), ident: sd.ident.trim().to_string(), picks: sd.picks.clone() };
+            self.set_opts = sd.opts;
             if !set.ident.is_empty() {
                 self.last_ident = set.ident.clone();
             }
@@ -544,4 +704,160 @@ impl App {
             self.open_path(p);
         }
     }
+}
+
+
+/// One answer of a question as a card: a radio dot, the title, a short example, and the explanation behind a circled (i).
+fn card(ui: &mut Ui, selected: bool, title: &str, example: &str, tip: &str, dark: bool) -> bool {
+    let accent = if dark { Color32::from_rgb(106, 160, 255) } else { Color32::from_rgb(47, 111, 222) };
+    let line = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        let w = (ui.available_width() - 30.0).max(160.0);
+        let r = egui::Frame::new()
+            .fill(if selected { accent.gamma_multiply(if dark { 0.22 } else { 0.12 }) } else { Color32::TRANSPARENT })
+            .stroke(Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { accent } else { line }))
+            .corner_radius(8)
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_width(w - 26.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(if selected { "\u{25cf}" } else { "\u{25cb}" }).color(accent).size(18.0));
+                    ui.label(RichText::new(title).strong().size(16.0));
+                });
+                if !example.is_empty() {
+                    ui.label(RichText::new(example).monospace().small().weak());
+                }
+            });
+        let resp = ui.interact(r.response.rect, ui.make_persistent_id(("ask-card", title)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        clicked = resp.clicked();
+        super::info_icon(ui, tip);
+    });
+    clicked
+}
+
+fn chip(ui: &mut Ui, selected: bool, text: &str) -> bool {
+    ui.add(egui::Button::selectable(selected, RichText::new(text).size(15.0)).min_size(Vec2::new(0.0, 32.0))).clicked()
+}
+
+use egui::Stroke;
+
+/// The questions before the list of main files: where the files lie, which file type, whether the phases are split and
+/// how the specimen ID is written. Returns (continue, cancel).
+fn ask_ui(ui: &mut Ui, sd: &mut SetDialog, dark: bool, _hint: &str) -> (bool, bool) {
+    let (n_ams, n_ran) = sd.raw.counts();
+    let before = sd.opts;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("How are your specimen files stored?").strong().size(20.0));
+        super::info_icon(ui, "Three short questions so that AMS Studio finds the right file of every specimen. The answers are remembered for the next time you open a folder.\nThe pre-selected answers are what the program saw in the names; if they are right, press Continue.");
+    });
+    ui.label(RichText::new(format!("Found: .ams files (n={n_ams}), .ran files (n={n_ran}) in folders (n={})", sd.raw.dirs.len())).weak());
+
+    ui.label(RichText::new("1.  Where are your files?").strong().size(16.0));
+    if card(ui, sd.opts.layout == FileLayout::OwnFolders, "Each specimen has its own folder", "parent/ER01/ER01_use.ams    parent/ER02/ER02_use.ams", "One folder per specimen, with that specimen's data files inside (a folder with a single file also counts). The folder is the specimen; the file names only matter when a folder holds several files.", dark) {
+        sd.opts.layout = FileLayout::OwnFolders;
+    }
+    if card(ui, sd.opts.layout == FileLayout::OneFolder, "All files are in one folder", "parent/1234567.ams    parent/1234568.ams", "All specimens lie next to each other in the same folder. AMS Studio tells the specimens apart by the specimen ID in the file name, for example a 7-digit number, and treats the files with the same ID as one specimen.", dark) {
+        sd.opts.layout = FileLayout::OneFolder;
+    }
+    if card(ui, sd.opts.layout == FileLayout::Auto, "Not sure: look at the names", "mixed, or a bit of both", "AMS Studio looks at the file names of every folder: a folder whose files carry several different specimen IDs is split by ID, a folder whose files all belong to one ID stays one specimen.", dark) {
+        sd.opts.layout = FileLayout::Auto;
+    }
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("2.  Which file type are your specimens in?").strong().size(16.0));
+        super::info_icon(ui, ".ams is what Anisoft 6 and the Kappabridge software write. .ran is the older Anisoft 4.2 format: it holds one phase per file, the out-of-phase data of a specimen are a second file (for example X.ran and X_Im.ran). AMS Studio reads both and joins the two files of a split specimen when it opens it. Nothing is ever written into your data folders.");
+    });
+    ui.horizontal(|ui| {
+        if chip(ui, sd.opts.kind == Kind::Ams, &format!(".ams  (n={n_ams})")) {
+            sd.opts.kind = Kind::Ams;
+        }
+        if chip(ui, sd.opts.kind == Kind::Ran, &format!(".ran  (n={n_ran})")) {
+            sd.opts.kind = Kind::Ran;
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("3.  Are in-phase and out-of-phase data in separate files?").strong().size(16.0));
+        super::info_icon(ui, "Some labs export the in-phase and the out-of-phase part of a specimen as two files. \"Look at the names\" joins files whose names say it (X and X_Im, X_in and X_out, X and X_oop). \"Yes\" also pairs two files of a specimen whose names say nothing, by their numbers: the file with the much smaller susceptibility is the out-of-phase one. \"No\" leaves every file as it is.");
+    });
+    ui.horizontal(|ui| {
+        if chip(ui, sd.opts.phases == Phases::Off, "No, one file has both") {
+            sd.opts.phases = Phases::Off;
+        }
+        if chip(ui, sd.opts.phases == Phases::ByName, "Look at the names") {
+            sd.opts.phases = Phases::ByName;
+        }
+        if chip(ui, sd.opts.phases == Phases::Yes, "Yes, two files per specimen") {
+            sd.opts.phases = Phases::Yes;
+        }
+    });
+
+    if sd.opts.layout != FileLayout::OwnFolders {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("4.  How is the specimen ID written in a file name?").strong().size(16.0));
+            super::info_icon(ui, "Used to tell the specimens apart in a folder that holds many. \"Detect\" tries a 7-digit number first (1234567_use.ams), then other digit counts, then the first part of the name (ER26PB002_use.ams). Choose another if the list that follows groups the files wrongly.");
+        });
+        let label = match sd.opts.scheme {
+            SchemeChoice::Auto => "Detect it from the names".to_string(),
+            SchemeChoice::Digits(n) => format!("A number with {n} digits"),
+            SchemeChoice::FirstWord => "The first part of the name".to_string(),
+            SchemeChoice::Chars(n) => format!("The first {n} characters"),
+        };
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("ask-scheme").selected_text(label).width(260.0).show_ui(ui, |ui| {
+                ui.selectable_value(&mut sd.opts.scheme, SchemeChoice::Auto, "Detect it from the names");
+                ui.selectable_value(&mut sd.opts.scheme, SchemeChoice::Digits(7), "A 7-digit number");
+                if !matches!(sd.opts.scheme, SchemeChoice::Digits(7) | SchemeChoice::Digits(0)) && matches!(sd.opts.scheme, SchemeChoice::Digits(_)) {
+                    ui.label("(another digit count: set below)");
+                }
+                if ui.selectable_label(matches!(sd.opts.scheme, SchemeChoice::Digits(n) if n != 7), "A number with another digit count").clicked() {
+                    sd.opts.scheme = SchemeChoice::Digits(6);
+                }
+                ui.selectable_value(&mut sd.opts.scheme, SchemeChoice::FirstWord, "The first part of the name");
+                if ui.selectable_label(matches!(sd.opts.scheme, SchemeChoice::Chars(_)), "The first N characters").clicked() {
+                    sd.opts.scheme = SchemeChoice::Chars(9);
+                }
+            });
+            match &mut sd.opts.scheme {
+                SchemeChoice::Digits(n) if *n != 7 => {
+                    ui.add(egui::DragValue::new(n).range(3..=14).suffix(" digits"));
+                }
+                SchemeChoice::Chars(n) => {
+                    ui.add(egui::DragValue::new(n).range(2..=30).suffix(" characters"));
+                }
+                _ => {}
+            }
+        });
+    }
+
+    // what the answers give, live
+    ui.add_space(6.0);
+    let b = sd.opts.build(&sd.root, &sd.raw);
+    let _ = before;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(format!("With these answers: specimens (n={})", b.folders.len())).strong());
+        if b.split_dirs > 0 {
+            ui.label(format!("\u{b7} shared folders split by ID (n={}), ID = {}", b.split_dirs, b.scheme.map_or("the names".to_string(), |s| s.describe())));
+        }
+        let pairs: usize = b.folders.iter().map(|f| f.pairs.len()).sum();
+        if pairs > 0 {
+            ui.label(format!("\u{b7} specimens with in- and out-of-phase files joined (n={pairs})"));
+        }
+    });
+
+    let (mut go, mut cancel) = (false, false);
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.set_width(ui.available_width());
+        cancel = ui.add(egui::Button::new("Cancel").min_size(Vec2::new(0.0, 38.0))).clicked();
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let blue = egui::Button::new(RichText::new("Continue").strong().color(Color32::WHITE)).fill(if dark { Color32::from_rgb(52, 104, 200) } else { Color32::from_rgb(47, 111, 222) }).min_size(Vec2::new(160.0, 38.0));
+            go = ui.add_enabled(!b.folders.is_empty(), blue).on_hover_text("Show the specimens and the file that is the main one of each").clicked();
+        });
+    });
+    (go, cancel)
 }

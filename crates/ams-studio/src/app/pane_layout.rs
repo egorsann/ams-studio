@@ -9,6 +9,7 @@
 //!   out as before: the core viewer as a strip across the top, then the stereonet and the plots in two columns, and
 //!   the GIS viewer sits next to the core viewer when both are on.
 
+use crate::util::SafeClamp;
 use egui::{Pos2, Rect};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -129,7 +130,7 @@ pub fn row_heights(rows: &[Vec<PaneId>], total: f32, gap: f32, wide_frac: f32, v
     if np == 0 {
         return vec![inner / n as f32; n];
     }
-    let wide_h = if nw == 0 { 0.0 } else { (wide_frac * total).clamp(90.0, 0.65 * inner / nw as f32).max(60.0) };
+    let wide_h = if nw == 0 { 0.0 } else { (wide_frac * total).clamp_safe(90.0, 0.65 * inner / nw as f32).max(60.0) };
     let rest = (inner - wide_h * nw as f32).max(60.0 * np as f32);
     let mut plots = plot_share(rest).into_iter();
     wide.iter().map(|w| if *w { wide_h } else { plots.next().unwrap_or(60.0) }).collect()

@@ -32,9 +32,9 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 /// What the file says about itself (the `note` key).
-const NOTE: &str = "AMS Studio dependency file of this _geo folder; keep it with the _geo files. files: the drill core reorientation (dip direction and plunge of the hole, the offset of the orientation line from the arrow mark, the face that holds the arrow and its direction) of every record of the .ams files here, which stay exact copies of their sources; the geographic view is computed from it. core_viewer: the folder with the cube photos of this specimen (photo_folder is absolute, photo_folder_relative_to_this_file still works when the data tree is synced elsewhere). stereonet: planes drawn as great circles in the geographic stereonet (dip direction and dip in degrees, a comment, a colour): planes_specimen are for this specimen only, planes_global are shown for every specimen and copied into the file of each specimen of the file tree. location: where this specimen was taken (x, y and crs as typed or taken from a datasheet, lon and lat computed from them), used by the GIS viewer. view: the coordinate system (specimen, geographic, paleo, tectonic) this specimen was last shown in, restored when its file is opened.";
+const NOTE: &str = "AMS Studio dependency file of this _geo folder; keep it with the _geo files. files: the drill core reorientation (dip direction and plunge of the hole, the offset of the orientation line from the arrow mark, the face that holds the arrow and its direction) of every record of the .ams files here, which stay exact copies of their sources; the geographic view is computed from it. core_viewer: the folder with the cube photos of this specimen (photo_folder is absolute, photo_folder_relative_to_this_file still works when the data tree is synced elsewhere). stereonet: planes drawn as great circles in the geographic stereonet (dip direction and dip in degrees, a comment, a colour): planes_specimen are for this specimen only, planes_global are shown for every specimen and copied into the file of each specimen of the file tree. location: where this specimen was taken (x, y and crs as typed or taken from a datasheet, lon and lat computed from them), used by the GIS viewer. view: the coordinate system (specimen, geographic, paleo, tectonic) this specimen was last shown in, restored when its file is opened. specimens: when this folder holds the files of several specimens (told apart by the specimen ID in the file names), location and view are kept per specimen ID in here ({ID: {location, view}}) instead of at the top level, so that each specimen has its own.";
 /// The sections other than `files`.
-const SECTIONS: [&str; 4] = ["core_viewer", "stereonet", "location", "view"];
+const SECTIONS: [&str; 5] = ["core_viewer", "stereonet", "location", "view", "specimens"];
 
 /// `<specimen folder>_geo/<specimen folder>_geo_dependancy.json` for any file of a specimen: the source file in the
 /// specimen folder, or its copy in the `_geo` folder.
@@ -91,6 +91,103 @@ pub fn write_section(json_path: &Path, key: &str, val: Option<Value>) -> std::io
         std::fs::create_dir_all(d)?;
     }
     std::fs::write(json_path, serde_json::to_string_pretty(&v).unwrap_or_default() + "\n")
+}
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+type DirCache = HashMap<PathBuf, (Instant, Vec<String>)>;
+static DIR_CACHE: Mutex<Option<DirCache>> = Mutex::new(None);
+
+/// File stems (without a trailing `_geo`) of the `.ams` / `.ran` files of a folder, remembered for a few seconds (the
+/// GIS pane asks for every file of the tree).
+fn data_stems(dir: &Path) -> Vec<String> {
+    if let Ok(mut g) = DIR_CACHE.lock() {
+        let c = g.get_or_insert_with(HashMap::new);
+        if let Some((t, v)) = c.get(dir) {
+            if t.elapsed() < Duration::from_secs(3) {
+                return v.clone();
+            }
+        }
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.path().is_file())
+                    .filter_map(|e| {
+                        let n = e.file_name().to_string_lossy().to_string();
+                        let (st, ext) = n.rsplit_once('.')?;
+                        (ext.eq_ignore_ascii_case("ams") || ext.eq_ignore_ascii_case("ran")).then(|| st.strip_suffix("_geo").unwrap_or(st).to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v.dedup();
+        c.insert(dir.to_path_buf(), (Instant::now(), v.clone()));
+        return v;
+    }
+    vec![]
+}
+
+/// The specimen ID of a file when its folder holds the files of several specimens (two or more different IDs by the
+/// rules of `specset::detect_scheme`: a 7-digit number, another digit count or the first part of the name), else `None`:
+/// one specimen per folder, whose location and view are the folder's. A copy in a `_geo` folder gets the ID of its source.
+pub fn specimen_key(file: &Path) -> Option<String> {
+    let dir = file.parent()?;
+    let leaf = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let source_dir = if crate::specset::is_result_folder(&leaf) { dir.parent()? } else { dir };
+    let stems = data_stems(source_dir);
+    let sc = crate::specset::detect_scheme(&stems)?;
+    let stem = file.file_stem()?.to_string_lossy().to_string();
+    sc.id_of(stem.strip_suffix("_geo").unwrap_or(&stem))
+}
+
+/// A section for one file: the folder's section, or, in a folder with several specimens, the section of the specimen
+/// this file belongs to (kept under `specimens`).
+pub fn read_section_for(file: &Path, key: &str) -> Option<Value> {
+    let json = for_source(file);
+    match specimen_key(file) {
+        None => read_section(&json, key),
+        Some(id) => read_section(&json, "specimens")?.get(&id)?.get(key).cloned().filter(|x| !x.is_null()),
+    }
+}
+
+/// Sets or removes (`None`) a section for one file (see `read_section_for`); the other specimens' sections stay.
+pub fn write_section_for(file: &Path, key: &str, val: Option<Value>) -> std::io::Result<()> {
+    let json = for_source(file);
+    let Some(id) = specimen_key(file) else { return write_section(&json, key, val) };
+    let mut all = read_section(&json, "specimens").filter(|v| v.is_object()).unwrap_or_else(|| json!({}));
+    let mut mine = all.get(&id).cloned().filter(|v| v.is_object()).unwrap_or_else(|| json!({}));
+    match val {
+        Some(v) => mine[key] = v,
+        None => {
+            if let Some(o) = mine.as_object_mut() {
+                o.remove(key);
+            }
+        }
+    }
+    if mine.as_object().map_or(true, |o| o.is_empty()) {
+        if let Some(o) = all.as_object_mut() {
+            o.remove(&id);
+        }
+    } else {
+        all[&id] = mine;
+    }
+    let empty = all.as_object().map_or(true, |o| o.is_empty());
+    write_section(&json, "specimens", if empty { None } else { Some(all) })
+}
+
+/// The coordinate system this file was last shown in (per specimen where a folder holds several).
+pub fn read_view_for(file: &Path) -> Option<crate::coords::CoordSys> {
+    read_section_for(file, "view")?.get("coordinates")?.as_str().and_then(crate::coords::CoordSys::from_token)
+}
+
+pub fn write_view_for(file: &Path, cs: crate::coords::CoordSys) -> std::io::Result<()> {
+    if read_view_for(file) == Some(cs) {
+        return Ok(());
+    }
+    write_section_for(file, "view", Some(json!({ "coordinates": cs.token() })))
 }
 
 /// The coordinate system the specimen was last shown in (`view` section), if one was stored.
@@ -256,5 +353,49 @@ mod tests {
         assert_eq!(for_source(Path::new("/d/DC26AB002_AMS/DC26AB002_use.ams")), PathBuf::from("/d/DC26AB002_AMS/DC26AB002_AMS_geo/DC26AB002_AMS_geo_dependancy.json"));
         assert_eq!(for_source(Path::new("/d/DC26AB002_AMS/DC26AB002_AMS_geo/DC26AB002_use_geo.ams")), PathBuf::from("/d/DC26AB002_AMS/DC26AB002_AMS_geo/DC26AB002_AMS_geo_dependancy.json"));
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn specimens_that_share_a_folder_keep_their_own_location_and_view() {
+        let dir = std::env::temp_dir().join(format!("depjson-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["1234567_use.ams", "1234567_raw.ams", "1234568_use.ams", "1234569.ams"] {
+            std::fs::write(dir.join(f), b"").unwrap();
+        }
+        let (a, b, c) = (dir.join("1234567_use.ams"), dir.join("1234568_use.ams"), dir.join("1234569.ams"));
+        assert_eq!(specimen_key(&a).as_deref(), Some("1234567"));
+        assert_eq!(specimen_key(&dir.join("1234567_raw.ams")).as_deref(), Some("1234567"), "the files of one specimen share it");
+        write_section_for(&a, "location", Some(json!({"x": 1.0}))).unwrap();
+        write_section_for(&b, "location", Some(json!({"x": 2.0}))).unwrap();
+        write_view_for(&a, crate::coords::CoordSys::Geographic).unwrap();
+        assert_eq!(read_section_for(&a, "location").unwrap()["x"], 1.0);
+        assert_eq!(read_section_for(&b, "location").unwrap()["x"], 2.0);
+        assert_eq!(read_section_for(&dir.join("1234567_raw.ams"), "location").unwrap()["x"], 1.0);
+        assert!(read_section_for(&c, "location").is_none(), "a third specimen has none of the others'");
+        assert_eq!(read_view_for(&a), Some(crate::coords::CoordSys::Geographic));
+        assert_eq!(read_view_for(&b), None);
+        // a copy in the _geo folder finds the same entries
+        let leaf = dir.file_name().unwrap().to_string_lossy().to_string();
+        let copy = dir.join(format!("{leaf}_geo")).join("1234567_use_geo.ams");
+        assert_eq!(read_section_for(&copy, "location").unwrap()["x"], 1.0);
+        // removing one leaves the other; removing both removes the file
+        write_section_for(&a, "location", None).unwrap();
+        assert!(read_section_for(&a, "location").is_none() && read_section_for(&b, "location").is_some());
+        write_section_for(&b, "location", None).unwrap();
+        write_section_for(&a, "view", None).unwrap();
+        assert!(!for_source(&a).is_file(), "nothing left, no file");
+        // one specimen per folder: the folder's own sections as before
+        let single = std::env::temp_dir().join(format!("depjson-single-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&single);
+        std::fs::create_dir_all(&single).unwrap();
+        for f in ["ER01_use.ams", "ER01_old.ams"] {
+            std::fs::write(single.join(f), b"").unwrap();
+        }
+        assert_eq!(specimen_key(&single.join("ER01_use.ams")), None);
+        write_section_for(&single.join("ER01_use.ams"), "location", Some(json!({"x": 5.0}))).unwrap();
+        assert_eq!(read_section(&for_source(&single.join("ER01_old.ams")), "location").unwrap()["x"], 5.0);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&single);
     }
 }

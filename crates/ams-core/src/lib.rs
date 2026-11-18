@@ -13,6 +13,7 @@ pub mod lab;
 pub mod orient;
 pub mod owens_table;
 pub mod params;
+pub mod phases;
 pub mod recombine;
 pub mod specset;
 pub mod stats;

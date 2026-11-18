@@ -1,4 +1,5 @@
 use crate::doc::{self, Derived, Doc};
+use crate::util::SafeClamp;
 use crate::icons::{self, Icon};
 use ams_core::georot::GeoRot;
 use pane_cfg::PaneCfg;
@@ -15,6 +16,7 @@ mod core_ui;
 mod export_ui;
 mod gis_collar;
 mod gis_filter;
+mod gis_arcgis;
 mod gis_qgis;
 mod gis_data;
 mod gis_georef;
@@ -30,6 +32,9 @@ mod pane_cfg;
 mod pane_layout;
 mod prefs_ext;
 mod owens_file_ui;
+mod phase_join_ui;
+mod seed;
+mod selftest;
 mod recombine_ui;
 mod specset_ui;
 mod spec_view;
@@ -103,6 +108,7 @@ pub enum Action {
     GisBackdropSource(gis_data::BaseSource),
     GisAddLayer,
     GisImportQgis,
+    GisUndoLayers,
     GisToggleLayer(u32),
 }
 
@@ -309,6 +315,8 @@ const W_SORT: usize = 23;
 const W_GIS_TABLE: usize = 24;
 const W_GIS_LOC: usize = 25;
 const W_GIS_MANUAL: usize = 26;
+const W_PHASE: usize = 27;
+const W_RECOMB_ASK: usize = 28;
 
 struct ShotJob {
     copy: bool,
@@ -381,6 +389,24 @@ fn angle_drag(v: &mut f64, k: usize) -> egui::DragValue<'_> {
 }
 
 /// A small "i" in a circle that explains something when hovered.
+/// The one line at the top of a window that says what to do here, with the details behind a circled (i).
+pub(super) fn guide(ui: &mut Ui, what: &str, tip: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(what).strong());
+        info_icon(ui, tip);
+    });
+}
+
+/// A check box with its explanation behind a circled (i).
+pub(super) fn check_i(ui: &mut Ui, value: &mut bool, label: &str, tip: &str) -> bool {
+    ui.horizontal(|ui| {
+        let c = ui.checkbox(value, label).changed();
+        info_icon(ui, tip);
+        c
+    })
+    .inner
+}
+
 fn info_icon(ui: &mut Ui, text: &str) {
     // small and raised like a superscript; the whole cell around it answers to the pointer
     let row = ui.spacing().interact_size.y;
@@ -533,6 +559,9 @@ pub struct App {
     /// The file the browser tree last showed as current (to scroll to it when it changes).
     tree_cur: Option<PathBuf>,
     win_recomb: bool,
+    win_recomb_ask: bool,
+    win_phase: bool,
+    pj: phase_join_ui::PhaseJoin,
     rc: recombine_ui::RecState,
     win_vol: bool,
     /// Sort and filter of the specimens pane (display only).
@@ -556,6 +585,7 @@ pub struct App {
     sd: specset_ui::SetDialog,
     set: Option<specset_ui::SpecSet>,
     last_ident: String,
+    set_opts: specset_ui::SetOpts,
     /// Zoom and pan of the stereonet.
     st_view: NetView,
     win_classes: bool,
@@ -587,7 +617,8 @@ pub struct App {
     info: Option<String>,
     hover: [String; 4],
     last_anchor: Option<usize>,
-    win_serial: [u64; 28],
+    win_serial: [u64; 32],
+    crash: CrashState,
     list_drag: Option<ListDrag>,
     tools: tools_ui::ToolsState,
     tool_copy: Option<Rect>,
@@ -614,6 +645,25 @@ pub fn saved_window() -> (Option<[f32; 2]>, bool) {
 /// The user's home folder on any platform ($HOME on Linux/macOS, %USERPROFILE% on Windows).
 pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default()
+}
+
+/// The headless walk through every menu and window (`--selftest <report>`); the number of failed steps.
+pub fn selftest(out: &Path) -> usize {
+    selftest::run(out)
+}
+
+pub fn demo_tree(dir: &Path) {
+    selftest::write_data(dir)
+}
+
+/// `ams-studio --write-seed [--force]`: this computer's setup as the seed for another computer with the same SynologyDrive
+/// folder (see `app/seed.rs`). Returns the text to show.
+pub fn write_seed_cli(force: bool) -> Result<String, String> {
+    seed::write_seed(&config_dir().join("ams-studio"), &home_dir(), force, &chrono::Local::now().format("%Y-%m-%d %H:%M").to_string())
+}
+
+pub fn config_dir_pub() -> PathBuf {
+    config_dir()
 }
 
 /// Where the layout and preferences are kept: $XDG_CONFIG_HOME or ~/.config on Linux,
@@ -644,6 +694,11 @@ fn read_state_text() -> Option<String> {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>) -> App {
+        Self::create(&cc.egui_ctx, open)
+    }
+
+    /// The program without a window (the self-test builds it the same way).
+    pub fn create(egui_ctx: &egui::Context, open: Option<PathBuf>) -> App {
         let mut app = App {
             doc: None,
             derived: vec![],
@@ -742,6 +797,9 @@ impl App {
             restore_file: None,
             tree_cur: None,
             win_recomb: false,
+            win_recomb_ask: false,
+            win_phase: false,
+            pj: Default::default(),
             rc: Default::default(),
             win_vol: false,
             sv: spec_view::SpecView::default(),
@@ -762,6 +820,7 @@ impl App {
             sd: Default::default(),
             set: None,
             last_ident: String::new(),
+            set_opts: Default::default(),
             st_view: NetView::default(),
             win_classes: false,
             edit: Default::default(),
@@ -783,7 +842,8 @@ impl App {
             info: None,
             hover: Default::default(),
             last_anchor: None,
-            win_serial: [0; 28],
+            win_serial: [0; 32],
+            crash: Default::default(),
             list_drag: None,
             tools: Default::default(),
             tool_copy: None,
@@ -791,8 +851,13 @@ impl App {
             shot_box: Default::default(),
             last_title: String::new(),
         };
+        // a setup that another computer with the same SynologyDrive folder left for this one is taken over once
+        let taken = if std::env::var_os("AMS_STUDIO_NO_SEED").is_some() { seed::Taken::No } else { seed::take_over(&config_dir().join("ams-studio"), &home_dir(), &seed::host_name()) };
         app.load_state();
         app.load_plots();
+        if let seed::Taken::Yes(m) = taken {
+            app.info = Some(m);
+        }
         // what is in the file now counts as saved: only changes after this are written
         app.state_saved = app.state_text();
         app.plots_saved = app.plots_text();
@@ -801,12 +866,12 @@ impl App {
         if app.dark {
             std::mem::swap(&mut app.k_colors, &mut app.k_other);
         }
-        apply_style(&cc.egui_ctx, app.dark);
+        apply_style(egui_ctx, app.dark);
         if open.is_none() {
             // like TX Studio: start where the last session ended
             if let Some(root) = app.restore_root.take() {
                 let f = app.restore_file.take();
-                app.restore_set(&cc.egui_ctx, root, f);
+                app.restore_set(egui_ctx, root, f);
             } else if let Some(f) = app.restore_file.take() {
                 app.open_path(f);
             }
@@ -814,7 +879,7 @@ impl App {
         if let Some(p) = open {
             if p.is_dir() {
                 // a folder on the command line is treated as the parent of the specimen folders
-                app.begin_scan(&cc.egui_ctx, p);
+                app.begin_scan(egui_ctx, p);
             } else {
                 app.open_path(p);
             }
@@ -849,6 +914,11 @@ impl App {
                 "maximized" => self.win_max = v == "1",
                 "owens_new" => self.owens_old = v != "1",
                 "set_ident" => self.last_ident = v.to_string(),
+                "set_opts" => {
+                    if let Some(o) = specset_ui::SetOpts::from_text(v) {
+                        self.set_opts = o;
+                    }
+                }
                 "set_root" if Path::new(v).is_dir() => self.restore_root = Some(PathBuf::from(v)),
                 "last_file" if Path::new(v).is_file() => self.restore_file = Some(PathBuf::from(v)),
                 "browser" => self.browser_open = v != "0",
@@ -931,7 +1001,7 @@ impl App {
     /// The preferences as text: the layout, the panes and their settings, the specimen list, the GIS pane.
     fn state_text(&self) -> String {
         let mut t = format!(
-                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nuse_p={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_root={}\nlast_file={}\ncore_on={}\ncore_root={}\ncore_needle={}\ncore_frac={}\ncore_fit_all={}\nst_planes={}\nst_plane_comments={}\nst_plane_conv={}\nst_plane_new_spec={}\noop_highlight={}\ngfrac={}\npanes={}\ngis_pane={}\ngis_frac={}\ngis_popped={}\nupdate_check={}\n",
+                "last_dir={}\ndark={}\nbrowser={}\nhfrac={}\nvfrac={}\nuse_p={}\nmarker={}\nbrowser_w={}\nspec_w={}\nwin_w={}\nwin_h={}\nmaximized={}\nowens_new={}\nset_ident={}\nset_opts={}\nset_root={}\nlast_file={}\ncore_on={}\ncore_root={}\ncore_needle={}\ncore_frac={}\ncore_fit_all={}\nst_planes={}\nst_plane_comments={}\nst_plane_conv={}\nst_plane_new_spec={}\noop_highlight={}\ngfrac={}\npanes={}\ngis_pane={}\ngis_frac={}\ngis_popped={}\nupdate_check={}\n",
                 self.browser_dir.display(),
                 self.dark as u8,
                 self.browser_open as u8,
@@ -946,6 +1016,7 @@ impl App {
                 self.win_max as u8,
                 (!self.owens_old) as u8,
                 self.last_ident.replace(['\n', '\r'], ""),
+                self.set_opts.to_text(),
                 self.set.as_ref().map(|s| s.root.display().to_string()).unwrap_or_default(),
                 self.doc.as_ref().filter(|d| !d.synthetic).map(|d| d.path.display().to_string()).unwrap_or_default(),
                 self.cv.on as u8,
@@ -1192,7 +1263,7 @@ impl App {
         self.coord = c;
         self.dirty = true;
         if let Some(d) = self.doc.as_ref().filter(|d| !d.synthetic) {
-            let _ = ams_core::depjson::write_view(&ams_core::depjson::for_source(&d.path), c);
+            let _ = ams_core::depjson::write_view_for(&d.path, c);
         }
     }
 
@@ -1205,7 +1276,10 @@ impl App {
         let restored = self.stash.remove(&p);
         let opened = match restored {
             Some(d) => Ok(d),
-            None => Doc::open(&p),
+            None => {
+                let partner = self.partner_in_set(&p);
+                Doc::open_with(&p, partner.as_deref())
+            }
         };
         let fresh = !self.stash.contains_key(&p);
         match opened {
@@ -1236,7 +1310,7 @@ impl App {
                 }
                 // the coordinate system this specimen was last shown in; a specimen with none stored keeps the current one
                 if !d.synthetic {
-                    if let Some(c) = ams_core::depjson::read_view(&ams_core::depjson::for_source(&p)) {
+                    if let Some(c) = ams_core::depjson::read_view_for(&p) {
                         self.coord = c;
                     }
                 }
@@ -1340,11 +1414,12 @@ impl App {
     // ---------------------------------------------------------------- actions
 
     fn run(&mut self, ctx: &egui::Context, a: Action) {
+        self.crash.last = format!("{a:?}");
         let has = self.doc.is_some();
         match a {
             Action::Open => {
                 // several files can be chosen (Ctrl / Shift); a whole folder of specimens is File > Open Folder of Specimens
-                let mut dlg = rfd::FileDialog::new().add_filter("AMS files", &["ams"]).set_title("Open Data File(s)  (for a whole folder of specimens: File > Open Folder of Specimens, Ctrl+Shift+O)");
+                let mut dlg = crate::fdialog::FileDialog::new().add_filter("AMS and RAN files", &["ams", "ran"]).set_title("Open Data File(s)  (for a whole folder of specimens: File > Open Folder of Specimens, Ctrl+Shift+O)");
                 if self.browser_dir.is_dir() {
                     dlg = dlg.set_directory(&self.browser_dir);
                 }
@@ -1395,7 +1470,7 @@ impl App {
                         (g.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or("active.ams".into()), g.parent().map(|p| p.to_path_buf()))
                     };
                     let made_dir = geo_dir.as_ref().filter(|g| !g.exists() && std::fs::create_dir_all(g).is_ok()).cloned();
-                    let mut dlg = rfd::FileDialog::new().add_filter("AMS files", &["ams"]).set_file_name(name).set_title("Save the active records (default: the specimen folder's _geo folder)");
+                    let mut dlg = crate::fdialog::FileDialog::new().add_filter("AMS files", &["ams"]).set_file_name(name).set_title("Save the active records (default: the specimen folder's _geo folder)");
                     if let Some(g) = geo_dir.as_ref().filter(|g| g.is_dir()) {
                         dlg = dlg.set_directory(g);
                     }
@@ -1427,7 +1502,7 @@ impl App {
                 if let Some(d) = &self.doc {
                     if d.n_selected() == 0 {
                         self.info = Some("Select some specimens first.".into());
-                    } else if let Some(p) = rfd::FileDialog::new().add_filter("AMS files", &["ams"]).set_title("Append selected records into...").pick_file() {
+                    } else if let Some(p) = crate::fdialog::FileDialog::new().add_filter("AMS files", &["ams"]).set_title("Append selected records into...").pick_file() {
                         let ok = std::fs::metadata(&p).map_or(false, |m| m.len() % ams_core::ams::RECORD_LEN as u64 == 0);
                         if !ok {
                             self.info = Some("That is not a valid .ams file (size is not a multiple of 640 bytes).".into());
@@ -1445,7 +1520,7 @@ impl App {
             Action::ExportCsv => {
                 if let Some(d) = &self.doc {
                     let name = d.path.file_stem().map(|s| format!("{}_ip_op.csv", s.to_string_lossy())).unwrap_or("export.csv".into());
-                    if let Some(p) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(name).save_file() {
+                    if let Some(p) = crate::fdialog::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(name).save_file() {
                         let rows: Vec<&_> = (0..d.specs.len()).filter(|&i| d.active[i]).map(|i| &d.specs[i]).collect();
                         if let Err(e) = std::fs::write(&p, export::csv_both(&rows)) {
                             self.info = Some(format!("Could not export: {e}"));
@@ -1460,7 +1535,7 @@ impl App {
                         self.info = Some("Nothing is selected. Select specimens first (click, drag, or a rubber band in a plot).".into());
                     } else {
                         let name = d.path.file_stem().map(|s| format!("{}_selection_ip_op.csv", s.to_string_lossy())).unwrap_or("selection.csv".into());
-                        if let Some(p) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(name).save_file() {
+                        if let Some(p) = crate::fdialog::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(name).save_file() {
                             if let Err(e) = std::fs::write(&p, export::csv_both(&rows)) {
                                 self.info = Some(format!("Could not export: {e}"));
                             }
@@ -1529,7 +1604,7 @@ impl App {
                         None
                     } else {
                         let stem = self.doc.as_ref().and_then(|d| d.path.file_stem()).map(|s| s.to_string_lossy().to_string()).unwrap_or("ams-studio".into());
-                        match rfd::FileDialog::new().add_filter("PNG base name", &["png"]).set_file_name(format!("{stem}.png")).set_title("Save Graphics To File").save_file() {
+                        match crate::fdialog::FileDialog::new().add_filter("PNG base name", &["png"]).set_file_name(format!("{stem}.png")).set_title("Save Graphics To File").save_file() {
                             Some(p) => Some(p),
                             None => return,
                         }
@@ -1615,15 +1690,15 @@ impl App {
                     self.gis.load_map_file(ctx, p);
                 }
             }
+            Action::GisUndoLayers => {
+                self.gis.info = match self.gis.undo_layers(ctx) {
+                    Some(w) => format!("Undone: {w}."),
+                    None => "Nothing to undo.".to_string(),
+                };
+            }
             Action::GisImportQgis => {
-                if let Some(p) = gis_ui::pick_file("QGIS project", "QGIS project", &["qgz", "qgs"], "AMS_STUDIO_GIS_QGIS") {
-                    if !self.gis_on {
-                        self.toggle_gis();
-                    }
-                    if let Err(e) = self.gis.import_qgis(&p) {
-                        self.gis.info.clear();
-                        self.gis.map_err = e;
-                    }
+                if let Some(p) = gis_ui::pick_file("QGIS or ArcGIS project", "QGIS and ArcGIS projects", &["qgz", "qgs", "aprx", "lyrx", "mapx", "mxd", "lyr"], "AMS_STUDIO_GIS_QGIS") {
+                    self.gis_import_project(&p);
                 }
             }
             Action::GisToggleLayer(id) => match self.gis.layers.get(id).map(|i| i.kind) {
@@ -1672,7 +1747,7 @@ impl App {
     /// A dialog, pop-out or message is open (the egui drop-down menus are asked separately).
     fn any_dialog_open(&self) -> bool {
         self.palette.open || self.win_table || self.win_group || self.win_contour || self.win_orient || self.win_colors || self.win_factors || self.win_about || self.up.window || self.win_edit
-            || self.win_export || self.win_recomb || self.win_vol || self.win_sort || self.win_gis || self.gis.win_georef || self.gis.win_table || self.gis.loc.win || self.gis.manual.win || self.win_core || self.cv.win || self.win_set || self.win_classes || self.win_owens
+            || self.win_export || self.win_recomb || self.win_recomb_ask || self.win_phase || self.win_vol || self.win_sort || self.win_gis || self.gis.win_georef || self.gis.win_table || self.gis.loc.win || self.gis.manual.win || self.win_core || self.cv.win || self.win_set || self.win_classes || self.win_owens
             || self.tools.open.iter().any(|o| *o) || self.info.is_some() || self.quit_prompt || self.pane_settings.iter().any(|o| *o)
     }
 
@@ -1689,6 +1764,8 @@ impl App {
         self.win_edit = false;
         self.win_export = false;
         self.win_recomb = false;
+        self.win_recomb_ask = false;
+        self.win_phase = false;
         self.win_vol = false;
         self.win_sort = false;
         self.win_gis = false;
@@ -2034,10 +2111,127 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         // what draws the window; software rendering is held to 30 frames per second so a computer without a graphics
         // card (or a virtual machine) stays usable while something is dragged
+        if self.gpu_info.is_empty() {
+            let (s, soft) = gpu_summary(frame);
+            self.gpu_info = s;
+            self.software_render = soft;
+        }
+        self.guarded_frame(ui);
+    }
+}
+
+/// What is known about errors that were caught.
+#[derive(Default)]
+pub(crate) struct CrashState {
+    /// Frames in a row that ended in an error.
+    pub streak: u32,
+    /// Message of the last error, shown until closed.
+    pub notice: Option<String>,
+    /// The step the program was in (the last action started).
+    pub last: String,
+    /// Errors caught since the program started.
+    pub total: u32,
+    /// Too many errors in a row: only the recovery page is drawn.
+    pub rescue: bool,
+}
+
+impl App {
+    /// One frame, protected: an error inside it (a panic) is logged and shown, the windows are closed, and the program
+    /// goes on with the next frame instead of closing.
+    pub(crate) fn guarded_frame(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        if self.crash.rescue {
+            self.rescue_ui(ui);
+            return;
+        }
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.ui_body(ui)));
+        match r {
+            Ok(()) => self.crash.streak = 0,
+            Err(_) => {
+                self.crash.streak += 1;
+                self.crash.total += 1;
+                let msg = crate::crash::take_last().unwrap_or_else(|| "unknown error".to_string());
+                self.crash.notice = Some(format!("{msg}\n\nStep: {}", if self.crash.last.is_empty() { "(none)" } else { &self.crash.last }));
+                // what may have caused it: the windows go, then the open file, then only the recovery page
+                self.close_all_dialogs();
+                self.sd = Default::default();
+                if self.crash.streak >= 2 {
+                    self.doc = None;
+                    self.derived.clear();
+                    self.dirty = true;
+                }
+                if self.crash.streak >= 4 {
+                    self.crash.rescue = true;
+                }
+                ctx.request_repaint();
+            }
+        }
+        self.crash_notice(&ctx);
+    }
+
+    fn crash_notice(&mut self, ctx: &egui::Context) {
+        let Some(msg) = self.crash.notice.clone() else { return };
+        let mut open = true;
+        let mut ok = false;
+        egui::Window::new("AMS Studio caught an error").open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            tools_ui::pop_style(ui, 1.25);
+            ui.set_max_width(640.0);
+            ui.label(RichText::new("Something went wrong and the step was stopped. The program is still running; your files were not changed.").strong());
+            ui.add_space(4.0);
+            ui.label(RichText::new(&msg).small().monospace());
+            ui.add_space(4.0);
+            ui.label(RichText::new(format!("The details were saved to {}", crate::crash::log_path().display())).small().weak());
+            ui.horizontal(|ui| {
+                ok = ui.add(egui::Button::new(RichText::new("OK").strong())).clicked();
+                if ui.button("Copy the details").clicked() {
+                    ui.ctx().copy_text(format!("AMS Studio {}\n{}", env!("CARGO_PKG_VERSION"), msg));
+                }
+            });
+        });
+        if ok || !open {
+            self.crash.notice = None;
+        }
+    }
+
+    /// After several errors in a row: nothing but a way out.
+    fn rescue_ui(&mut self, ui: &mut Ui) {
+        let mut retry = false;
+        egui::CentralPanel::default().show(ui, |ui| {
+            tools_ui::pop_style(ui, 1.3);
+            ui.heading("AMS Studio keeps hitting an error");
+            ui.label("The last steps all failed, so the program stopped drawing its windows. Nothing was changed on disk.");
+            if let Some(m) = &self.crash.notice {
+                ui.label(RichText::new(m).small().monospace());
+            }
+            ui.label(RichText::new(format!("Details: {}", crate::crash::log_path().display())).small().weak());
+            retry = ui.button("Try again").clicked();
+        });
+        if retry {
+            self.crash.rescue = false;
+            self.crash.streak = 0;
+            self.crash.notice = None;
+        }
+    }
+
+    fn ui_body(&mut self, ui: &mut Ui) {
         // headless test hook: AMS_STUDIO_OPEN_WINDOW=sort opens that window once on the first frame
         if let Some(w) = self.test_window.take() {
             match w.as_str() {
                 "sort" => self.open_win(W_SORT),
+                "recombine" => self.open_win(W_RECOMB_ASK),
+                "phase-one" | "phase-many" => {
+                    self.pj.goal = if w == "phase-one" { phase_join_ui::Goal::One } else { phase_join_ui::Goal::Many };
+                    if let Some(p) = std::env::var_os("AMS_STUDIO_PHASE_IP") {
+                        self.pj.set_ip(PathBuf::from(p));
+                    }
+                    if let Some(r) = std::env::var_os("AMS_STUDIO_PHASE_ROOT") {
+                        if std::env::var("AMS_STUDIO_PHASE_KIND").as_deref() == Ok("ran") {
+                            self.pj.kind = ams_core::specset::Kind::Ran;
+                        }
+                        self.pj.scan_many(PathBuf::from(r));
+                    }
+                    self.open_win(W_PHASE);
+                }
                 "palette" => {
                     // the command palette, with AMS_STUDIO_PALETTE_QUERY typed into it
                     self.palette_toggle();
@@ -2108,11 +2302,6 @@ impl eframe::App for App {
                 self.up.check(ui.ctx(), false);
             }
         }
-        if self.gpu_info.is_empty() {
-            let (s, soft) = gpu_summary(frame);
-            self.gpu_info = s;
-            self.software_render = soft;
-        }
         let cap = match MAX_FPS.load(std::sync::atomic::Ordering::Relaxed) {
             0 => None,
             u32::MAX => self.software_render.then_some(30),
@@ -2141,7 +2330,12 @@ impl eframe::App for App {
         }
         self.track_layout(&ctx);
         // files or a folder dropped on the window: a folder is a folder of specimens, .ams files are opened
-        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        let mut dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        // a QGIS or ArcGIS project dropped on the window adds its layers to the GIS pane (it is only read)
+        for p in dropped.iter().filter(|p| gis_ui::is_project_file(p)).cloned().collect::<Vec<_>>() {
+            self.gis_import_project(&p);
+        }
+        dropped.retain(|p| !gis_ui::is_project_file(p));
         if !dropped.is_empty() {
             if let Some(dir) = dropped.iter().find(|p| p.is_dir()) {
                 self.begin_scan(&ctx, dir.clone());
@@ -2402,7 +2596,8 @@ impl eframe::App for App {
                     });
                     ui.separator();
                     if item(ui, "Add layer (map, shapefile, GeoPackage, GeoJSON) ...", "", true) { actions.push(Action::GisAddLayer) }
-                    if item(ui, "Add layers of a QGIS project (.qgz, .qgs) ...", "", true) { actions.push(Action::GisImportQgis) }
+                    if item(ui, "Add layers of a QGIS or ArcGIS project (.qgz, .qgs, .aprx, .lyrx, .mapx, .mxd) ...", "", true) { actions.push(Action::GisImportQgis) }
+                    if item(ui, "Undo the last layer removal", "Ctrl+Z over the layers list", !self.gis.layer_undo.is_empty()) { actions.push(Action::GisUndoLayers) }
                     if item(ui, "Fit the map to the data", "", true) { actions.push(Action::GisFit) }
                     ui.separator();
                     if item(ui, "Specimen locations (from a datasheet) ...", "", true) { actions.push(Action::GisLocations) }
@@ -2627,9 +2822,13 @@ impl App {
         let fixed = 5.0 * 92.0;
         let flex = ((rect.width() - fixed) / 3.0).max(60.0);
         let mut x = rect.min.x;
-        for (text, col, f) in cells {
+        let note = self.doc.as_ref().and_then(|d| d.note.clone());
+        for (ci, (text, col, f)) in cells.into_iter().enumerate() {
             let w = if f == 0.0 { 92.0 } else { flex };
             let r = Rect::from_min_size(Pos2::new(x, rect.min.y), Vec2::new(w, h));
+            if let (6, Some(n)) = (ci, &note) {
+                ui.interact(r, ui.make_persistent_id("status-note"), Sense::hover()).on_hover_text(format!("This file was made from other data: {n}"));
+            }
             let col = if dark { col.gamma_multiply(0.62) } else { col };
             ui.painter().rect_filled(r.shrink(1.0), 4.0, col);
             let tc = if dark { Color32::WHITE } else { Color32::BLACK };
@@ -3042,6 +3241,19 @@ impl App {
         }
     }
 
+    /// Adds the layers of a QGIS or ArcGIS project to the GIS pane (opening the pane); can be undone as one block.
+    pub(super) fn gis_import_project(&mut self, p: &Path) {
+        if !self.gis_on {
+            self.toggle_gis();
+        }
+        self.gis.snapshot_layers("added the layers of a project");
+        if let Err(e) = self.gis.import_qgis(p) {
+            self.gis.layer_undo.pop();
+            self.gis.info.clear();
+            self.gis.map_err = e;
+        }
+    }
+
     pub(super) fn toggle_gis(&mut self) {
         self.gis_on = !self.gis_on;
         if self.gis_on && self.gis.placed.is_empty() && self.gis.n_files == 0 {
@@ -3403,7 +3615,7 @@ impl App {
             let r = framed.response.rect;
             popup_h = r.height();
             if dir != 0 {
-                let bx = arrow.center().x.clamp(r.min.x + 16.0, r.max.x - 16.0);
+                let bx = arrow.center().x.clamp_safe(r.min.x + 16.0, r.max.x - 16.0);
                 let (fill, stroke) = (ui.visuals().window_fill(), ui.visuals().window_stroke());
                 let pa = ui.painter();
                 let (base, sgn) = if dir > 0 { (r.min.y, -1.0f32) } else { (r.max.y, 1.0f32) };
@@ -3618,6 +3830,8 @@ impl App {
             W_CORE => self.win_core = true,
             W_COREVIEW => self.cv.win = true,
             W_RECOMB => self.win_recomb = true,
+            W_RECOMB_ASK => self.win_recomb_ask = true,
+            W_PHASE => self.win_phase = true,
             W_EXPORT => self.win_export = true,
             _ => {}
         }
@@ -3795,6 +4009,7 @@ impl App {
         let mut open = self.win_factors;
         self.base_window(ctx, "Anisotropy Quantitative Factors", W_FACTORS, Vec2::new(900.0, 480.0)).open(&mut open).resizable(false).show(ctx, |ui| {
             tools_ui::pop_style(ui, 1.4);
+            guide(ui, "How the shape and degree parameters of the anisotropy are calculated.", "Reference only: the formulas AMS Studio uses for L, F, P, Pj, T, U, Q and E, from the three eigenvalues K1 >= K2 >= K3 of a specimen.");
             egui::Grid::new("fx").striped(true).show(ui, |ui| {
                 for (n, f) in [
                     ("L", "K1 / K2"), ("F", "K2 / K3"), ("P", "K1 / K3"),
@@ -3849,6 +4064,7 @@ impl App {
         let mut kc = self.k_colors;
         self.base_window(ctx, "Default Colors", W_COLORS, Vec2::new(360.0, 260.0)).open(&mut open).resizable(false).show(ctx, |ui| {
             tools_ui::pop_style(ui, 1.4);
+            guide(ui, "The colours of the K1, K2 and K3 markers in all plots.", "Click a colour square to change the colour of K1, K2 or K3.");
             for (i, n) in ["K1", "K2", "K3"].iter().enumerate() {
                 ui.horizontal(|ui| {
                     ui.color_edit_button_srgba(&mut kc[i]);
@@ -3867,6 +4083,8 @@ impl App {
         self.core_window(ctx);
         self.cv_window(ctx);
         self.recombine_window(ctx);
+        self.recombine_ask_window(ctx);
+        self.phase_join_window(ctx);
         self.volume_window(ctx);
         self.sort_window(ctx);
         self.gis_window(ctx);
@@ -3911,8 +4129,8 @@ impl App {
         let mut rows = std::mem::take(&mut self.owens);
         let mut one = self.owens_one;
         let (mut first, mut last) = self.owens_range;
-        first = first.clamp(1, n.max(1));
-        last = last.clamp(first, n.max(1));
+        first = first.clamp_safe(1, n.max(1));
+        last = last.clamp_safe(first, n.max(1));
         let mut old = self.owens_old;
         let can_undo = self.owens_undo.is_some();
         let now = ctx.input(|i| i.time);
@@ -4129,6 +4347,7 @@ impl App {
         if let Some(doc) = &mut self.doc {
             if derived.len() == doc.specs.len() {
                 win.open(&mut open).show(ctx, |ui| {
+            guide(ui, "All numbers of the open file, one specimen per row.", "Click a row to select that specimen. The numbers follow the phase (in-phase or out-of-phase) and the coordinate system chosen in the toolbar.");
                     let order = listed;
                     egui::ScrollArea::horizontal().show(ui, |ui| {
                         let (hr, _) = ui.allocate_exact_size(Vec2::new(total_w, 24.0), Sense::hover());

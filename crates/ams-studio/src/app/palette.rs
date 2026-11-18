@@ -119,7 +119,8 @@ impl App {
         add("GIS", "Backdrop: street map", "", true, Action::GisBackdropSource(super::gis_data::BaseSource::Streets));
         add("GIS", "Backdrop: satellite imagery", "", true, Action::GisBackdropSource(super::gis_data::BaseSource::Satellite));
         add("GIS", "Add layer (map, shapefile, GeoPackage, GeoJSON) ...", "", true, Action::GisAddLayer);
-        add("GIS", "Add layers of a QGIS project (.qgz, .qgs) ...", "", true, Action::GisImportQgis);
+        add("GIS", "Add layers of a QGIS or ArcGIS project (.qgz, .qgs, .aprx, .lyrx, .mapx, .mxd) ...", "", true, Action::GisImportQgis);
+        add("GIS", "Undo the last layer removal", "", true, Action::GisUndoLayers);
         add("GIS", "Fit the map to the data", "", self.gis_on, Action::GisFit);
         add("GIS", "Specimen locations (from a datasheet) ...", "", true, Action::GisLocations);
         add("GIS", "Enter coordinates manually ...", "", true, Action::GisManual);

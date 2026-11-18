@@ -140,7 +140,7 @@ impl App {
             .into_iter()
             .map(|path| {
                 let id = core_pane::spec_id(&path);
-                let saved = gis_loc::read(&depjson::for_source(&path));
+                let saved = gis_loc::read_for(&path);
                 let cands = gis::rank_names(&id, &keys);
                 let top_ok = cands.first().is_some_and(|c| c.1 >= 4);
                 let saved_link = saved.as_ref().filter(|s| s.source == "datasheet").and_then(|s| keys.iter().position(|k| *k == s.datasheet_name));
@@ -180,7 +180,7 @@ impl App {
 
     pub(super) fn loc_store(&mut self, row: usize, loc: Option<Location>) {
         let Some(path) = self.gis.loc.rows.get(row).map(|r| r.path.clone()) else { return };
-        match gis_loc::write(&depjson::for_source(&path), loc.as_ref()) {
+        match gis_loc::write_for(&path, loc.as_ref()) {
             Ok(()) => {
                 self.gis.loc.rows[row].saved = loc;
                 self.gis.loc.ver += 1;
@@ -503,7 +503,7 @@ impl App {
             {
                 let e = self.gis.placed_cache.entry(f.clone()).or_default();
                 if src.is_none() || e.src != src || e.dep != dep || e.partner != par {
-                    *e = super::gis_ui::FileCache { src, dep, partner: par, loc: gis_loc::read(&dep_path), doc: None };
+                    *e = super::gis_ui::FileCache { src, dep, partner: par, loc: gis_loc::read_for(f), doc: None };
                 }
             }
             let Some(loc) = self.gis.placed_cache.get(f).and_then(|e| e.loc.clone()) else {

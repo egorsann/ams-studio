@@ -43,20 +43,23 @@ Rules that cost time to find:
 - Duplicate specimen names occur (stale records from corrections); no internal way to tell which is current.
 - Saving a subset (Save Active Records As, Append Selected Records) copies whole 640-byte records, so nothing is lost.
 
-## `.ran` (Anisoft 4.2 / older AGICO binary, read only for reference)
+## `.ran` (Anisoft 4.2 / older AGICO binary)
 
-Decoded from files made up for the purpose; the original Anisoft 6 cannot write it. A 64-byte header (a backslash, then spaces, the text `6  0  6  0` at offset 0x30) followed by 64-byte records:
+A 64-byte header followed by 64-byte records. Verified against full `.ams` files of the same specimens (214 pairs, 2678 records: tensors and Km identical to float32 precision, `cargo run -p ams-core --example check_ran -- <folder>`).
+
+Header: bytes 0-1 are the record count + 2 as a 16-bit number (like the first line of a `.ged`), then text; its last four numbers are the orientation parameters OP1..OP4 (`6  0  6  0`, or `3  0  3  0`). AMS Studio copies them into the record (offset 82..88).
 
 | offset | content |
 |---|---|
 | 0 | name, 12 bytes, space padded |
-| 12 | 4 zero bytes |
-| 16 | Km, float32, in units of 1e-6 |
-| 20 | six float32: Txx, Tyy, Tzz, Txy, Tyz, Txz, trace-normalised, axes x north, y east, z down |
-| 44 | `SS` |
-| 52 | `00` |
+| 12 | 4 bytes: `00 00 af 44` (float32 1400.0) in files made from a measurement with 400 A/m, zero otherwise; not used |
+| 16 | Km, float32, in units of 1e-6 SI, **always positive** |
+| 20 | six float32 in the order of the `.ams` tensor: Tyy, Txx, Tzz, Txy, Txz, Tyz (x east, y north in this program; the file's first value is north-north), the in-phase tensor trace-normalised to 3 |
+| 44 | `SS`, then zeros |
 
-Anisoft 4.2 reads `.ran`, older text `.ams` and a few others, and rejects Safyr7 `.ams` files. AMS Studio imports `.ran` (File > Import Data File(s); no out-of-phase data, standard deviations or F-tests come with it) but does not write it; its *Spec to Geo (Owens)* works on `.ams` directly.
+**One phase per file.** The in-phase file is `X.ran`, the out-of-phase file `X_Im.ran` (record names `A2_Im`). The out-of-phase file stores |Km|; the sign is in the tensor: it is not trace-normalised to +3 but to -3 when Km is negative, so Km takes the sign of the trace (right for all 2251 non-empty records checked). `ams_core::import::ran_pair_to_records` joins the two; `ams_core::phases` does the same for two `.ams` files (in-phase file + out-of-phase file, matched by name, the phase word `_Im` / `_oop` / `_out` ... ignored).
+
+Anisoft 4.2 reads `.ran`, older text `.ams` and a few others, and rejects Safyr7 `.ams` files. AMS Studio opens `.ran` directly (File > Open, Open Folder of Specimens with the file type `.ran`, File > Import Data File(s)), joining the `_Im` partner next to it, but never writes `.ran` and never writes into a data folder.
 
 ## `.ged` (GED Editor output)
 

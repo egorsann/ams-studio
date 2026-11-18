@@ -61,10 +61,6 @@ fn plan_ordered(st: &RecState) -> (Vec<usize>, Vec<recombine::Planned>) {
 }
 
 impl App {
-    pub(super) fn open_recombine(&mut self) {
-        self.open_win(W_RECOMB);
-    }
-
     fn rc_add(&mut self, paths: Vec<PathBuf>) {
         for p in paths {
             if !self.rc.files.iter().any(|f| f.path == p) {
@@ -388,7 +384,7 @@ impl App {
         }
         self.rc = st;
         if add {
-            let mut dlg = rfd::FileDialog::new().add_filter("AMS files", &["ams"]).set_title("Parts of a split .ams file");
+            let mut dlg = crate::fdialog::FileDialog::new().add_filter("AMS files", &["ams"]).set_title("Parts of a split .ams file");
             if self.browser_dir.is_dir() {
                 dlg = dlg.set_directory(&self.browser_dir);
             }
@@ -422,7 +418,7 @@ impl App {
         }
         let first = good.first().map(|f| f.path.clone());
         let stem = first.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().to_string()).unwrap_or("recombined".into());
-        let mut dlg = rfd::FileDialog::new().add_filter("AMS files", &["ams"]).set_title("Save the combined file").set_file_name(format!("{stem}_recombined.ams"));
+        let mut dlg = crate::fdialog::FileDialog::new().add_filter("AMS files", &["ams"]).set_title("Save the combined file").set_file_name(format!("{stem}_recombined.ams"));
         if let Some(d) = first.as_ref().and_then(|p| p.parent()) {
             dlg = dlg.set_directory(d);
         }

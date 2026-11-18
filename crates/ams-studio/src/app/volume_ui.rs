@@ -6,6 +6,7 @@
 //! Km as displayed stays as stored; the parameters marked * (corrected mean susceptibility and unnormalised K) use
 //! `10 / volume`, because Km is reported for the Kappabridge's 10 cm3.
 
+use crate::util::SafeClamp;
 use super::{tools_ui, App, W_VOL};
 use crate::doc::{self, VolInfo};
 use ams_core::params::REF_VOLUME;
@@ -93,8 +94,8 @@ impl App {
         let summary = self.volume_summary();
         let dark = self.dark;
         let mut st = std::mem::replace(&mut self.vol, VolState::default());
-        st.first = st.first.clamp(1, n);
-        st.last = st.last.clamp(st.first, n);
+        st.first = st.first.clamp_safe(1, n);
+        st.last = st.last.clamp_safe(st.first, n);
         let (mut open, mut apply, mut store, mut back) = (true, false, false, false);
         self.base_window(ctx, "Volume Correction", W_VOL, Vec2::new(640.0, 560.0)).open(&mut open).resizable(false).show(ctx, |ui| {
             tools_ui::pop_style(ui, 1.25);

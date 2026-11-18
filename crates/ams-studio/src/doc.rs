@@ -15,6 +15,8 @@ pub struct Doc {
     pub modified: bool,
     /// Built in memory by a tool (e.g. Fabric Overprint); has no file behind it.
     pub synthetic: bool,
+    /// How the records came together when the file was not a plain `.ams` (a `.ran`, or two files joined).
+    pub note: Option<String>,
 }
 
 #[derive(Clone)]
@@ -26,19 +28,26 @@ pub struct Derived {
 
 impl Doc {
     pub fn open(path: &Path) -> Result<Doc, String> {
-        let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Self::open_with(path, None)
+    }
+
+    /// Opens a data file; `partner` is its out-of-phase file when the phases were exported separately (when none is
+    /// given, a `.ran` or `.ams` whose name has a partner by name is joined with it). Nothing is ever written back to
+    /// the file: a `.ran` is converted in memory.
+    pub fn open_with(path: &Path, partner: Option<&Path>) -> Result<Doc, String> {
+        let (raw, note) = read_records(path, partner)?;
         let mut specs = ams::parse(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
         // the drill core reorientation of a _geo file lives in the dependency file of its folder
         load_dependency(&mut specs, path);
         let n = specs.len();
-        Ok(Doc { path: path.to_path_buf(), raw, specs, active: vec![true; n], selected: vec![false; n], modified: false, synthetic: false })
+        Ok(Doc { path: path.to_path_buf(), raw, specs, active: vec![true; n], selected: vec![false; n], modified: false, synthetic: false, note })
     }
 
     /// A document made by a tool from records already in memory.
     pub fn simulated(name: &str, raw: Vec<u8>) -> Result<Doc, String> {
         let specs = ams::parse(&raw).map_err(|e| e.to_string())?;
         let n = specs.len();
-        Ok(Doc { path: PathBuf::from(name), raw, specs, active: vec![true; n], selected: vec![false; n], modified: false, synthetic: true })
+        Ok(Doc { path: PathBuf::from(name), raw, specs, active: vec![true; n], selected: vec![false; n], modified: false, synthetic: true, note: None })
     }
 
     /// Specimen indices in list order: active ones first, disregarded ones at the bottom.
@@ -253,8 +262,75 @@ pub fn read_owens_marks(ams: &Path) -> Vec<bool> {
     r[a + 1..b].split(',').filter_map(|t| match t.trim() { "1" => Some(true), "0" => Some(false), _ => None }).collect()
 }
 
+/// A data file the program opens: `.ams`, or Anisoft 4.2's `.ran` (converted in memory).
 pub fn is_ams(p: &Path) -> bool {
-    p.extension().map_or(false, |e| e.eq_ignore_ascii_case("ams"))
+    p.extension().map_or(false, |e| e.eq_ignore_ascii_case("ams") || e.eq_ignore_ascii_case("ran"))
+}
+
+pub fn is_ran(p: &Path) -> bool {
+    p.extension().map_or(false, |e| e.eq_ignore_ascii_case("ran"))
+}
+
+fn stem_of(p: &Path) -> String {
+    p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+/// The other half of a split export that sits next to `path` and is named like it (`X.ran` + `X_Im.ran`, `X_in.ams` +
+/// `X_out.ams`): for the in-phase file its out-of-phase file. `None` for a file with no partner, and for the
+/// out-of-phase file itself.
+pub fn find_partner(path: &Path) -> Option<PathBuf> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let ext = path.extension()?.to_string_lossy().to_lowercase();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_file() && p.extension().map_or(false, |e| e.to_string_lossy().to_lowercase() == ext)).collect();
+    files.sort();
+    let stems: Vec<String> = files.iter().map(|p| stem_of(p)).collect();
+    let me = files.iter().position(|p| p == path)?;
+    ams_core::phases::pair_files(&stems).into_iter().find(|pr| pr.ip == Some(me)).and_then(|pr| pr.op).map(|j| files[j].clone())
+}
+
+/// For an out-of-phase file, the in-phase file of its pair.
+pub fn find_in_phase_of(path: &Path) -> Option<PathBuf> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let ext = path.extension()?.to_string_lossy().to_lowercase();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_file() && p.extension().map_or(false, |e| e.to_string_lossy().to_lowercase() == ext)).collect();
+    files.sort();
+    let stems: Vec<String> = files.iter().map(|p| stem_of(p)).collect();
+    let me = files.iter().position(|p| p == path)?;
+    ams_core::phases::pair_files(&stems).into_iter().find(|pr| pr.op == Some(me)).and_then(|pr| pr.ip).map(|j| files[j].clone())
+}
+
+/// The 640-byte records of a data file, and a note when they were made from other files. A `.ran` is converted; the
+/// out-of-phase partner (given or found by name) is joined in when the file has no out-of-phase data of its own.
+pub fn read_records(path: &Path, partner: Option<&Path>) -> Result<(Vec<u8>, Option<String>), String> {
+    // the out-of-phase half itself was chosen: the pair opens through its in-phase file
+    if partner.is_none() {
+        if let Some(ip) = find_in_phase_of(path) {
+            return read_records(&ip, Some(path));
+        }
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let ran = is_ran(path);
+    let base = if ran { ams_core::import::ran_to_records(&bytes).map_err(|e| format!("{}: {e}", path.display()))? } else { bytes };
+    let mut note = ran.then(|| "converted from a .ran file".to_string());
+    // an out-of-phase half opened by itself: its in-phase file stays the main one, so there is nothing to join
+    let partner: Option<PathBuf> = partner.map(|p| p.to_path_buf()).or_else(|| find_partner(path));
+    if let Some(pp) = partner {
+        let have_op = base.chunks_exact(ams_core::ams::RECORD_LEN).any(|r| ams_core::phases::block_has_data(r, ams_core::ams::OFF_KIM));
+        if !have_op {
+            let pb = std::fs::read(&pp).map_err(|e| format!("{}: {e}", pp.display()))?;
+            let op = if is_ran(&pp) { ams_core::import::ran_to_records(&pb).map_err(|e| format!("{}: {e}", pp.display()))? } else { pb };
+            let (m, rep) = ams_core::phases::merge_phases(&base, &op).map_err(|e| format!("{} + {}: {e}", path.display(), pp.display()))?;
+            note = Some(format!(
+                "in-phase from {}, out-of-phase from {}: {} specimen(s) joined{}",
+                path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                pp.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                rep.joined,
+                if rep.ip_only.is_empty() { String::new() } else { format!(", {} without out-of-phase data", rep.ip_only.len()) }
+            ));
+            return Ok((m, note));
+        }
+    }
+    Ok((base, note))
 }
 
 /// Sorted list of `.ams` files in `dir`.

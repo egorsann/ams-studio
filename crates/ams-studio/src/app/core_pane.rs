@@ -799,7 +799,7 @@ impl App {
         }
         self.cv.needle = needle;
         if choose {
-            let mut dlg = rfd::FileDialog::new().set_title("Folder that holds (or is above) the cube photos");
+            let mut dlg = crate::fdialog::FileDialog::new().set_title("Folder that holds (or is above) the cube photos");
             if let Some(r) = self.cv.root.as_ref().filter(|r| r.is_dir()) {
                 dlg = dlg.set_directory(r);
             }

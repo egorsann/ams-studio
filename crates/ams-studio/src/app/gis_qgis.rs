@@ -47,6 +47,10 @@ pub struct Project {
     /// `(layer name, why)`
     pub skipped: Vec<(String, String)>,
     pub empty_groups: usize,
+    /// "QGIS" or "ArcGIS" (empty = QGIS), for the messages.
+    pub source: &'static str,
+    /// A remark for people about what the format could not give (shown after the summary).
+    pub note: String,
 }
 
 /// What the viewer adds to its layer list for one node, flattened in list order (a group is followed by its children);
@@ -93,7 +97,7 @@ impl Project {
 
     /// One line for people: how many layers, what was left out.
     pub fn summary(&self) -> String {
-        let mut s = format!("Added (n={}) layers from the QGIS project.", self.layer_count());
+        let mut s = format!("Added (n={}) layers from the {} project.", self.layer_count(), if self.source.is_empty() { "QGIS" } else { self.source });
         if !self.skipped.is_empty() {
             s += &format!(" Left out (n={}): ", self.skipped.len());
             let list: Vec<String> = self.skipped.iter().take(6).map(|(n, why)| format!("{n} ({why})")).collect();
@@ -105,6 +109,10 @@ impl Project {
         }
         if self.empty_groups > 0 {
             s += &format!(" Empty groups not added (n={}).", self.empty_groups);
+        }
+        if !self.note.is_empty() {
+            s.push(' ');
+            s += &self.note;
         }
         s
     }

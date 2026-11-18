@@ -49,9 +49,43 @@ pub(super) fn zf(ui: &Ui) -> f32 {
     ui.style().text_styles.get(&egui::TextStyle::Body).map_or(1.0, |f| f.size / 14.0)
 }
 
+/// What a big button does, shown when the pointer rests on it (the buttons carry only a short word).
+fn btn_tip(label: &str) -> Option<&'static str> {
+    Some(match label {
+        "Open" => "Choose a file to load into this window.",
+        "Clear Table" => "Empties the table so that you can start again. Nothing is saved or deleted on disk.",
+        "Add Row" => "Adds an empty row at the end of the table: one row per specimen.",
+        "Delete Row(s)" => "Marks the selected rows as deleted (they are left out when you save). Restore Row(s) brings them back.",
+        "Restore Row(s)" => "Brings back the rows you deleted.",
+        "Save As" => "Writes the result to a new file of your choice. The files you opened are never changed.",
+        "Close" => "Closes this window. Nothing is lost that was already saved.",
+        "Close Toolbox" => "Closes this window.",
+        "Disregard" => "Leaves the selected records out of the calculation (they stay in the file). Restore All brings them back.",
+        "Find Duplicates" => "Marks records that appear more than once (same name and numbers) so that you can disregard them.",
+        "Restore All" => "Puts every disregarded record back.",
+        "Pair Records" => "Matches the records of A and B by specimen name, so that each A record meets its B record.",
+        "Clear Pairing" => "Forgets the matching of the records.",
+        "Add Tensors" => "For every matched pair: adds the tensor of B to the tensor of A. Save As writes the result.",
+        "Subtract Tensors" => "For every matched pair: subtracts the tensor of B from the tensor of A. Save As writes the result.",
+        "Load" => "Fills this fabric from the record that is selected in the main window.",
+        "Calculate" => "Runs the calculation with the values entered above and shows the result.",
+        "Erase" | "Clear" => "Clears the entered values and the result.",
+        "Add Step" => "Applies the strain step set above to the fabric and adds the result to the list of steps.",
+        "Reset Isotropic" => "Goes back to a fabric with no preferred direction and removes all steps.",
+        "Copy Graphics" => "Copies the picture of the plot to the clipboard.",
+        "Copy Data" => "Copies the numbers of this window to the clipboard as text (paste into Excel).",
+        "Export Data" => "Saves the numbers of this window as a csv table that opens in Excel.",
+        _ => return None,
+    })
+}
+
 pub(super) fn big_btn(ui: &mut Ui, icon: Icon, label: &str, enabled: bool, dark: bool) -> bool {
     let z = zf(ui);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(104.0 * z, 62.0 * z), if enabled { Sense::click() } else { Sense::hover() });
+    let resp = match btn_tip(label) {
+        Some(t) => resp.on_hover_text(t),
+        None => resp,
+    };
     let v = ui.visuals();
     let fill = if resp.is_pointer_button_down_on() && enabled {
         v.widgets.active.bg_fill
@@ -81,6 +115,7 @@ fn field(ui: &mut Ui, text: &mut String, width: f32, tint: Option<Color32>) -> b
 /// A text cell inside a Grid: the minimum width makes the column grow to `w`.
 fn cell_edit(ui: &mut Ui, text: &mut String, w: f32, enabled: bool) {
     ui.scope(|ui| {
+            super::guide(ui, "Mix two magnetic fabrics and see one turn into the other.", "Enter a starting fabric A and an overprinting fabric B (mean susceptibility, degree of anisotropy P, shape T and the directions of Kmax and Kmin; Load takes them from the selected record of the main window). Calculate builds the in-between fabrics in the number of Increments you choose and replaces the data in the main window with them (specimens named 0, 1, 2 ...). Nothing is written to disk.");
         ui.set_min_width(w);
         let edge = ui.visuals().widgets.noninteractive.bg_stroke.color;
         ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::new(1.0, edge);
@@ -446,6 +481,7 @@ impl App {
         let mut st = std::mem::take(&mut self.tools.ged);
         let mut close = false;
         self.base_window(ctx, "GED Editor", T_GED, Vec2::new(1240.0, 720.0)).open(&mut open).show(ctx, |ui| {
+            super::guide(ui, "Write the orientation file (.ged) of your specimens: fill in the site, then one row per specimen.", "A .ged file tells Anisoft how each specimen was sampled: the sampling azimuth and plunge, and optionally the foliation and lineation measured in the field. Fill in the site and rock data at the left, press Add Row for each specimen and type its angles, then Save As. Open loads an existing .ged. Orientation Parameters OP1 to OP4 say how the angles were measured; leave them as they are if you are unsure.");
             ui.horizontal_top(|ui| {
                 ui.group(|ui| {
                     ui.vertical(|ui| {
@@ -530,7 +566,7 @@ impl App {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if big_btn(ui, Icon::Open, "Open", true, dark) {
-                    if let Some(p) = rfd::FileDialog::new().add_filter("GED files", &["ged"]).set_title("Open GED File").pick_file() {
+                    if let Some(p) = crate::fdialog::FileDialog::new().add_filter("GED files", &["ged"]).set_title("Open GED File").pick_file() {
                         match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|t| GedFile::parse(&t)) {
                             Ok(g) => {
                                 st.load(&g);
@@ -565,7 +601,7 @@ impl App {
                 }
                 ui.add_space(70.0);
                 if big_btn(ui, Icon::Save, "Save As", true, dark) {
-                    if let Some(p) = rfd::FileDialog::new().add_filter("GED files", &["ged"]).set_title("Save GED File").save_file() {
+                    if let Some(p) = crate::fdialog::FileDialog::new().add_filter("GED files", &["ged"]).set_title("Save GED File").save_file() {
                         match std::fs::write(&p, st.to_file().to_text()) {
                             Ok(()) => st.msg = format!("Saved {}", p.display()),
                             Err(e) => st.msg = format!("Could not save: {e}"),
@@ -589,6 +625,7 @@ impl App {
         let mut st = std::mem::take(&mut self.tools.tens);
         let mut close = false;
         self.base_window(ctx, "Tensor Addition / Subtraction", T_TENS, Vec2::new(1240.0, 780.0)).open(&mut open).show(ctx, |ui| {
+            super::guide(ui, "Add or subtract the tensors of two data sets, specimen by specimen.", "Open one file in A and one in B. Optionally leave out records with Disregard or the filters, press Pair Records so that each record of A meets the record of B with the same name, then Add Tensors or Subtract Tensors. Save As writes the result as a new .ams file; your two source files are not changed.");
             ui.columns(3, |cols| {
                 for (k, ui) in cols.iter_mut().enumerate().take(2) {
                     let tag = if k == 0 { "A" } else { "B" };
@@ -617,7 +654,7 @@ impl App {
                     let has = slot.is_some();
                     ui.horizontal(|ui| {
                         if big_btn(ui, Icon::Open, "Open", true, dark) {
-                            if let Some(p) = rfd::FileDialog::new().add_filter("AMS files", &["ams"]).set_title("Open File(s)").pick_file() {
+                            if let Some(p) = crate::fdialog::FileDialog::new().add_filter("AMS and RAN files", &["ams", "ran"]).set_title("Open File(s)").pick_file() {
                                 match SetSt::load(&p) {
                                     Ok(s) => {
                                         *slot = Some(s);
@@ -726,7 +763,7 @@ impl App {
                         st.calc(1.0);
                     }
                     if big_btn(ui, Icon::Save, "Save As", st.sign.is_some(), dark) {
-                        if let Some(p) = rfd::FileDialog::new().add_filter("AMS file", &["ams"]).set_title("Save Combined Data Set").save_file() {
+                        if let Some(p) = crate::fdialog::FileDialog::new().add_filter("AMS file", &["ams"]).set_title("Save Combined Data Set").save_file() {
                             st.msg = match st.result_bytes() {
                                 Some(bytes) => match std::fs::write(&p, bytes) {
                                     Ok(()) => format!("Saved {} records to {}", st.pairs.len(), p.display()),
@@ -884,6 +921,7 @@ impl App {
         let mut close = false;
         self.base_window(ctx, "Intersection Toolbox", T_INTER, Vec2::new(1000.0, 820.0)).open(&mut open).resizable(false).show(ctx, |ui| {
             pop_style(ui, 1.3);
+            super::guide(ui, "Find where two planes meet, or the plane through two lines.", "Choose 2 Lineations or 2 Foliations under Input and type the two directions. For two foliations (dip direction and dip) the Output is the line where they intersect (trend and plunge) and the angle between the planes; for two lineations (trend and plunge) it is the plane through both (dip direction and dip) and the angle between the lines. Calculate fills the Output and the plot.");
             ui.horizontal_top(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(560.0), Sense::hover());
                 let pa = ui.painter_at(rect.expand(30.0));
@@ -1013,6 +1051,7 @@ impl App {
         let mut copy: Option<Rect> = None;
         self.base_window(ctx, "Deform AMS", T_DEF, Vec2::new(1180.0, 880.0)).open(&mut open).resizable(false).show(ctx, |ui| {
             pop_style(ui, 1.3);
+            super::guide(ui, "Deform a magnetic fabric step by step.", "Describe the single grains (oblate or prolate, Pgrain, Tgrain) and one strain step (kind, axis, stretch), then press Add Step to apply it and read the Resultant Magnetic Fabric. Each Add Step continues from the last result; Reset Isotropic starts again from a fabric with no preferred direction. Copy Graphics copies the picture.");
             ui.horizontal_top(|ui| {
                 // ---- stereonet with the grains
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(540.0), Sense::hover());

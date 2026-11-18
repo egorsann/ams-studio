@@ -14,23 +14,71 @@ fn zero_phase() -> Phase {
     Phase { km: 0.0, sd: [0.0; 3], tensor: [[0.0; 3]; 3], ftest: [0.0; 3] }
 }
 
-/// `.ran`: 64-byte header, then 64-byte records (see docs/FORMATS.md). Axes are x north, y east, z down.
+/// The orientation parameters OP1..OP4 written in a `.ran` header (the last four numbers of its text, `6  0  6  0`).
+pub fn ran_header_ops(bytes: &[u8]) -> Option<[i16; 4]> {
+    let text: String = bytes.get(2..64)?.iter().map(|&b| if b.is_ascii_graphic() { b as char } else { ' ' }).collect();
+    let nums: Vec<i16> = text.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+    (nums.len() >= 4).then(|| [nums[nums.len() - 4], nums[nums.len() - 3], nums[nums.len() - 2], nums[nums.len() - 1]])
+}
+
+/// `.ran`: 64-byte header (record count + 2 as a 16-bit number, then text ending in OP1..OP4), then 64-byte records
+/// (see docs/FORMATS.md). Axes are x north, y east, z down.
+///
+/// The out-of-phase file of a pair (`X_Im.ran`) stores the absolute value of Km; its tensor keeps the sign (the
+/// trace is -3 when Km is negative), so Km takes the sign of the trace. Both files of a pair are verified against a
+/// full `.ams` of the same specimens (2251 records, tensors and Km identical to float32 precision).
 pub fn ran_to_records(bytes: &[u8]) -> Result<Vec<u8>, String> {
     if bytes.len() < 128 || (bytes.len() - 64) % 64 != 0 {
         return Err(format!("not a .ran file: {} bytes is not 64 + n x 64", bytes.len()));
     }
     let f = |r: &[u8], o: usize| f32::from_le_bytes([r[o], r[o + 1], r[o + 2], r[o + 3]]) as f64;
+    let ops = ran_header_ops(bytes);
     let mut out = vec![];
     for rec in bytes[64..].chunks_exact(64) {
         let name: String = rec[..12].iter().map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { ' ' }).collect::<String>().trim().to_string();
-        let km = f(rec, 16) * 1e-6;
         let (nn, ee, dd, ne, ed, nd) = (f(rec, 20), f(rec, 24), f(rec, 28), f(rec, 32), f(rec, 36), f(rec, 40));
+        let mut km = f(rec, 16) * 1e-6;
+        if nn + ee + dd < 0.0 && km > 0.0 {
+            km = -km;
+        }
         // this crate's tensor has x east, y north
         let t = sym(ee, nn, dd, ne, ed, nd);
         let p = Phase { km, sd: [0.0; 3], tensor: t, ftest: [0.0; 3] };
-        out.extend(build_record_with(&name, &p, &zero_phase(), 0.0, 0.0, "RAN"));
+        let mut r = build_record_with(&name, &p, &zero_phase(), 0.0, 0.0, "RAN");
+        if let Some(o) = ops {
+            for (i, v) in o.iter().enumerate() {
+                r[82 + 2 * i..84 + 2 * i].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        out.extend(r);
     }
     Ok(out)
+}
+
+/// Whether most record names of a `.ran` carry an out-of-phase word (`A2_Im`): the file is the out-of-phase half of a pair.
+pub fn ran_is_out_of_phase(bytes: &[u8]) -> bool {
+    if bytes.len() < 128 || (bytes.len() - 64) % 64 != 0 {
+        return false;
+    }
+    let (mut tagged, mut total) = (0usize, 0usize);
+    for rec in bytes[64..].chunks_exact(64) {
+        let name: String = rec[..12].iter().map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { ' ' }).collect::<String>().trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        total += 1;
+        if crate::phases::split_phase_word(&name).1 == Some(crate::phases::Role::OutOfPhase) {
+            tagged += 1;
+        }
+    }
+    total > 0 && tagged * 2 > total
+}
+
+/// Two `.ran` files (in-phase, out-of-phase) joined into full records.
+pub fn ran_pair_to_records(ip: &[u8], op: &[u8]) -> Result<(Vec<u8>, crate::phases::MergeReport), String> {
+    let a = ran_to_records(ip)?;
+    let b = ran_to_records(op)?;
+    crate::phases::merge_phases(&a, &b)
 }
 
 fn split_csv(line: &str) -> Vec<String> {
@@ -127,6 +175,47 @@ mod tests {
         // north-north is the first stored component; this crate keeps it in the y row
         assert!((s[0].inphase.tensor[1][1] - 1.2).abs() < 1e-6 && (s[0].inphase.tensor[0][0] - 1.0).abs() < 1e-6);
         assert!(ran_to_records(&b[..100]).is_err());
+    }
+
+    fn made_up_ran(names: &[&str], km: f32, t: [f32; 6], ops: &str) -> Vec<u8> {
+        let mut b = vec![b' '; 64];
+        b[0] = (names.len() + 2) as u8;
+        b[1] = 0;
+        let tail = ops.as_bytes();
+        b[48..48 + tail.len()].copy_from_slice(tail);
+        for n in names {
+            let mut rec = vec![0u8; 64];
+            rec[..12].fill(b' ');
+            rec[..n.len()].copy_from_slice(n.as_bytes());
+            rec[16..20].copy_from_slice(&km.to_le_bytes());
+            for (i, v) in t.iter().enumerate() {
+                rec[20 + 4 * i..24 + 4 * i].copy_from_slice(&v.to_le_bytes());
+            }
+            rec[44..46].copy_from_slice(b"SS");
+            b.extend(&rec);
+        }
+        b
+    }
+
+    #[test]
+    fn ran_pair_gives_both_phases_with_the_sign_of_km_and_the_header_parameters() {
+        let ip = made_up_ran(&["A1", "B1"], 1500.0, [1.0, 1.2, 0.8, 0.01, 0.0, 0.02], "3  0  3  0  ");
+        // the out-of-phase file stores |Km|; its trace is -3 when Km is negative
+        let op = made_up_ran(&["A1_Im", "B1_Im"], 2.5, [-1.1, -1.0, -0.9, 0.05, 0.0, 0.0], "3  0  3  0  ");
+        assert_eq!(ran_header_ops(&ip), Some([3, 0, 3, 0]));
+        assert!(!ran_is_out_of_phase(&ip) && ran_is_out_of_phase(&op));
+        let (r, rep) = ran_pair_to_records(&ip, &op).unwrap();
+        assert_eq!((rep.joined, rep.from_first_slot), (2, 2));
+        let s = parse(&r).unwrap();
+        assert_eq!(s[1].name, "B1");
+        assert!((s[0].inphase.km - 1.5e-3).abs() < 1e-9);
+        assert!((s[0].outphase.km + 2.5e-6).abs() < 1e-12, "sign recovered from the trace");
+        assert!((s[0].outphase.tensor[1][1] + 1.1).abs() < 1e-6);
+        assert_eq!(&r[82..90], &[3, 0, 0, 0, 3, 0, 0, 0], "OP1..OP4 from the header");
+        // without parameters in the header the record's own are left alone
+        let plain = ran_to_records(&made_up_ran(&["X"], 1.0, [1.0; 6], "")).unwrap();
+        assert_eq!(ran_header_ops(&made_up_ran(&["X"], 1.0, [1.0; 6], "")), None);
+        assert_eq!(&plain[82..84], &[0, 0]);
     }
 
     fn made_up() -> Vec<crate::ams::Specimen> {

@@ -172,7 +172,7 @@ impl App {
 
     /// Chooses the file (a dialog), reads it and lists what it would do.
     pub(super) fn of_select_file(&mut self) {
-        let mut dlg = rfd::FileDialog::new().add_filter("Spreadsheet or csv", &["xlsx", "xlsm", "xls", "ods", "csv"]).set_title("Orientation values for the Owens correction");
+        let mut dlg = crate::fdialog::FileDialog::new().add_filter("Spreadsheet or csv", &["xlsx", "xlsm", "xls", "ods", "csv"]).set_title("Orientation values for the Owens correction");
         if let Some(p) = self.of.path.as_ref().and_then(|p| p.parent()) {
             dlg = dlg.set_directory(p);
         } else if self.browser_dir.is_dir() {
@@ -720,7 +720,7 @@ impl App {
         }
         if next && stage == Stage::Targets {
             let files: Option<Vec<PathBuf>> = if targets_dialog {
-                let mut dlg = rfd::FileDialog::new().add_filter("AMS files", &["ams"]).set_title("Files that get the Owens correction");
+                let mut dlg = crate::fdialog::FileDialog::new().add_filter("AMS files", &["ams"]).set_title("Files that get the Owens correction");
                 if self.browser_dir.is_dir() {
                     dlg = dlg.set_directory(&self.browser_dir);
                 }

@@ -2,10 +2,10 @@
 //! construction applied to the top of the core (see `ams_core::core`). Each question has its own line, the prompt
 //! above the choice; the explanations are in the (i) pop-ups.
 
+use crate::util::SafeClamp;
 use super::gis_loc::{self, Hole};
 use super::gis_manual_ui::{collar_fields, fill_from_saved, resolve_collar, ManualState};
 use super::{info_icon, tools_ui, App, W_CORE};
-use ams_core::depjson;
 use ams_core::core::{offset_for, slice_of, top_surface_lhr, Arrow, CoreSetup, Face};
 use egui::{Pos2, Sense, Shape, Stroke};
 use ams_core::georot::GeoRot;
@@ -46,7 +46,7 @@ impl App {
         // a position saved for this specimen is shown (and the tick is set); otherwise the entry starts empty and unticked
         let zone = self.zone_hint();
         let mut collar = ManualState { zone, north: true, ..Default::default() };
-        let saved = gis_loc::read(&depjson::for_source(&path));
+        let saved = gis_loc::read_for(&path);
         if let Some(loc) = &saved {
             fill_from_saved(&mut collar, loc);
             collar.depth = loc.depth.map_or(String::new(), |d| format!("{d}"));
@@ -66,12 +66,12 @@ impl App {
         };
         let n = d.specs.len().max(1);
         let name_of = |r: usize| d.specs.get(r.wrapping_sub(1)).map(|s| s.name.clone()).unwrap_or_default();
-        let (first_name, last_name) = (name_of(self.core.first.clamp(1, n)), name_of(self.core.last.clamp(1, n)));
+        let (first_name, last_name) = (name_of(self.core.first.clamp_safe(1, n)), name_of(self.core.last.clamp_safe(1, n)));
         let dark = self.dark;
         let can_undo = self.owens_undo.is_some();
         let mut st = std::mem::take(&mut self.core);
-        st.first = st.first.clamp(1, n);
-        st.last = st.last.clamp(st.first, n);
+        st.first = st.first.clamp_safe(1, n);
+        st.last = st.last.clamp_safe(st.first, n);
         let (mut open, mut rotate, mut undo, mut cancel) = (true, false, false, false);
         let scr = ctx.content_rect();
         let size = Vec2::new((scr.width() - 40.0).clamp(560.0, 760.0), (scr.height() - 60.0).clamp(520.0, 760.0));
@@ -216,7 +216,7 @@ impl App {
                 Ok(()) => {
                     st.msg = format!("The reorientation of {} record(s) is held; the geographic view (F6) shows it and the specimen coordinates stay as measured. Nothing is saved yet: File > Save as .ams writes the _geo copy and, next to it, the dependency file <specimen folder>_geo_dependancy.json that holds the drill core reorientation.", jobs.len());
                     if let (Some(loc), Some(path)) = (collar, self.doc.as_ref().map(|d| d.path.clone())) {
-                        match gis_loc::write(&depjson::for_source(&path), Some(&loc)) {
+                        match gis_loc::write_for(&path, Some(&loc)) {
                             Ok(()) => {
                                 self.gis.loc.ver += 1;
                                 self.gis.loc.stale = true;

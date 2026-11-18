@@ -211,3 +211,32 @@ A map pane with the AMS fabric of every specimen that has a place. **Strike symb
 ## Settings are remembered
 
 Every setting of every pane is kept in the preferences file and comes back at the next start: the layout and the order of the panes, the plot panes' settings, the stereonet options (K1 / K2 / K3, data, caption, legend, connect, overlays), the colour-coding of each pane and the general one, which panes Copy / Save Graphics take, the sort and filter of the Sub-specimens list, and for the GIS pane the layers (with their order, groups, switches, opacity and georeference), the basemap switch and source, the symbol settings (size and growth), the datasheet with its column assignment, where the map was looking and the UTM zone last used. Changes are written after a short quiet moment, so nothing needs a Save.
+
+
+## Opening folders of specimens
+
+*File > Open Folder of Specimens* first asks how the files are stored: each specimen in its own folder, all files in one folder (the specimens are then told apart by the specimen ID in the file name: a 7-digit number is tried first, then other digit counts, then the first part of the name), or "look at the names". It also asks for the file type (`.ams` or `.ran`) and whether in-phase and out-of-phase data are separate files (files named like `X` and `X_Im`, `X_in` and `X_out`, `X` and `X_oop` are joined into one specimen when it opens; "Yes" also pairs two files with no phase word by their numbers). The answers are remembered.
+
+## Recombine
+
+*Edit > Recombine* asks "Are you combining in- and out-of-phase data into one or multiple full .ams datasets?": one in-phase file + one out-of-phase file into one full `.ams`; a folder of many pairs (`.ams` or `.ran`) into one full `.ams` each (saved into a folder you choose, never into the folder of the data); or the former Recombine Split AMS Files window (parts of one dataset). Details of the `.ran` pair format are in `docs/FORMATS.md`.
+
+## ArcGIS projects
+
+*GIS > Add layers of a QGIS or ArcGIS project* (also the **QGIS / ArcGIS project ...** button of the layers list, and dropping the file onto the window) reads ArcGIS files the same way as a QGIS project: legend order, groups, tick boxes, names, transparency, the definition query of a layer as its filter (editable in the QGIS syntax), the label field, and the coordinate system of the map. Only paths are used and the file is never written. Formats: ArcGIS Pro `.aprx` (a zip of JSON), `.lyrx` and `.mapx`; ArcMap `.mxd` and `.lyr` (older binary files: only the layers and the folders they lie in are recoverable, so vectors are ticked, rasters are not, layers of one folder are grouped, and there are no filters or labels; save a `.mapx` from ArcGIS Pro for the full legend). Left out and listed: online layers and basemaps, file geodatabases and other databases (export to a shapefile or GeoPackage), missing files. A data path of another computer is found again by its tail below the project's folder. The `.aprx` / `.lyrx` / `.mapx` reader is written from the CIM documentation and tested on made-up documents; no Pro file was available to check it against.
+
+## Layers: selecting several, removing, undoing
+
+In the GIS layers list, Shift+drag a rectangle over the rows, Shift+click for a range, Ctrl+click for single layers or Ctrl+A for all of them; Delete removes the selected layers and Ctrl+Z (pointer over the list, or *GIS > Undo the last layer removal*) puts them back. Removing only takes a layer out of the list: a QGIS project or a map file is never written to; the viewer only reads them.
+
+## One setup for two computers that share a Synology Drive folder
+
+The layout, the panes and the GIS layer list are kept in the program's preferences, which belong to one computer. If another computer has the same data in a synced `SynologyDrive` folder (the same paths below it), run `ams-studio --write-seed` on the computer whose setup you like: it writes `SynologyDrive/AMS_Studio_seed/setup.json` (paths below the Synology folder are stored relative to it). The other computer takes that setup over **once**, at the first start of a version that has this feature, keeps its own window size, remembers that it did (`seed_applied.txt` next to the preferences) and keeps its earlier preferences as `state.before-seed.txt`. A computer without a `SynologyDrive` folder, or without that seed, is never touched and nothing is read from anywhere else. The computer that wrote the seed never takes it over. A second `--write-seed --force` makes a new seed that computers take over once more. Delete the folder `AMS_Studio_seed` to stop it.
+
+## Coordinates of specimens that share a folder
+
+The place of a specimen (and the coordinate system it was last shown in) is kept in the dependency file of its `_geo` folder. When a folder holds the files of several specimens (told apart by the specimen ID in the file names: a 7-digit number, another digit count or the first part of the name) each specimen now has its own entry (`specimens` in that file) instead of all of them sharing one.
+
+## When something goes wrong
+
+A program error no longer closes the window: the step is stopped, a message names it and the details are appended to `crash.log` next to the preferences (`%APPDATA%\ams-studio\` on Windows, `~/.config/ams-studio/` on Linux). `ams-studio --selftest <report.txt>` walks through every menu action and window without opening one (also random clicks and keys, every window size, the folder and recombine questions) and writes what failed; the same walk runs on Linux and in the Windows build (exit code 0 = no failure). `ams-studio --demo-tree <folder>` writes the made-up files it uses.

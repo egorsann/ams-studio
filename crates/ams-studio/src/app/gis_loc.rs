@@ -121,9 +121,23 @@ impl Location {
     }
 }
 
-/// The location stored in `json_path`, if any.
+/// The location of a data file: its folder's, or, where a folder holds several specimens, the one of its specimen ID.
+pub fn read_for(file: &Path) -> Option<Location> {
+    from_value(&depjson::read_section_for(file, "location")?)
+}
+
+/// Stores (or removes) the location of a data file (see `read_for`).
+pub fn write_for(file: &Path, loc: Option<&Location>) -> std::io::Result<()> {
+    depjson::write_section_for(file, "location", loc.map(to_value))
+}
+
+/// The location stored in `json_path`, if any (the folder's own, not a specimen's of a shared folder).
+#[cfg(test)]
 pub fn read(json_path: &Path) -> Option<Location> {
-    let v = depjson::read_section(json_path, "location")?;
+    from_value(&depjson::read_section(json_path, "location")?)
+}
+
+fn from_value(v: &Value) -> Option<Location> {
     let f = |k: &str| v.get(k).and_then(|x| x.as_f64());
     let crs = v.get("crs").and_then(crs_from_json)?;
     let (x, y) = (f("x")?, f("y")?);
@@ -137,9 +151,14 @@ pub fn read(json_path: &Path) -> Option<Location> {
     Some(l)
 }
 
-/// Stores (or, with `None`, removes) the location, making the `_geo` folder and the file when needed.
+/// Stores (or, with `None`, removes) the location in `json_path`.
+#[cfg(test)]
 pub fn write(json_path: &Path, loc: Option<&Location>) -> std::io::Result<()> {
-    let v: Option<Value> = loc.map(|l| {
+    depjson::write_section(json_path, "location", loc.map(to_value))
+}
+
+fn to_value(l: &Location) -> Value {
+    {
         let mut o = json!({ "x": l.x, "y": l.y, "crs": crs_json(&l.crs), "lon": l.lon, "lat": l.lat, "source": l.source });
         if let Some(d) = l.depth {
             o["depth_m"] = json!(d);
@@ -155,8 +174,7 @@ pub fn write(json_path: &Path, loc: Option<&Location>) -> std::io::Result<()> {
             o["datasheet_file"] = json!(l.datasheet_file);
         }
         o
-    });
-    depjson::write_section(json_path, "location", v)
+    }
 }
 
 #[cfg(test)]
