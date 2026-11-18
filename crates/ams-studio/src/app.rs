@@ -3264,6 +3264,7 @@ impl App {
             let mut geometry: Option<[f32; 4]> = None;
             let mut picked: (Option<usize>, Option<Vec<usize>>) = (None, None);
             let mut toggled: Option<Vec<usize>> = None;
+            let mut mode_step = 0i32;
             ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(("ams-studio-pop", format!("{id:?}"))), builder, |ui, _class| {
                 let rect = ui.available_rect_before_wrap();
                 ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
@@ -3293,6 +3294,16 @@ impl App {
                 picked = (out.click, out.band);
                 let vctx = ui.ctx().clone();
                 dock = vctx.input(|i| i.viewport().close_requested()) || vctx.input_mut(|i| i.consume_key(Modifiers::SHIFT | Modifiers::CTRL, Key::Space));
+                // the window of the core viewer holds nothing else: Ctrl+Shift+E / Q (Cmd on a Mac) always mean the cubes here
+                if id == PaneId::Core {
+                    let m = Modifiers::COMMAND | Modifiers::SHIFT;
+                    if vctx.input_mut(|i| i.consume_key(m, Key::E)) {
+                        mode_step += 1;
+                    }
+                    if vctx.input_mut(|i| i.consume_key(m, Key::Q)) {
+                        mode_step -= 1;
+                    }
+                }
                 vctx.input(|i| {
                     let v = i.viewport();
                     if let (Some(o), Some(inner)) = (v.outer_rect, v.inner_rect) {
@@ -3302,6 +3313,9 @@ impl App {
             });
             if toggled.is_some() {
                 self.apply_toggle(&toggled);
+            }
+            if mode_step != 0 && self.cv.on {
+                self.cv_mode_step(ctx, mode_step.signum());
             }
             self.apply_pick(picked.0, picked.1);
             if dock {

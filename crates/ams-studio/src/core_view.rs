@@ -13,13 +13,38 @@ use std::path::PathBuf;
 /// Gap between two cubes, as a fraction of a cube (`CUBE_GAP` of the dashboard).
 const CUBE_GAP: f32 = 0.16;
 
-/// Slices that are centred on the core axis, per specimen (`CUBE_POSITIONS` of the dashboard notebook): a slice with
-/// fewer cubes than the usual layout.
-pub fn centred_slices(specimen: &str) -> &'static [u32] {
-    match specimen {
-        "DC26AB002" => &[0, 1, 2, 3, 4, 5, 24],
-        "DC26AB012" => &[0, 1, 75, 76, 77],
-        _ => &[],
+/// The slices centred on the core axis read from the dashboard notebook (`CUBE_POSITIONS`), by specimen id.
+static DASH_CENTRED: std::sync::Mutex<Vec<(String, Vec<u32>)>> = std::sync::Mutex::new(Vec::new());
+
+/// Remembers the dashboard's `CUBE_POSITIONS` (called when the cubes are laid out; an empty list keeps the old one).
+pub fn set_dashboard_positions(list: Vec<(String, Vec<u32>)>) {
+    if !list.is_empty() {
+        if let Ok(mut g) = DASH_CENTRED.lock() {
+            *g = list;
+        }
+    }
+}
+
+/// The three digits that end a specimen id (`ER26PB002` and `DC26AB002` are the same specimen, named before and after).
+fn spec_number(id: &str) -> Option<&str> {
+    let digits = id.len().checked_sub(3).filter(|_| id.is_char_boundary(id.len().saturating_sub(3)))?;
+    Some(&id[digits..]).filter(|d| d.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Slices that are centred on the core axis, per specimen (`CUBE_POSITIONS` of the dashboard notebook, read from it
+/// when it is found; else the values below): a slice with fewer cubes than the usual layout. A specimen is found by its
+/// id, whichever name it has (`ER26PB002` or `DC26AB002`).
+pub fn centred_slices(specimen: &str) -> Vec<u32> {
+    if let Ok(g) = DASH_CENTRED.lock() {
+        let hit = g.iter().find(|(k, _)| k.eq_ignore_ascii_case(specimen)).or_else(|| g.iter().find(|(k, _)| spec_number(k).is_some() && spec_number(k) == spec_number(specimen)));
+        if let Some((_, v)) = hit {
+            return v.clone();
+        }
+    }
+    match spec_number(specimen) {
+        Some("002") => vec![0, 1, 2, 3, 4, 5, 24],
+        Some("012") => vec![0, 1, 75, 76, 77],
+        _ => vec![],
     }
 }
 
@@ -68,7 +93,7 @@ pub fn build(specimen: &str, names: &[String], photos: &BTreeMap<(u32, char), Pa
     keys.extend(photos.keys().filter(|k| k.0 >= lo && k.0 <= hi).copied());
     let mut keys: Vec<(u32, char)> = keys.into_iter().collect();
     keys.sort();
-    let ys = layout_rows(&keys, centred_slices(specimen));
+    let ys = layout_rows(&keys, &centred_slices(specimen));
     keys.iter()
         .zip(ys)
         .map(|(&(slice, letter), y)| Cube { slice, letter, y, recs: recs.get(&(slice, letter)).cloned().unwrap_or_default(), photo: photos.get(&(slice, letter)).cloned() })
@@ -405,6 +430,14 @@ mod tests {
     }
 
     #[test]
+    fn the_centred_slices_are_found_under_either_name_of_the_specimen() {
+        assert_eq!(centred_slices("ER26PB002"), vec![0, 1, 2, 3, 4, 5, 24]);
+        assert_eq!(centred_slices("DC26AB002"), vec![0, 1, 2, 3, 4, 5, 24]);
+        assert_eq!(centred_slices("ER26PB012"), vec![0, 1, 75, 76, 77]);
+        assert!(centred_slices("ER26PB003").is_empty() && centred_slices("x").is_empty() && centred_slices("").is_empty());
+    }
+
+    #[test]
     fn rows_follow_the_usual_layout_and_d_comes_last() {
         // two A B slices, one with a D cube: A at row 0, B at row 1, D at row 2
         let cubes = [(1, 'A'), (1, 'B'), (2, 'A'), (2, 'B'), (2, 'D')];
@@ -420,6 +453,19 @@ mod tests {
         assert_eq!(y[2], 0.0); // A of slice 1 keeps its row
         // the two cubes of slice 0 are symmetric about the axis (row 1)
         assert!((y[0] - 0.5).abs() < 1e-6 && (y[1] - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_first_slices_of_002_are_centred_under_the_new_specimen_names_too() {
+        let n = names(&["B0", "C0", "A1", "B1", "C1", "A6", "B6", "C6"]);
+        for id in ["ER26PB002", "DC26AB002"] {
+            let cubes = build(id, &n, &BTreeMap::new());
+            let y = |name: &str| cubes.iter().find(|c| c.name() == name).unwrap().y;
+            assert!((y("B0") - 0.5).abs() < 1e-6 && (y("C0") - 1.5).abs() < 1e-6, "{id}");
+            assert_eq!(y("A6"), 0.0);
+        }
+        // another specimen is not centred
+        assert_eq!(build("ER26PB003", &n, &BTreeMap::new()).iter().find(|c| c.name() == "B0").unwrap().y, 1.0);
     }
 
     #[test]

@@ -449,6 +449,13 @@ pub fn run(out: &Path) -> usize {
         h.check("two vein planes", h.app.st_planes.iter().filter(|q| q.ab.is_some()).count() == 2, format!("{}", h.app.st_planes.len()));
         h.step("add the veins again", |a, _| a.add_dashboard_veins());
         h.check("none twice", h.app.st_planes.iter().filter(|q| q.ab.is_some()).count() == 2, format!("{}", h.app.st_planes.len()));
+        // adding a plane with the same numbers again adds nothing; removing works
+        h.app.st_planes_on = true;
+        let n0 = h.app.st_planes.len();
+        let q = h.app.st_planes[0].clone();
+        let added = h.app.push_plane(q);
+        h.check("the same plane is not added twice", !added, "added".to_string());
+        h.check("still the same number", h.app.st_planes.len() == n0, format!("{}", h.app.st_planes.len()));
         let (dd, dp) = h.app.st_planes.first().map_or((0.0, 0.0), |q| (q.dip_dir, q.dip));
         h.check("the plane is the dashboard's", (dd - 87.184).abs() < 0.01 && (dp - 70.858).abs() < 0.01, format!("{dd} {dp}"));
         h.app.st_planes_on = true;

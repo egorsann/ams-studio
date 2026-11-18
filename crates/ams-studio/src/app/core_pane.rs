@@ -585,6 +585,10 @@ impl App {
     fn cv_layout(&mut self) {
         let Some(d) = &self.doc else { return };
         let names: Vec<String> = d.specs.iter().map(|s| s.name.clone()).collect();
+        // the slices that are centred on the core axis come from the dashboard notebook when it is found above the data
+        if let Some(dep) = crate::hyper::locate(&d.path) {
+            core_view::set_dashboard_positions(crate::hyper::cube_positions(&dep));
+        }
         self.cv.cubes = core_view::build(&self.cv.specimen, &names, &self.cv.photos);
         self.cv.for_file = Some((d.path.clone(), d.specs.len()));
     }

@@ -383,6 +383,26 @@ fn first_string_after(src: &str, name: &str, pat: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// `CUBE_POSITIONS` of the dashboard notebook: for each specimen id the slices whose cubes are centred on the core axis
+/// (`{slice: "center"}`; explicit rows are not used).
+pub fn cube_positions(dep: &Path) -> Vec<(String, Vec<u32>)> {
+    let Some(py) = dep.parent() else { return vec![] };
+    let Some(cell) = std::fs::read_to_string(py.join(NOTEBOOK)).ok().and_then(|t| crate::veins::notebook_cell(&t, "CUBE_POSITIONS = {")) else { return vec![] };
+    positions_from(&cell)
+}
+
+fn positions_from(cell: &str) -> Vec<(String, Vec<u32>)> {
+    let m = Module::parse(cell);
+    let mut out = vec![];
+    for (k, v) in m.get("CUBE_POSITIONS").dict().unwrap_or(&[]) {
+        let (Some(id), Some(d)) = (k.str(), v.dict()) else { continue };
+        let mut slices: Vec<u32> = d.iter().filter(|(_, x)| x.str() == Some("center")).filter_map(|(s, _)| s.num().filter(|n| *n >= 0.0).map(|n| n as u32)).collect();
+        slices.sort();
+        out.push((id.to_string(), slices));
+    }
+    out
+}
+
 /// The names in the notebook's `VISIBLE_ROWS` (the parameters the dashboard prints, in its order).
 fn visible_rows(dep: &Path) -> Vec<String> {
     let Some(py) = dep.parent() else { return vec![] };
@@ -620,6 +640,22 @@ WATER_RICH_W1400 = 1413.0
         assert!((h.look.edge - 0.24).abs() < 1e-6 && (h.look.d_scale - 0.6).abs() < 1e-6);
         assert_eq!(h.look.no_trough, [204, 204, 204]);
         assert_eq!(h.look.outline, [89, 89, 89]);
+    }
+
+    #[test]
+    fn the_centred_slices_are_read_from_the_notebook_cell() {
+        let cell = "CUBE_POSITIONS = {\n    \"ER26PB002\": {0: \"center\", 1: \"center\", 24: \"center\"},   # comment\n    \"ER26PB012\": {75: \"center\", 3: {\"A\": 1.0}},\n}\n";
+        assert_eq!(positions_from(cell), vec![("ER26PB002".to_string(), vec![0, 1, 24]), ("ER26PB012".to_string(), vec![75])]);
+    }
+
+    #[test]
+    fn the_real_notebook_gives_the_centred_slices_when_it_is_there() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return };
+        let dep = home.join("SynologyDrive/PhD_work/working_files_doc/Python_doc/dependancies");
+        let p = cube_positions(&dep);
+        if dep.is_dir() {
+            assert_eq!(p.iter().find(|(k, _)| k == "ER26PB002").map(|x| x.1.clone()), Some(vec![0, 1, 2, 3, 4, 5, 24]));
+        }
     }
 
     #[test]

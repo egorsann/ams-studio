@@ -79,6 +79,18 @@ impl StPlane {
         }
     }
 
+    /// The same plane as `o`: the same scope and the same numbers (the angles and the survey for a vein plane); colour
+    /// and comment do not make a plane a different one.
+    pub fn same_as(&self, o: &StPlane) -> bool {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        self.spec.as_deref().map(|s| s.to_lowercase()) == o.spec.as_deref().map(|s| s.to_lowercase())
+            && match (&self.ab, &o.ab) {
+                (Some(a), Some(b)) => close(a.alpha, b.alpha) && close(a.beta, b.beta) && close(a.hole_dip_dir, b.hole_dip_dir) && close(a.plunge, b.plunge),
+                (None, None) => close(self.dip_dir, o.dip_dir) && close(self.dip, o.dip),
+                _ => false,
+            }
+    }
+
     /// Drawn for the specimen with this id (`None` = no file open: only the global planes).
     pub fn applies_to(&self, open_id: Option<&str>) -> bool {
         match (&self.spec, open_id) {
@@ -297,8 +309,19 @@ impl App {
                 globals.push(g);
             }
         }
-        let changed = missing_in_file || (!had && !specific.is_empty());
+        let mut changed = missing_in_file || (!had && !specific.is_empty());
         globals.extend(specific);
+        // vein planes saved more than once with the same numbers (from adding the same one again) are kept once
+        let before = globals.len();
+        let mut kept: Vec<StPlane> = Vec::with_capacity(before);
+        for q in globals {
+            if q.ab.is_some() && kept.iter().any(|k| k.same_as(&q)) {
+                continue;
+            }
+            kept.push(q);
+        }
+        changed |= kept.len() != before;
+        globals = kept;
         self.st_planes = globals;
         if changed {
             self.planes_dirty = Some(now);
@@ -334,6 +357,17 @@ impl App {
         ((self.core.setup.dip_dir, self.core.setup.plunge), "the Drill Core to Geo window")
     }
 
+    /// Adds a plane unless the same one is already there (same scope, same numbers); says so in the note under the buttons.
+    pub(super) fn push_plane(&mut self, q: StPlane) -> bool {
+        if self.st_planes.iter().any(|p| p.same_as(&q)) {
+            self.st_dash_msg = "That plane is already there: change the numbers of the one in the list, or remove it with \u{2715}, before adding another.".into();
+            return false;
+        }
+        self.st_dash_msg.clear();
+        self.st_planes.push(q);
+        true
+    }
+
     /// Adds the veins the dashboard code lists for the open specimen (alpha / beta from `VEIN_PLANES`, the survey from
     /// `BOREHOLE_CONFIGS`), as planes of this specimen; veins that are already there are left as they are.
     pub(super) fn add_dashboard_veins(&mut self) {
@@ -362,7 +396,12 @@ impl App {
             }
             let ab = AlphaBeta { alpha: v.alpha, beta: v.beta, hole_dip_dir: dd, plunge: pl, src: Some(v.name.clone()) };
             let n = self.st_planes.len();
-            self.st_planes.push(StPlane::from_alpha_beta(n, Some(id.clone()), ab, &v.name));
+            let q = StPlane::from_alpha_beta(n, Some(id.clone()), ab, &v.name);
+            if self.st_planes.iter().any(|p| p.same_as(&q)) {
+                there += 1;
+                continue;
+            }
+            self.st_planes.push(q);
             added += 1;
         }
         self.st_dash_msg = format!("Added {added} vein plane{} for {id}{}.", if added == 1 { "" } else { "s" }, if there > 0 { format!(" ({there} already there)") } else { String::new() });
@@ -400,7 +439,11 @@ impl App {
                 for (i, q) in self.st_planes.iter_mut().enumerate().filter(|(_, q)| q.applies_to(open)) {
                     ui.separator();
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut q.on, "");
+                        ui.checkbox(&mut q.on, "").on_hover_text("Show this plane");
+                        // first in the row, so it is never pushed out of sight by a narrow panel
+                        if ui.small_button("\u{2715}").on_hover_text("Remove this plane").clicked() {
+                            remove = Some(i);
+                        }
                         if q.ab.is_some() {
                             // a vein plane: the angles are typed, the strike / dip follow from them and the hole's survey
                             let mut ch = false;
@@ -428,9 +471,6 @@ impl App {
                         let mut c = Color32::from_rgb(q.color[0], q.color[1], q.color[2]);
                         if ui.color_edit_button_srgba(&mut c).changed() {
                             q.color = [c.r(), c.g(), c.b()];
-                        }
-                        if ui.small_button("\u{2715}").on_hover_text("Remove this plane").clicked() {
-                            remove = Some(i);
                         }
                     });
                     if q.ab.is_some() {
@@ -474,7 +514,7 @@ impl App {
                     _ => "Add a global plane".to_string(),
                 };
                 if ui.add_enabled(open_id.is_some(), egui::Button::new(label)).on_hover_text("A file has to be open: the plane is stored next to its data").clicked() {
-                    self.st_planes.push(StPlane::new(n_planes, if specific { open_id.clone() } else { None }));
+                    self.push_plane(StPlane::new(n_planes, if specific { open_id.clone() } else { None }));
                 }
                 // a vein plane from the angles measured on the core
                 ui.horizontal(|ui| {
@@ -482,7 +522,7 @@ impl App {
                     if ui.add_enabled(open_id.is_some(), egui::Button::new(label)).on_hover_text("A file has to be open: the plane is stored next to its data").clicked() {
                         let (sv, _) = self.hole_survey();
                         let ab = AlphaBeta { alpha: 45.0, beta: 0.0, hole_dip_dir: sv.0, plunge: sv.1, src: None };
-                        self.st_planes.push(StPlane::from_alpha_beta(n_planes, if specific { open_id.clone() } else { None }, ab, ""));
+                        self.push_plane(StPlane::from_alpha_beta(n_planes, if specific { open_id.clone() } else { None }, ab, ""));
                     }
                     info_icon(ui, "For a vein you measured on the whole core before it was cut: alpha is the angle between the vein and the core axis (0 to 90 degrees), beta is the angle clockwise looking downhole from the line of the BOH mark to the downhole end of the vein's trace on the core (0 to 360 degrees). The plane is worked out with the survey of the hole and drawn like any other plane. The survey is taken from the AMS dashboard code, else from the position saved for the specimen, else from the Drill Core to Geo window; it is shown under the plane and can be changed for each plane.");
                 });
@@ -493,7 +533,7 @@ impl App {
                             if ui.button(format!("Add the veins of the dashboard (n={})", sp.veins.len())).clicked() {
                                 self.add_dashboard_veins();
                             }
-                            info_icon(ui, "The AMS dashboard code lists the veins you measured for this specimen (VEIN_PLANES: name, alpha, beta) and the survey of its hole (BOREHOLE_CONFIGS). This adds each one as a plane of this specimen, named after the vein; a vein that is already there is left as it is, so nothing you changed is overwritten. The code is read from the same place relative to your data on every computer.");
+                            info_icon(ui, "The AMS dashboard code lists the veins you measured for this specimen (VEIN_PLANES: name, alpha, beta) and the survey of its hole (BOREHOLE_CONFIGS). They are the reoriented, geographic veins, the ones the dashboard draws in its last two rows (geographic, and geographic with K3); nothing of the bird's-eye rows is used. This adds each one as a plane of this specimen, named after the vein; a vein that is already there is left as it is, so nothing you changed is overwritten. The code is read from the same place relative to your data on every computer.");
                         });
                     }
                     if !self.st_dash_msg.is_empty() {
@@ -565,6 +605,21 @@ mod tests {
         assert!(again.len() == 1 && (again[0].dip - q.dip).abs() < 1e-9);
         // a typed plane has no angles
         assert!(parse_planes(Some(&Value::Array(vec![plane_json(&StPlane::new(0, None))])), None)[0].ab.is_none());
+    }
+
+    #[test]
+    fn the_same_numbers_make_the_same_plane_whatever_the_colour_and_comment() {
+        let ab = || AlphaBeta { alpha: 45.0, beta: 0.0, hole_dip_dir: 305.0, plunge: 69.0, src: None };
+        let a = StPlane::from_alpha_beta(0, Some("ER26PB012".into()), ab(), "");
+        let mut b = StPlane::from_alpha_beta(3, Some("er26pb012".into()), ab(), "a comment");
+        assert!(a.same_as(&b));
+        b.ab.as_mut().unwrap().beta = 10.0;
+        assert!(!a.same_as(&b));
+        // another scope is another plane
+        assert!(!a.same_as(&StPlane::from_alpha_beta(0, None, ab(), "")));
+        // a typed plane and a vein plane never count as the same
+        assert!(!StPlane::new(0, None).same_as(&StPlane::from_alpha_beta(0, None, ab(), "")));
+        assert!(StPlane::new(0, None).same_as(&StPlane::new(1, None)));
     }
 
     #[test]

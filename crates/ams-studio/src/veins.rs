@@ -103,7 +103,7 @@ impl Dash {
 }
 
 /// The source of the first notebook cell that has a line starting with `marker`.
-fn notebook_cell(text: &str, marker: &str) -> Option<String> {
+pub(crate) fn notebook_cell(text: &str, marker: &str) -> Option<String> {
     let nb: serde_json::Value = serde_json::from_str(text).ok()?;
     for cell in nb.get("cells").and_then(|c| c.as_array())? {
         let src: String = match cell.get("source") {
