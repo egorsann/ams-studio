@@ -3305,7 +3305,7 @@ impl App {
                     const SALT_BIN: [&str; 3] = ["bn_a", "bn_b", "bn_c"];
                     // the bottom right pane (T vs Pj) can be a polar plot (T angle, Pj radius)
                     if k == 2 && c.polar {
-                        plots::polar(ui, body, &shown, if self.use_p { 3 } else { 4 }, c.polar_log, self.marker, th, "polar")
+                        plots::polar(ui, body, &shown, if self.use_p { 3 } else { 4 }, c.polar_log, self.marker, th, "polar", &mut self.views[k])
                     } else {
                     match c.kind {
                         XyKind::Histogram => plots::histogram(ui, body, &shown, c.bins, &c.hist, th, SALT[k]),

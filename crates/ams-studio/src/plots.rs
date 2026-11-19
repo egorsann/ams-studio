@@ -1036,7 +1036,7 @@ pub fn polar_scale(max_pj: f64, log: bool) -> (Vec<f64>, f64) {
 /// The T / Pj plot as it is usually shown in publications: a wedge of +-45 degrees, T as the angle (T = +1, oblate,
 /// at the top end; T = -1, prolate, at the bottom end; T = 0 along the horizontal axis) and Pj (or P) as the radius
 /// starting at 1 in the corner, linear or logarithmic.
-pub fn polar(ui: &mut Ui, rect: Rect, pts: &[Pt], p_param: usize, log: bool, size: f32, th: &Theme, salt: &str) -> PlotOut {
+pub fn polar(ui: &mut Ui, rect: Rect, pts: &[Pt], p_param: usize, log: bool, size: f32, th: &Theme, salt: &str, view: &mut ZoomView) -> PlotOut {
     let pname = if p_param == 3 { "P" } else { "Pj" };
     // (index, T, Pj): both have to be defined
     let vals: Vec<(usize, f64, f64)> = pts
@@ -1055,12 +1055,25 @@ pub fn polar(ui: &mut Ui, rect: Rect, pts: &[Pt], p_param: usize, log: bool, siz
     let (lm, rm, tm, bm) = (34.0f32, 96.0f32, 20.0f32, 20.0f32);
     let (aw, ah) = (rect.width() - lm - rm, rect.height() - tm - bm);
     let big = aw.min(ah / (2.0 * std::f32::consts::FRAC_1_SQRT_2)).max(30.0);
-    let o = Pos2::new(rect.min.x + lm + (aw - big).max(0.0) / 2.0, rect.center().y);
+    let o0 = Pos2::new(rect.min.x + lm + (aw - big).max(0.0) / 2.0, rect.center().y);
+    // zoom and pan (Ctrl + scroll about the pointer, scroll or middle-drag to pan, Esc resets) act on the box that holds
+    // the wedge: `view` is the visible part of it as fractions, like the other plots
+    let half = big * std::f32::consts::FRAC_1_SQRT_2;
+    let full = Rect::from_min_max(Pos2::new(o0.x, o0.y - half), Pos2::new(o0.x + big, o0.y + half));
+    handle_zoom(ui, &resp, full, view);
+    let zoom = |p: Pos2| -> Pos2 {
+        let (u, v) = (((p.x - full.min.x) / full.width()) as f64, ((full.max.y - p.y) / full.height()) as f64);
+        let (wx, wy) = ((view.x.1 - view.x.0).max(1e-9), (view.y.1 - view.y.0).max(1e-9));
+        Pos2::new(full.min.x + (((u - view.x.0) / wx) as f32) * full.width(), full.max.y - (((v - view.y.0) / wy) as f32) * full.height())
+    };
+    let o = zoom(o0);
     let at = |t: f64, r: f64| -> Pos2 {
         let (s, c) = (t * std::f64::consts::FRAC_PI_4).sin_cos();
-        Pos2::new(o.x + (r / rmax) as f32 * big * c as f32, o.y - (r / rmax) as f32 * big * s as f32)
+        zoom(Pos2::new(o0.x + (r / rmax) as f32 * big * c as f32, o0.y - (r / rmax) as f32 * big * s as f32))
     };
-    let arc = |r: f64| -> Vec<Pos2> { (0..=40).map(|k| at(-1.0 + 2.0 * k as f64 / 40.0, r)).collect() };
+    // more segments when zoomed in, so the rings stay round
+    let seg = (40.0 / (view.x.1 - view.x.0).max(1e-3)).clamp(40.0, 600.0) as usize;
+    let arc = |r: f64| -> Vec<Pos2> { (0..=seg).map(|k| at(-1.0 + 2.0 * k as f64 / seg as f64, r)).collect() };
     let grid = Stroke::new(1.0, th.faint().gamma_multiply(0.7));
     for t in &ticks {
         if (rad(*t) - rmax).abs() > 1e-9 {
@@ -1121,6 +1134,9 @@ pub fn polar(ui: &mut Ui, rect: Rect, pts: &[Pt], p_param: usize, log: bool, siz
     }
     if done.is_some() {
         out.band = Some(inside);
+    }
+    if view.is_zoomed() {
+        pa.text(Pos2::new(rect.max.x - 8.0, rect.max.y - 4.0), Align2::RIGHT_BOTTOM, format!("zoom \u{d7}{:.1}   Esc resets", 1.0 / (view.x.1 - view.x.0).min(view.y.1 - view.y.0)), FontId::proportional(11.0), th.faint());
     }
     if vals.is_empty() {
         pa.text(o + Vec2::new(big / 2.0, 0.0), Align2::CENTER_CENTER, "No specimens to show", FontId::proportional(13.0), th.faint());
@@ -1448,5 +1464,33 @@ mod plane_tests {
         assert!((d - 3.0).abs() < 1e-5 && (q.x - 4.0).abs() < 1e-5);
         let (d, _) = nearest_on_line(&l, Pos2::new(13.0, 5.0)).unwrap();
         assert!((d - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ctrl_scroll_zooms_the_polar_plot_and_the_markers_move_with_it() {
+        let ctx = egui::Context::default();
+        let th = Theme { dark: true, k_colors: [Color32::RED, Color32::GREEN, Color32::BLUE], accent: Color32::LIGHT_BLUE };
+        let mut vals = [f64::NAN; N_PARAMS];
+        vals[5] = 0.4; // T
+        vals[4] = 1.3; // Pj
+        vals[3] = 1.3;
+        let pts = vec![Pt { idx: 0, name: "A1".into(), di: [(0.0, 0.0); 3], vals, sds: [0.0; 3], selected: false, color: None }];
+        let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(400.0, 300.0));
+        let mut view = ZoomView::default();
+        let mut run = |events: Vec<egui::Event>, view: &mut ZoomView| {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(500.0, 400.0))), events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                polar(ui, rect, &pts, 4, false, 6.0, &th, "polar-test", view);
+            });
+            out.textures_delta.clear();
+        };
+        // the pointer over the plot, then a zoom event (Ctrl + scroll or a pinch)
+        run(vec![egui::Event::PointerMoved(Pos2::new(120.0, 160.0))], &mut view);
+        assert!(!view.is_zoomed());
+        run(vec![egui::Event::PointerMoved(Pos2::new(120.0, 160.0)), egui::Event::Zoom(2.0)], &mut view);
+        assert!(view.is_zoomed(), "{view:?}");
+        assert!(view.x.1 - view.x.0 < 0.9);
+        view.reset();
+        assert!(!view.is_zoomed());
     }
 }
