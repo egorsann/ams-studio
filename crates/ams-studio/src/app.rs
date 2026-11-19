@@ -3009,10 +3009,16 @@ impl App {
             if !dirs.is_empty() && !files.is_empty() {
                 ui.separator();
             }
+            // Ctrl+click adds or removes one file, Shift+click selects the range from the last click (as in the folder
+            // of specimens); a plain click opens the file. The selected files are the ones the tools work on.
+            let mods = ui.input(|i| i.modifiers);
             for f in &files {
                 let name = f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                if ui.selectable_label(cur.as_ref() == Some(f), format!("🧲 {name}")).clicked() {
-                    open = Some(f.clone());
+                let picked = self.tree_sel.contains(f);
+                if ui.selectable_label(cur.as_ref() == Some(f) || picked, format!("🧲 {name}")).clicked() {
+                    if browser_click(&mut self.tree_sel, &mut self.tree_anchor, &files, cur.as_ref(), f, mods) {
+                        open = Some(f.clone());
+                    }
                 }
             }
             if dirs.is_empty() && files.is_empty() {
@@ -3028,6 +3034,8 @@ impl App {
             if p != self.browser_dir {
                 self.browser_back.push(std::mem::replace(&mut self.browser_dir, p));
                 self.browser_back.truncate(64);
+                self.tree_sel.clear();
+                self.tree_anchor = None;
             }
             self.save_state();
         }
@@ -4002,6 +4010,45 @@ fn row_text(ui: &Ui, rect: Rect, dx: f32, text: &str, active: bool, _dark: bool)
     galley_rect.width()
 }
 
+/// A click on a file of the plain file browser: Shift selects the range from the last click, Ctrl adds or removes one file
+/// (the open file counts as selected for a first Ctrl+click), a plain click selects only that file. Returns whether the file
+/// is to be opened (only a plain click does).
+fn browser_click(sel: &mut Vec<PathBuf>, anchor: &mut Option<PathBuf>, files: &[PathBuf], cur: Option<&PathBuf>, f: &PathBuf, mods: Modifiers) -> bool {
+    if mods.shift {
+        let a = anchor.as_ref().and_then(|x| files.iter().position(|y| y == x)).or_else(|| cur.and_then(|c| files.iter().position(|y| y == c))).unwrap_or(0);
+        let b = files.iter().position(|y| y == f).unwrap_or(0);
+        let range = files[a.min(b)..=a.max(b)].to_vec();
+        if mods.ctrl || mods.command {
+            for r in range {
+                if !sel.contains(&r) {
+                    sel.push(r);
+                }
+            }
+        } else {
+            *sel = range;
+        }
+        false
+    } else if mods.ctrl || mods.command {
+        if sel.is_empty() {
+            if let Some(c) = cur.filter(|c| *c != f) {
+                sel.push(c.clone());
+            }
+        }
+        match sel.iter().position(|y| y == f) {
+            Some(k) => {
+                sel.remove(k);
+            }
+            None => sel.push(f.clone()),
+        }
+        *anchor = Some(f.clone());
+        false
+    } else {
+        *sel = vec![f.clone()];
+        *anchor = Some(f.clone());
+        true
+    }
+}
+
 fn select(doc: &mut Doc, i: usize, mods: Modifiers, anchor: &mut Option<usize>, order: &[usize]) {
     if mods.shift {
         if let Some(a) = *anchor {
@@ -4685,5 +4732,40 @@ impl App {
         self.list_drag = drag;
         self.last_anchor = anchor;
         self.win_table = open;
+    }
+}
+
+#[cfg(test)]
+mod browser_click_tests {
+    use super::*;
+
+    fn files() -> Vec<PathBuf> {
+        ["a", "b", "c", "d", "e"].iter().map(|n| PathBuf::from(format!("/x/{n}.ams"))).collect()
+    }
+
+    #[test]
+    fn shift_and_ctrl_select_several_files_in_the_plain_browser() {
+        let fl = files();
+        let (mut sel, mut anchor): (Vec<PathBuf>, Option<PathBuf>) = (vec![], None);
+        let none = Modifiers::NONE;
+        // a plain click selects one file and opens it
+        assert!(browser_click(&mut sel, &mut anchor, &fl, None, &fl[1], none));
+        assert_eq!(sel, vec![fl[1].clone()]);
+        // Shift+click: the range from the anchor
+        assert!(!browser_click(&mut sel, &mut anchor, &fl, Some(&fl[1]), &fl[3], Modifiers::SHIFT));
+        assert_eq!(sel, fl[1..=3].to_vec());
+        // Ctrl+click adds a separate file, and again removes it
+        assert!(!browser_click(&mut sel, &mut anchor, &fl, Some(&fl[1]), &fl[0], Modifiers::CTRL));
+        assert_eq!(sel.len(), 4);
+        assert!(!browser_click(&mut sel, &mut anchor, &fl, Some(&fl[1]), &fl[0], Modifiers::CTRL));
+        assert_eq!(sel, fl[1..=3].to_vec());
+        // a first Ctrl+click with nothing selected keeps the open file in the selection
+        sel.clear();
+        anchor = None;
+        browser_click(&mut sel, &mut anchor, &fl, Some(&fl[2]), &fl[4], Modifiers::CTRL);
+        assert_eq!(sel, vec![fl[2].clone(), fl[4].clone()]);
+        // Ctrl+Shift adds the range to what is selected
+        browser_click(&mut sel, &mut anchor, &fl, Some(&fl[2]), &fl[3], Modifiers::CTRL | Modifiers::SHIFT);
+        assert!(sel.contains(&fl[3]) && sel.contains(&fl[2]) && sel.contains(&fl[4]));
     }
 }
