@@ -74,6 +74,9 @@ pub enum IdScheme {
     FirstWord,
     /// The first this many characters.
     Chars(usize),
+    /// The name up to the end of its last number (`PB-1_use.ams` -> `PB-1`, `Site 12.ams` -> `Site 12`), for names whose
+    /// first word has no digit.
+    LastNumber,
 }
 
 impl IdScheme {
@@ -82,6 +85,7 @@ impl IdScheme {
             IdScheme::Digits(n) => format!("a {n}-digit number in the name"),
             IdScheme::FirstWord => "the first part of the name (up to the first _ - or space)".to_string(),
             IdScheme::Chars(n) => format!("the first {n} characters of the name"),
+            IdScheme::LastNumber => "the name up to its last number (PB-1, Site 12)".to_string(),
         }
     }
 
@@ -109,6 +113,10 @@ impl IdScheme {
                 (w.chars().count() >= 2 && w.chars().any(|c| c.is_ascii_digit())).then(|| w.to_string())
             }
             IdScheme::Chars(n) => (n > 0 && stem.chars().count() >= n).then(|| stem.chars().take(n).collect()),
+            IdScheme::LastNumber => {
+                let end = stem.trim_end_matches(|c: char| !c.is_ascii_digit()).len();
+                (end > 0).then(|| stem[..end].to_string())
+            }
         }
     }
 }
@@ -143,7 +151,28 @@ pub fn detect_scheme(stems: &[String]) -> Option<IdScheme> {
         return Some(sc);
     }
     let (h, d) = covers(IdScheme::FirstWord);
-    good(h, d).then_some(IdScheme::FirstWord)
+    if good(h, d) {
+        return Some(IdScheme::FirstWord);
+    }
+    let (h, d) = covers(IdScheme::LastNumber);
+    good(h, d).then_some(IdScheme::LastNumber)
+}
+
+/// What the open set was built with (root folder, layout, ID scheme chosen by hand), so that the places of specimens
+/// that share a folder are kept under the same IDs the file tree shows.
+static FORCED: std::sync::Mutex<Option<(PathBuf, Layout, Option<IdScheme>)>> = std::sync::Mutex::new(None);
+
+pub fn set_forced(v: Option<(PathBuf, Layout, Option<IdScheme>)>) {
+    if let Ok(mut g) = FORCED.lock() {
+        *g = v;
+    }
+}
+
+/// The layout and hand-chosen scheme of the open set when `dir` is inside its root folder.
+pub fn forced_for(dir: &Path) -> Option<(Layout, Option<IdScheme>)> {
+    let g = FORCED.lock().ok()?;
+    let (root, l, sc) = g.as_ref()?;
+    dir.starts_with(root).then_some((*l, *sc))
 }
 
 const MAX_DEPTH: usize = 4;
@@ -579,6 +608,20 @@ mod tests {
         let (root, raw) = flat_dir(&["abcX1.ams", "abcX2.ams", "defY1.ams"]);
         let b = build(&root, &raw, Kind::Ams, Layout::OneFolder, Some(IdScheme::Chars(3)), Phases::ByName);
         assert_eq!(b.folders.iter().map(|f| (f.name.as_str(), f.files.len())).collect::<Vec<_>>(), [("abc", 2), ("def", 1)]);
+    }
+
+    #[test]
+    fn names_whose_first_word_has_no_digit_are_told_apart_by_their_last_number() {
+        for names in [["PB-1.ams", "PB-2.ams", "PB-3.ams"], ["KZ_1.ams", "KZ_2.ams", "KZ_3.ams"], ["Site 1.ams", "Site 2.ams", "Site 3.ams"]] {
+            let (root, raw) = flat_dir(&names);
+            let b = build(&root, &raw, Kind::Ams, Layout::Auto, None, Phases::ByName);
+            assert_eq!(b.folders.len(), 3, "{names:?}");
+            assert_eq!(b.scheme, Some(IdScheme::LastNumber));
+        }
+        assert_eq!(IdScheme::LastNumber.id_of("PB-1_use"), Some("PB-1".into()));
+        assert_eq!(IdScheme::LastNumber.id_of("nodigits"), None);
+        // the ordinary schemes still come first
+        assert_eq!(detect_scheme(&["ER26PB004_use".into(), "ER26PB005_use".into()]), Some(IdScheme::FirstWord));
     }
 
     #[test]

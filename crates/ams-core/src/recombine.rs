@@ -55,9 +55,35 @@ pub struct Planned {
     pub skip: Option<Skip>,
 }
 
-/// `(sample part, letters, number)` of a name like `ZZ01-A1`.
+/// `(sample part, letters, number)` of a name like `ZZ01-A1`. Words appended after the sub-specimen (`A46_CANTED`,
+/// `ZZ01-A1_canted_weak`) are ignored: the name sorts where the plain `A46` / `ZZ01-A1` would.
 pub fn split_id(name: &str) -> (String, Option<(String, u64)>) {
+    split_id_suffix(name).0
+}
+
+/// Like `split_id`, plus the appended words (empty for a plain name), used only to order otherwise equal names.
+fn split_id_suffix(name: &str) -> ((String, Option<(String, u64)>), String) {
     let name = name.trim();
+    let whole = split_id_plain(name);
+    if whole.1.is_some() {
+        return (whole, String::new());
+    }
+    // no sub-specimen found: drop trailing words one at a time (A46_CANTED_WEAK_ARRO -> A46_CANTED_WEAK -> A46_CANTED -> A46)
+    let mut end = name.len();
+    while let Some(p) = name[..end].rfind(|c: char| matches!(c, '-' | '_' | ' ')) {
+        if p == 0 {
+            break;
+        }
+        end = p;
+        let head = split_id_plain(&name[..end]);
+        if head.1.is_some() {
+            return (head, name[end + 1..].to_string());
+        }
+    }
+    (whole, String::new())
+}
+
+fn split_id_plain(name: &str) -> (String, Option<(String, u64)>) {
     // the sub-specimen part is letters + number (A1) or number + letters (1A)
     let tail_parts = |tail: &str| -> Option<(String, u64)> {
         let letters: String = tail.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
@@ -134,7 +160,7 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
 }
 
 pub fn order_cmp(a: &str, b: &str, within: Within) -> Ordering {
-    let ((pa, ta), (pb, tb)) = (split_id(a), split_id(b));
+    let (((pa, ta), xa), ((pb, tb), xb)) = (split_id_suffix(a), split_id_suffix(b));
     natural_cmp(&pa, &pb).then_with(|| match (ta, tb) {
         (Some((la, na)), Some((lb, nb))) => match within {
             Within::NumberThenLetter => na.cmp(&nb).then_with(|| la.cmp(&lb)),
@@ -144,6 +170,7 @@ pub fn order_cmp(a: &str, b: &str, within: Within) -> Ordering {
         (None, Some(_)) => Ordering::Less,
         (None, None) => Ordering::Equal,
     })
+    .then_with(|| natural_cmp(&xa, &xb))
 }
 
 /// Whether one file's records are already in the suggested order.
@@ -198,6 +225,15 @@ mod tests {
         assert_eq!(split_id("ZZ01-A1"), ("ZZ01".into(), Some(("a".into(), 1))));
         assert_eq!(split_id("DC26AB002_c12"), ("DC26AB002".into(), Some(("c".into(), 12))));
         assert_eq!(split_id("ZZ01").1, None);
+        // words appended after the sub-specimen do not change where it sorts
+        assert_eq!(split_id("A46_CANTED"), (String::new(), Some(("a".into(), 46))));
+        assert_eq!(split_id("A47_CANTED_WEAK_ARRO"), (String::new(), Some(("a".into(), 47))));
+        assert_eq!(split_id("ZZ01-A1_canted"), ("ZZ01".into(), Some(("a".into(), 1))));
+        assert_eq!(split_id("DC26AB002A1_canted"), ("DC26AB002".into(), Some(("a".into(), 1))));
+        assert_eq!(split_id("ZZ01_extra").1, None);
+        let mut v = vec!["A2_CANTED", "A10", "A1_CANTED", "A1", "B1"];
+        v.sort_by(|a, b| order_cmp(a, b, Within::NumberThenLetter));
+        assert_eq!(v, ["A1", "A1_CANTED", "B1", "A2_CANTED", "A10"]);
         assert_eq!(split_id("ZZ01-7").1, None);
         // number + letter, and names without a separator
         assert_eq!(split_id("ZZ01-2B"), ("ZZ01".into(), Some(("b".into(), 2))));

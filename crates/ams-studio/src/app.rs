@@ -2236,6 +2236,8 @@ impl App {
             self.rescue_ui(ui);
             return;
         }
+        // the places of specimens that share a folder follow the open set's layout and ID scheme
+        ams_core::specset::set_forced(self.set.as_ref().map(|s| (s.root.clone(), s.opts.layout, s.opts.scheme.scheme())));
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.ui_body(ui)));
         match r {
             Ok(()) => self.crash.streak = 0,

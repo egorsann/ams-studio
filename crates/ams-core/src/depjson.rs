@@ -138,7 +138,12 @@ pub fn specimen_key(file: &Path) -> Option<String> {
     let leaf = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let source_dir = if crate::specset::is_result_folder(&leaf) { dir.parent()? } else { dir };
     let stems = data_stems(source_dir);
-    let sc = crate::specset::detect_scheme(&stems)?;
+    // the open set's own choice (one specimen per folder, or an ID scheme picked by hand) wins over the guess
+    let sc = match crate::specset::forced_for(source_dir) {
+        Some((crate::specset::Layout::OwnFolders, _)) => return None,
+        Some((_, Some(sc))) => sc,
+        _ => crate::specset::detect_scheme(&stems)?,
+    };
     let stem = file.file_stem()?.to_string_lossy().to_string();
     sc.id_of(stem.strip_suffix("_geo").unwrap_or(&stem))
 }
@@ -397,5 +402,30 @@ mod tests {
         assert_eq!(read_section(&for_source(&single.join("ER01_old.ams")), "location").unwrap()["x"], 5.0);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&single);
+    }
+
+    #[test]
+    fn specimens_in_one_folder_without_a_detectable_id_keep_separate_places() {
+        let dir = std::env::temp_dir().join(format!("depjson-lastnum-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["PB-1.ams", "PB-2.ams", "PB-3.ams"] {
+            std::fs::write(dir.join(f), b"").unwrap();
+        }
+        let (a, b) = (dir.join("PB-1.ams"), dir.join("PB-2.ams"));
+        assert_eq!(specimen_key(&a).as_deref(), Some("PB-1"));
+        write_section_for(&a, "location", Some(json!({"x": 1.0}))).unwrap();
+        write_section_for(&b, "location", Some(json!({"x": 2.0}))).unwrap();
+        assert_eq!(read_section_for(&a, "location").unwrap()["x"], 1.0);
+        assert_eq!(read_section_for(&b, "location").unwrap()["x"], 2.0);
+        // a scheme picked by hand for the open set is the one that tells the specimens apart
+        crate::specset::set_forced(Some((dir.clone(), crate::specset::Layout::OneFolder, Some(crate::specset::IdScheme::Chars(4)))));
+        assert_eq!(specimen_key(&a).as_deref(), Some("PB-1"));
+        crate::specset::set_forced(Some((dir.clone(), crate::specset::Layout::OneFolder, Some(crate::specset::IdScheme::Chars(2)))));
+        assert_eq!(specimen_key(&a).as_deref(), Some("PB"));
+        crate::specset::set_forced(Some((dir.clone(), crate::specset::Layout::OwnFolders, None)));
+        assert_eq!(specimen_key(&a), None);
+        crate::specset::set_forced(None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
