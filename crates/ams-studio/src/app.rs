@@ -1857,6 +1857,15 @@ impl App {
         true
     }
 
+    /// Esc with nothing open: in every pane the selection goes first; the next Esc takes the zoom back.
+    pub(super) fn esc_selection_then_zoom(&mut self) {
+        if !self.esc_clear_selection() && (self.st_view.is_zoomed() || self.views.iter().any(|v| v.is_zoomed()) || self.cv.view.is_zoomed()) {
+            self.st_view.reset();
+            self.views.iter_mut().for_each(|v| v.reset());
+            self.cv.view.reset();
+        }
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context) -> Vec<Action> {
         let mut out = vec![];
         let c = Modifiers::CTRL;
@@ -1925,12 +1934,7 @@ impl App {
                 return out;
             }
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-                // in every pane the selection goes first; the next Esc takes the zoom back
-                if !self.esc_clear_selection() && (self.st_view.is_zoomed() || self.views.iter().any(|v| v.is_zoomed()) || self.cv.view.is_zoomed()) {
-                    self.st_view.reset();
-                    self.views.iter_mut().for_each(|v| v.reset());
-                    self.cv.view.reset();
-                }
+                self.esc_selection_then_zoom();
             }
             return out;
         }
@@ -3303,6 +3307,7 @@ impl App {
             let mut picked: (Option<usize>, Option<Vec<usize>>) = (None, None);
             let mut toggled: Option<Vec<usize>> = None;
             let mut mode_step = 0i32;
+            let mut esc = false;
             ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(("ams-studio-pop", format!("{id:?}"))), builder, |ui, _class| {
                 let rect = ui.available_rect_before_wrap();
                 ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
@@ -3333,6 +3338,10 @@ impl App {
                 toggled = out.toggle.clone();
                 let vctx = ui.ctx().clone();
                 dock = vctx.input(|i| i.viewport().close_requested()) || vctx.input_mut(|i| i.consume_key(Modifiers::SHIFT | Modifiers::CTRL, Key::Space));
+                // Esc pressed in this window never reaches the main window's shortcuts (each native window has its own input)
+                if !vctx.egui_wants_keyboard_input() && vctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                    esc = true;
+                }
                 // the window of the core viewer holds nothing else: Ctrl+Shift+E / Q (Cmd on a Mac) always mean the cubes here
                 if id == PaneId::Core {
                     let m = Modifiers::COMMAND | Modifiers::SHIFT;
@@ -3352,6 +3361,9 @@ impl App {
             });
             if toggled.is_some() {
                 self.apply_toggle(&toggled);
+            }
+            if esc {
+                self.esc_selection_then_zoom();
             }
             if mode_step != 0 && self.cv.on {
                 self.cv_mode_step(ctx, mode_step.signum());
