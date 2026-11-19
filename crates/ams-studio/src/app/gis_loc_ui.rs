@@ -530,9 +530,17 @@ impl App {
                 self.gis.missing += 1;
                 continue;
             };
-            self.gis.placed.push(Placed { name: core_pane::spec_id(f), path: f.clone(), n: tensors.len(), lon: loc.lon, lat: loc.lat, merc: loc.merc(), fabric, depth: loc.depth, hole: loc.hole, elev: loc.elevation });
+            self.gis.placed.push(Placed { name: core_pane::spec_id(f), path: f.clone(), n: tensors.len(), lon: loc.lon, lat: loc.lat, merc: loc.merc(), fabric, depth: loc.depth, hole: loc.hole.or_else(|| reorientation_hole(f)), elev: loc.elevation });
         }
     }
+}
+
+/// The hole direction of a specimen that has a drill core reorientation (the Owens one of Drill Core to Geo) but no hole
+/// direction typed with its place: a reoriented specimen is drill core, so specimens that share a collar get their box
+/// (and the hole line) without anybody ticking "Drill core" for each of them.
+fn reorientation_hole(f: &std::path::Path) -> Option<gis_loc::Hole> {
+    let partner = super::export_ui::geo_path(f);
+    depjson::read(&partner).into_iter().flatten().find_map(|s| gis_loc::Hole::new(s.dip_dir, s.plunge))
 }
 
 #[cfg(test)]
@@ -580,6 +588,27 @@ mod tests {
             let cos = (mid[0] * gs.vecs[axis][0] + mid[1] * gs.vecs[axis][1] + mid[2] * gs.vecs[axis][2]) / m;
             assert!(cos > 0.999, "axis {axis}: {cos}");
         }
+    }
+
+    #[test]
+    fn a_reoriented_specimen_gets_its_hole_direction_from_the_reorientation() {
+        use ams_core::core::{Arrow, CoreSetup, Face};
+        let dir = std::env::temp_dir().join(format!("gis-hole-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("1234567_use.ams"), dir.join("1234568_use.ams"));
+        for f in [&a, &b] {
+            std::fs::write(f, b"").unwrap();
+        }
+        assert!(reorientation_hole(&a).is_none());
+        let setup = CoreSetup { dip_dir: 316.1, plunge: 67.0, offset: 10.0, face: Face::ALL[0], arrow: Arrow::ALL[0] };
+        let geo = crate::app::export_ui::geo_path(&a);
+        std::fs::create_dir_all(geo.parent().unwrap()).unwrap();
+        ams_core::depjson::write(&geo, &[("A1".to_string(), Some(setup))]).unwrap();
+        let h = reorientation_hole(&a).unwrap();
+        assert_eq!((h.dip_dir, h.plunge), (316.1, 67.0));
+        assert!(reorientation_hole(&b).is_none(), "another file of the folder has its own entry");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
