@@ -567,6 +567,19 @@ pub fn run(out: &Path) -> usize {
         h.step(&format!("{name}: close set"), |app, c| app.run(c, Action::Close));
     }
 
+    // ---- one file opened from a one-folder layout (no set): the specimens are the ones of its folder
+    {
+        let flat = root.join("flat7");
+        let mut first: Vec<PathBuf> = std::fs::read_dir(&flat).map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().map_or(false, |x| x == "ams")).collect()).unwrap_or_default();
+        first.sort();
+        if let Some(f) = first.first().cloned() {
+            h.app.set = None;
+            h.step("open one file of a one-folder layout without a set", move |app, _| app.open_path(f));
+            let n = h.app.cv_files().len();
+            h.check("one file of a one-folder layout: the map and core viewer see every specimen", n == 5, format!("{n} specimens (wanted 5)"));
+        }
+    }
+
     // ---- the Recombine questions and the phase join
     h.step("recombine question window", |a, _| a.open_win(W_RECOMB_ASK));
     h.step("recombine parts window", |a, _| a.open_win(W_RECOMB));

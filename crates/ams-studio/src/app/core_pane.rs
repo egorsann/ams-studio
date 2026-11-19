@@ -541,7 +541,53 @@ impl App {
         if !v.is_empty() {
             return v;
         }
-        self.doc.as_ref().filter(|d| !d.synthetic).map(|d| vec![d.path.clone()]).unwrap_or_default()
+        // no folder of specimens opened (a file or several were opened with Open Data File): the specimens are the ones the
+        // open file's own folder holds, told apart by their IDs, so the GIS map and the core viewer show all of them
+        if let Some(d) = self.doc.as_ref().filter(|d| !d.synthetic) {
+            let v = self.folder_specimen_files(&d.path);
+            if v.len() > 1 {
+                return v;
+            }
+            return vec![d.path.clone()];
+        }
+        vec![]
+    }
+
+    /// The main files of the specimens that share the folder of `file` (see `ams_core::specset`), remembered for a few seconds.
+    fn folder_specimen_files(&self, file: &Path) -> Vec<PathBuf> {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        type Cache = HashMap<PathBuf, (Instant, Vec<PathBuf>)>;
+        static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
+        let Some(dir) = file.parent().map(|d| d.to_path_buf()) else { return vec![] };
+        let leaf = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if ams_core::specset::is_result_folder(&leaf) {
+            return vec![];
+        }
+        if let Ok(mut g) = CACHE.lock() {
+            if let Some((t, v)) = g.get_or_insert_with(HashMap::new).get(&dir) {
+                if t.elapsed() < Duration::from_secs(3) {
+                    return v.clone();
+                }
+            }
+        }
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.path().is_file()).map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| ams_core::specset::Kind::Ams.has(n)).collect())
+            .unwrap_or_default();
+        names.sort_by_key(|n| n.to_lowercase());
+        let raw = ams_core::specset::RawScan { dirs: vec![(dir.clone(), names)] };
+        let built = self.set_opts.build(&dir, &raw);
+        let out = if built.folders.len() < 2 {
+            vec![]
+        } else {
+            let det = ams_core::specset::detect(&built.folders, Some(&self.last_ident));
+            let picks = ams_core::specset::matches(&built.folders, &det.ident.unwrap_or_default());
+            built.folders.iter().zip(&picks).filter_map(|(f, p)| p.file().map(|m| f.dir.join(&f.files[m]))).collect()
+        };
+        if let Ok(mut g) = CACHE.lock() {
+            g.get_or_insert_with(HashMap::new).insert(dir, (Instant::now(), out.clone()));
+        }
+        out
     }
 
     /// The specimens the automatic matching works for when not every one is fitted at once.
