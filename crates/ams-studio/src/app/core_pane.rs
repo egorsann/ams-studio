@@ -210,6 +210,32 @@ fn photos_in(dir: &Path) -> Vec<(String, char, u32, PathBuf)> {
     out
 }
 
+/// A photo folder for specimen `id` derived from its siblings' links. The specimens of one project keep their photos at
+/// the same place relative to their files, with their own id in the names (`.../DC26AB002_stitch/DC26AB002_cube_crops`
+/// -> `.../DC26AB003_stitch/DC26AB003_cube_crops`). `siblings` are (specimen id, linked folder) pairs. Only a folder that
+/// exists now and holds photos named after `id` is returned, so nothing is guessed and it needs no search folder.
+fn infer_from_siblings(id: &str, siblings: &[(String, PathBuf)]) -> Option<PathBuf> {
+    if id.is_empty() {
+        return None;
+    }
+    for (sid, sdir) in siblings {
+        if sid.is_empty() || sid.eq_ignore_ascii_case(id) {
+            continue;
+        }
+        let cand: PathBuf = sdir
+            .components()
+            .map(|c| match c {
+                std::path::Component::Normal(n) => PathBuf::from(n.to_string_lossy().replace(sid.as_str(), id)),
+                other => PathBuf::from(other.as_os_str()),
+            })
+            .collect();
+        if cand != *sdir && cand.is_dir() && photos_in(&cand).iter().any(|p| p.0.eq_ignore_ascii_case(id)) {
+            return Some(cand);
+        }
+    }
+    None
+}
+
 fn most_common(ids: impl Iterator<Item = String>) -> String {
     let mut c: HashMap<String, usize> = HashMap::new();
     for i in ids {
@@ -471,10 +497,31 @@ impl App {
     /// Loads the photos of the open specimen from its saved link; false when there is none (or its folder is gone).
     fn cv_try_link(&mut self) -> bool {
         let Some(file) = self.doc.as_ref().filter(|d| !d.synthetic).map(|d| d.path.clone()) else { return false };
-        let Some(dir) = self.cv_saved_dir(&file) else { return false };
+        let dir = match self.cv_saved_dir(&file) {
+            Some(d) => d,
+            None => {
+                // no link yet: look straight at the place the sibling specimens keep their photos (no search needed)
+                let Some(d) = self.cv_inferred_dir(&file) else { return false };
+                self.cv_store_link(&file, Some(&d));
+                d
+            }
+        };
         self.cv.had_link = true;
         self.cv_load(dir);
         true
+    }
+
+    /// The folder a specimen without a link would have if it were kept like its siblings (see `infer_from_siblings`),
+    /// checked on disk right now.
+    fn cv_inferred_dir(&self, file: &Path) -> Option<PathBuf> {
+        let mut sib: Vec<(String, PathBuf)> = vec![];
+        for p in self.cv_files().iter().chain(std::iter::once(&file.to_path_buf())) {
+            if let Some(d) = self.cv_saved_dir(p) {
+                sib.push((spec_id(p), d));
+            }
+        }
+        sib.extend(self.cv.legacy_links.iter().filter(|(_, d)| d.is_dir()).map(|(i, d)| (i.clone(), d.clone())));
+        infer_from_siblings(&spec_id(file), &sib)
     }
 
     /// No photos for the open specimen: the pane shows its cubes as empty places.
@@ -514,7 +561,9 @@ impl App {
         let mut saved: Vec<Option<PathBuf>> = vec![];
         for p in &files {
             let dir = self.cv_saved_dir(p);
-            if let Some(d) = &dir {
+            // a specimen with no link and no search hit still gets the place its siblings suggest
+            let offer = dir.clone().or_else(|| self.cv_inferred_dir(p));
+            if let Some(d) = &offer {
                 if !list.iter().any(|f| f.dir == *d) {
                     let ph = photos_in(d);
                     let rel = root.as_ref().and_then(|r| d.strip_prefix(r).ok()).map(|r| r.display().to_string()).unwrap_or_else(|| d.display().to_string());
@@ -1192,6 +1241,30 @@ mod tests {
         for (n, ok) in [("a.png", true), ("a.PNG", true), ("a.tif", true), ("a.TIFF", true), ("a.jpg", true), ("a.JPEG", true), ("a.heic", false), ("a.txt", false)] {
             assert_eq!(photo_rank(Path::new(n)).is_some(), ok, "{n}");
         }
+    }
+
+    #[test]
+    fn a_folder_is_inferred_from_the_siblings_links_only_when_it_exists_with_the_specimens_photos() {
+        let base = std::env::temp_dir().join(format!("cv-infer-test-{}", std::process::id()));
+        let scan_dir = base.join("SCAN").join("Kaz_stitch_scan");
+        let mk = |id: &str, photos: bool| {
+            let d = scan_dir.join(format!("{id}_stitch")).join(format!("{id}_cube_crops"));
+            std::fs::create_dir_all(&d).unwrap();
+            if photos {
+                image::RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3])).save(d.join(format!("{id}_A1.png"))).unwrap();
+            }
+            d
+        };
+        let d13 = mk("ER26PB013", true);
+        let d15 = mk("ER26PB015", true);
+        mk("ER26PB016", false); // folder exists but holds no photos of its own
+        let sib = vec![("ER26PB013".to_string(), d13.clone())];
+        assert_eq!(infer_from_siblings("ER26PB015", &sib), Some(d15));
+        assert_eq!(infer_from_siblings("ER26PB016", &sib), None); // empty folder: not offered
+        assert_eq!(infer_from_siblings("ER26PB099", &sib), None); // no such folder
+        assert_eq!(infer_from_siblings("ER26PB013", &sib), None); // the sibling itself is not a candidate
+        assert_eq!(infer_from_siblings("", &sib), None);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
