@@ -27,7 +27,7 @@ impl PaneId {
         matches!(self, PaneId::Core | PaneId::Gis)
     }
 
-    fn token(self) -> String {
+    pub fn token(self) -> String {
         match self {
             PaneId::Stereo => "stereo".into(),
             PaneId::Plot(k) => format!("p{k}"),
@@ -36,7 +36,7 @@ impl PaneId {
         }
     }
 
-    fn from_token(t: &str) -> Option<PaneId> {
+    pub fn from_token(t: &str) -> Option<PaneId> {
         match t.trim() {
             "stereo" => Some(PaneId::Stereo),
             "core" => Some(PaneId::Core),

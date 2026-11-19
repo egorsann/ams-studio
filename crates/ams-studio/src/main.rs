@@ -97,17 +97,23 @@ fn main() -> eframe::Result {
             positional.push(a);
         }
     }
+    if positional.iter().any(|a| a == "--reset-windows") {
+        app::reset_window_positions();
+        positional.retain(|a| a != "--reset-windows");
+    }
     let open = positional.first().map(std::path::PathBuf::from).filter(|p| p.exists());
     let (size, maximized) = app::saved_window();
-    let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+    let mut viewport = egui::ViewportBuilder::default()
             .with_inner_size(size.unwrap_or([1280.0, 820.0]))
             .with_maximized(maximized)
             .with_min_inner_size([760.0, 480.0])
             .with_icon(std::sync::Arc::new(egui::IconData { rgba: icon::rgba(256), width: 256, height: 256 }))
             .with_title("AMS Studio")
-            .with_app_id("ams-studio"),
-        ..Default::default()
-    };
+            .with_app_id("ams-studio");
+    // the window reopens where it was (the same screen, when the same screens are connected)
+    if let Some(p) = app::saved_window_pos() {
+        viewport = viewport.with_position(p);
+    }
+    let opts = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native("AMS Studio", opts, Box::new(move |cc| Ok(Box::new(app::App::new(cc, open.clone())))))
 }

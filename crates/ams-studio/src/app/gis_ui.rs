@@ -1680,6 +1680,7 @@ impl App {
         }
         let th = self.theme();
         let (mut dock, mut toggle_bar) = (false, false);
+        let mut keys: Vec<super::Action> = vec![];
         let mut geometry: Option<[f32; 4]> = None;
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("ams-studio-gis-popout"), builder, |ui, _class| {
             let rect = ui.available_rect_before_wrap();
@@ -1689,6 +1690,8 @@ impl App {
             let vctx = ui.ctx().clone();
             dock = vctx.input(|i| i.viewport().close_requested()) || vctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT | egui::Modifiers::CTRL, egui::Key::Space));
             toggle_bar = vctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT | egui::Modifiers::CTRL, egui::Key::B));
+            // the keys of the main window (Q / E, W, Shift+Q / E, F-keys ...) also work in this window
+            keys = self.shortcuts(&vctx);
             vctx.input(|i| {
                 let v = i.viewport();
                 if v.maximized == Some(true) || v.minimized == Some(true) {
@@ -1701,6 +1704,9 @@ impl App {
         });
         if toggle_bar {
             self.gis.show_layers = !self.gis.show_layers;
+        }
+        for a in keys {
+            self.run(ctx, a);
         }
         if let Some(g) = geometry.filter(|_| !dock) {
             self.gis_win = Some(g);

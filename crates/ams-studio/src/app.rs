@@ -534,6 +534,8 @@ pub struct App {
     spec_w: f32,
     win_size: Option<[f32; 2]>,
     win_max: bool,
+    /// Where the main window was last seen (outer top-left corner, in points), so that it reopens on the same screen.
+    win_pos: Option<[f32; 2]>,
     layout_changed: Option<f64>,
     scroll_to: Option<usize>,
     list_off: f32,
@@ -667,6 +669,45 @@ pub fn saved_window() -> (Option<[f32; 2]>, bool) {
     (w.zip(h).map(|(w, h)| [w.clamp(760.0, 8000.0), h.clamp(480.0, 8000.0)]), max)
 }
 
+/// The popped-out panes with the geometry of their windows as text: `stereo@x,y,w,h;p1@...;core`.
+fn pops_text(popped: &[(PaneId, Option<[f32; 4]>)]) -> String {
+    popped
+        .iter()
+        .map(|(id, g)| match g {
+            Some(g) => format!("{}@{},{},{},{}", id.token(), g[0], g[1], g[2], g[3]),
+            None => id.token(),
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn parse_pops(v: &str) -> Vec<(PaneId, Option<[f32; 4]>)> {
+    v.split(';')
+        .filter_map(|e| {
+            let (tok, g) = e.split_once('@').unwrap_or((e, ""));
+            let id = PaneId::from_token(tok)?;
+            let p: Vec<f32> = g.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            let geom = (p.len() == 4 && p.iter().all(|x| x.is_finite()) && p[2] >= 300.0 && p[3] >= 200.0 && p[2] < 10000.0 && p[3] < 10000.0).then(|| [p[0], p[1], p[2], p[3]]);
+            // the GIS viewer's window has its own entries
+            (id != PaneId::Gis).then_some((id, geom))
+        })
+        .collect()
+}
+
+/// Where the previous run left the main window (read before the window is created).
+pub fn saved_window_pos() -> Option<[f32; 2]> {
+    let s = read_state_text()?;
+    let (mut x, mut y) = (None, None);
+    for l in s.lines() {
+        match l.split_once('=') {
+            Some(("win_x", v)) => x = v.parse::<f32>().ok(),
+            Some(("win_y", v)) => y = v.parse::<f32>().ok(),
+            _ => {}
+        }
+    }
+    x.zip(y).filter(|(x, y)| x.is_finite() && y.is_finite() && x.abs() < 20000.0 && y.abs() < 20000.0).map(|(x, y)| [x, y])
+}
+
 /// The user's home folder on any platform ($HOME on Linux/macOS, %USERPROFILE% on Windows).
 pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default()
@@ -710,6 +751,34 @@ const DEFAULT_MARKER: f32 = 6.0;
 
 fn state_path() -> PathBuf {
     config_dir().join("ams-studio").join("state.txt")
+}
+
+/// `--reset-windows`: forgets where the main window and the windows of popped-out panes were (a window that was left on a
+/// screen that is no longer connected opens in the default place again). The size and the panes stay as they are.
+pub fn reset_window_positions() {
+    let Ok(t) = std::fs::read_to_string(state_path()) else { return };
+    let _ = std::fs::write(state_path(), without_window_positions(&t));
+}
+
+fn without_window_positions(t: &str) -> String {
+    let mut out = String::new();
+    for l in t.lines() {
+        match l.split_once('=') {
+            Some(("win_x" | "win_y" | "gis_win", _)) => {}
+            Some(("pops", v)) => {
+                // the panes stay popped out, their windows lose their place
+                let list: Vec<(PaneId, Option<[f32; 4]>)> = parse_pops(v).into_iter().map(|(id, _)| (id, None)).collect();
+                if !list.is_empty() {
+                    out += &format!("pops={}\n", pops_text(&list));
+                }
+            }
+            _ => {
+                out += l;
+                out.push('\n');
+            }
+        }
+    }
+    out
 }
 
 /// Preferences text: the current file, or the one written under the program's former name.
@@ -794,6 +863,7 @@ impl App {
             spec_w: 170.0,
             win_size: None,
             win_max: false,
+            win_pos: None,
             layout_changed: None,
             scroll_to: None,
             list_off: 0.0,
@@ -950,6 +1020,12 @@ impl App {
                     cur[usize::from(k == "win_h")] = x.clamp(760.0, 8000.0);
                 }
                 "maximized" => self.win_max = v == "1",
+                "win_x" | "win_y" => {
+                    let x: f32 = v.parse().unwrap_or(f32::NAN);
+                    let cur = self.win_pos.get_or_insert([f32::NAN, f32::NAN]);
+                    cur[usize::from(k == "win_y")] = x;
+                }
+                "pops" => self.popped = parse_pops(v),
                 "owens_new" => self.owens_old = v != "1",
                 "set_ident" => self.last_ident = v.to_string(),
                 "set_opts" => {
@@ -1109,6 +1185,12 @@ impl App {
         t += &color_lines;
         if let Some(w) = self.gis_win {
             t += &format!("gis_win={},{},{},{}\n", w[0], w[1], w[2], w[3]);
+        }
+        if let Some([x, y]) = self.win_pos.filter(|p| p[0].is_finite() && p[1].is_finite()) {
+            t += &format!("win_x={x}\nwin_y={y}\n");
+        }
+        if !self.popped.is_empty() {
+            t += &format!("pops={}\n", pops_text(&self.popped));
         }
         t += &self.gis.prefs_text();
         t
@@ -3323,6 +3405,7 @@ impl App {
             let mut toggled: Option<Vec<usize>> = None;
             let mut mode_step = 0i32;
             let mut esc = false;
+            let mut keys: Vec<Action> = vec![];
             ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(("ams-studio-pop", format!("{id:?}"))), builder, |ui, _class| {
                 let rect = ui.available_rect_before_wrap();
                 ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
@@ -3367,6 +3450,9 @@ impl App {
                         mode_step -= 1;
                     }
                 }
+                // the same keys as in the main window (Q / E next and previous sub-specimen, W phase, F-keys, Shift+Q / E ...)
+                // work in the window of a popped-out pane: each native window has its own keyboard input
+                keys = self.shortcuts(&vctx);
                 vctx.input(|i| {
                     let v = i.viewport();
                     // a maximized or minimized window keeps the size it had before (that is what is saved)
@@ -3383,6 +3469,9 @@ impl App {
             }
             if esc {
                 self.esc_selection_then_zoom();
+            }
+            for a in keys {
+                self.run(ctx, a);
             }
             if mode_step != 0 && self.cv.on {
                 self.cv_mode_step(ctx, mode_step.signum());
@@ -4137,6 +4226,13 @@ impl App {
             self.win_max = maxd;
             self.layout_changed = Some(now);
         }
+        if let Some(o) = ctx.input(|i| i.viewport().outer_rect) {
+            let pos = [o.min.x.round(), o.min.y.round()];
+            if self.win_pos.map_or(true, |q| q != pos) {
+                self.win_pos = Some(pos);
+                self.layout_changed = Some(now);
+            }
+        }
         if let (Some(r), false) = (rect, maxd) {
             let sz = [r.width().round(), r.height().round()];
             if self.win_size.map_or(true, |o| (o[0] - sz[0]).abs() > 1.0 || (o[1] - sz[1]).abs() > 1.0) {
@@ -4799,5 +4895,23 @@ mod browser_click_tests {
         // Ctrl+Shift adds the range to what is selected
         browser_click(&mut sel, &mut anchor, &fl, Some(&fl[2]), &fl[3], Modifiers::CTRL | Modifiers::SHIFT);
         assert!(sel.contains(&fl[3]) && sel.contains(&fl[2]) && sel.contains(&fl[4]));
+    }
+}
+
+#[cfg(test)]
+mod pops_tests {
+    use super::*;
+
+    #[test]
+    fn popped_panes_and_their_windows_survive_a_restart() {
+        let pops = vec![(PaneId::Stereo, Some([-1920.0, 40.0, 900.0, 640.0])), (PaneId::Plot(2), None), (PaneId::Core, Some([2560.5, 0.0, 1200.0, 500.0]))];
+        let text = pops_text(&pops);
+        assert_eq!(text, "stereo@-1920,40,900,640;p2;core@2560.5,0,1200,500");
+        assert_eq!(parse_pops(&text), pops);
+        // nonsense is dropped, the GIS viewer is not one of these
+        assert_eq!(parse_pops("gis@1,2,500,500;p9;stereo@1,2,3"), vec![(PaneId::Stereo, None)]);
+        // --reset-windows forgets the places, nothing else
+        let before = "dark=1\nwin_w=1280\nwin_x=-1920\nwin_y=10\ngis_win=1,2,900,600\npops=stereo@-1920,40,900,640;p1\nhfrac=0.5\n";
+        assert_eq!(without_window_positions(before), "dark=1\nwin_w=1280\npops=stereo;p1\nhfrac=0.5\n");
     }
 }

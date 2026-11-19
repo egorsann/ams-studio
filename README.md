@@ -97,7 +97,7 @@ Honest list of the gaps:
 
 ## Run it
 
-**Windows 10 / 11 (64-bit):** download [`ams-studio-windows-x64.exe`](https://github.com/egorsann/ams-studio/releases/latest/download/ams-studio-windows-x64.exe) from the [latest release](../../releases/latest) (its SHA-256 is attached as `ams-studio-windows-x64.exe.sha256`) and double-click it. The executable is not code-signed, so Windows SmartScreen may say "unknown publisher": choose *More info* then *Run anyway*. Preferences are kept in `%APPDATA%\ams-studio\state.txt` (delete it to reset the layout).
+**Windows 10 / 11 (64-bit):** download [`ams-studio-windows-x64.exe`](https://github.com/egorsann/ams-studio/releases/latest/download/ams-studio-windows-x64.exe) from the [latest release](../../releases/latest) (its SHA-256 is attached as `ams-studio-windows-x64.exe.sha256`) and double-click it. The executable is not code-signed, so Windows SmartScreen may say "unknown publisher": choose *More info* then *Run anyway*. Preferences are kept in `%APPDATA%\ams-studio\state.txt` (delete it to reset the layout). The main window and the windows of popped-out panes (stereonet, plots, core viewer, GIS viewer) reopen where they were, on the same screens when the same screens are connected; if a window was left on a screen that is no longer there, start the program once with `--reset-windows` to forget the saved places. (On Wayland the compositor places windows itself; a window rule of the desktop can remember them.)
 
 **Linux:** download `ams-studio-linux-x64` from the latest release (`chmod +x` it) or build from source (below); it needs a Wayland or X11 session. Preferences are in `~/.config/ams-studio/state.txt`.
 
