@@ -125,6 +125,7 @@ pub(super) struct ResetSnap {
     overlay: super::analysis_ui::StereoOverlay,
     color: [crate::plots::ColorCfg; 4],
     color_own: [bool; 4],
+    layout: (Vec<super::pane_layout::PaneId>, [f32; 4]),
 }
 
 fn plots_path() -> PathBuf {
@@ -183,7 +184,11 @@ impl App {
             overlay: self.st_overlay.clone(),
             color: self.color.clone(),
             color_own: self.color_own,
+            layout: (self.layout_order.clone(), [self.hfrac, self.vfrac, self.gfrac, self.gis_frac]),
         };
+        // removed plot panes come back and the panes return to their usual places (the core and GIS viewers stay if they are on)
+        self.layout_order = super::pane_layout::default_order();
+        (self.hfrac, self.vfrac, self.gfrac, self.gis_frac) = (0.5, 0.5, 0.5, 0.42);
         self.panes = [PaneCfg::default_for(0, self.use_p), PaneCfg::default_for(1, self.use_p), PaneCfg::default_for(2, self.use_p)];
         if let Some(p) = &key {
             self.spec_cfg.iter_mut().for_each(|m| {
@@ -221,6 +226,8 @@ impl App {
         self.st_overlay = s.overlay;
         self.color = s.color;
         self.color_own = s.color_own;
+        self.layout_order = s.layout.0;
+        (self.hfrac, self.vfrac, self.gfrac, self.gis_frac) = (s.layout.1[0], s.layout.1[1], s.layout.1[2], s.layout.1[3]);
         self.save_plots();
     }
 

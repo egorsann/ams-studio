@@ -10,8 +10,8 @@
 //!   queries and labels are not recoverable there: vector layers are ticked, rasters are not, and layers that share a
 //!   folder are grouped by it.
 //!
-//! What cannot be shown is left out and listed with its reason: online layers and basemaps, file geodatabases and
-//! other databases, layers whose file is not there. Tested without a window on made-up documents.
+//! What cannot be shown is left out and listed with its reason: online layers and basemaps, rasters in file geodatabases
+//! (the vector feature classes of a geodatabase are read), other databases, layers whose file is not there. Tested without a window on made-up documents.
 
 use super::gis_qgis::{Node, Project, QLayer};
 use serde_json::Value;
@@ -82,7 +82,12 @@ fn find_by_name(base: &Path, name: &str) -> Option<PathBuf> {
             budget -= 1;
             let p = e.path();
             if p.is_dir() {
-                if depth < 4 {
+                // a file geodatabase is a folder that is looked for by name and never searched inside
+                let is_gdb = e.file_name().to_string_lossy().to_lowercase().ends_with(".gdb");
+                if is_gdb && e.file_name().to_string_lossy().to_lowercase() == want {
+                    return Some(p);
+                }
+                if depth < 4 && !is_gdb {
                     stack.push((p, depth + 1));
                 }
             } else if e.file_name().to_string_lossy().to_lowercase() == want {
@@ -200,7 +205,13 @@ fn locate(def: &Value, raster: bool, base: &Path, fs: &Fs) -> Result<(PathBuf, O
     let dataset = s(c, "dataset").unwrap_or_default();
     let wl = ws.to_lowercase();
     if wl.ends_with(".gdb") {
-        return Err("file geodatabase: export the layer to a shapefile or GeoPackage".into());
+        if raster {
+            return Err("raster in a file geodatabase: export it to a GeoTIFF".into());
+        }
+        // the feature class is the last part of the dataset name (`Geology\\Faults` or `main.Faults`)
+        let class = dataset.rsplit(['\\', '/', '.']).next().unwrap_or(dataset).to_string();
+        let p = resolve_file(&ws, base, fs).ok_or("file geodatabase not found")?;
+        return Ok((p, (!class.is_empty()).then_some(class)));
     }
     if wl.ends_with(".sde") || wl.ends_with(".mdb") || wl.ends_with(".accdb") || s(c, "workspaceFactory").is_some_and(|f| f.eq_ignore_ascii_case("SDE")) {
         return Err("database connection".into());
@@ -617,6 +628,25 @@ mod tests {
         let why: Vec<&str> = p.skipped.iter().map(|(_, w)| w.as_str()).collect();
         assert!(why.iter().any(|w| w.contains("online")) && why.iter().any(|w| w.contains("geodatabase")), "{why:?}");
         assert!(p.summary().contains("ArcGIS"));
+    }
+
+    #[test]
+    fn feature_classes_of_a_file_geodatabase_are_layers_and_its_rasters_are_not() {
+        let doc = json!({"type": "CIMMapDocument", "mapDefinition": {"type": "CIMMap", "name": "M", "layers": ["CIMPATH=m/a.json", "CIMPATH=m/b.json", "CIMPATH=m/c.json"]},
+            "layerDefinitions": [
+              feature("Lithology", "CIMPATH=m/a.json", "C:\\Users\\someone\\Projects\\Big\\Big.gdb", "Geology\\Lithology_Poly", json!({})),
+              feature("Lost", "CIMPATH=m/b.json", "C:\\gone\\Other.gdb", "Lost_Poly", json!({})),
+              {"type": "CIMRasterLayer", "name": "HillShade", "uRI": "CIMPATH=m/c.json", "dataConnection": {"type": "CIMStandardDataConnection", "workspaceConnectionString": "DATABASE=C:\\x\\Big.gdb", "workspaceFactory": "FileGDB", "dataset": "HillShade"}}
+            ]});
+        let exists = |p: &Path| p.to_string_lossy().replace('\\', "/") == "/proj/Big/Big.gdb";
+        let find = |_: &Path, _: &str| None;
+        let p = parse_cim(&[doc], Path::new("/proj"), &Fs { exists: &exists, is_dir: &exists, find: &find }).unwrap();
+        assert_eq!(p.layer_count(), 1, "{:?}", p.skipped);
+        let rows = p.rows();
+        let l = rows.iter().find_map(|r| r.layer.as_ref()).unwrap();
+        assert_eq!((l.path.as_path(), l.table.as_deref()), (Path::new("/proj/Big/Big.gdb"), Some("Lithology_Poly")));
+        let why: Vec<&str> = p.skipped.iter().map(|(_, w)| w.as_str()).collect();
+        assert!(why.iter().any(|w| w.contains("raster in a file geodatabase")) && why.iter().any(|w| w.contains("geodatabase not found")), "{why:?}");
     }
 
     #[test]

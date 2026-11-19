@@ -559,7 +559,9 @@ impl Gis {
         let mut vspecs = std::collections::HashMap::new();
         for m in j.get("vectors").and_then(|m| m.as_array()).into_iter().flatten() {
             let (Some(id), Some(path)) = (m.get("id").and_then(|i| i.as_u64()), m.get("path").and_then(|p| p.as_str())) else { continue };
-            if std::path::Path::new(path).is_file() {
+            // a file geodatabase is a folder
+            let p = std::path::Path::new(path);
+            if p.is_file() || (p.is_dir() && gv::is_vector(p)) {
                 let color = m.get("color").and_then(|c| c.as_array()).filter(|c| c.len() == 3).map(|c| [0, 1, 2].map(|k| c[k].as_u64().unwrap_or(128).min(255) as u8));
                 vspecs.insert(
                     id as u32,
@@ -1666,9 +1668,12 @@ impl App {
     /// it is popped out of the panes. Closing that window, the dock button and Shift+Ctrl+Space put it back.
     pub(super) fn gis_popout(&mut self, ctx: &egui::Context) {
         if !(self.gis_on && self.gis_popped) {
+            self.gis_init = None;
             return;
         }
-        let [x, y, w, h] = self.gis_win.unwrap_or([f32::NAN, f32::NAN, 1100.0, 760.0]);
+        // created with the saved geometry and kept at that (see `App::pop_init`)
+        let init = self.gis_win;
+        let [x, y, w, h] = *self.gis_init.get_or_insert_with(|| init.unwrap_or([f32::NAN, f32::NAN, 1100.0, 760.0]));
         let mut builder = egui::ViewportBuilder::default().with_title("AMS Studio - GIS viewer").with_inner_size([w, h]).with_min_inner_size([520.0, 360.0]);
         if x.is_finite() && y.is_finite() {
             builder = builder.with_position([x, y]);
@@ -1686,6 +1691,9 @@ impl App {
             toggle_bar = vctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT | egui::Modifiers::CTRL, egui::Key::B));
             vctx.input(|i| {
                 let v = i.viewport();
+                if v.maximized == Some(true) || v.minimized == Some(true) {
+                    return;
+                }
                 if let (Some(o), Some(inner)) = (v.outer_rect, v.inner_rect) {
                     geometry = Some([o.min.x, o.min.y, inner.width(), inner.height()]);
                 }

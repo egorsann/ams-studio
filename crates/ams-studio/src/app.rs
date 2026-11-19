@@ -459,6 +459,11 @@ pub struct App {
     popped: Vec<(PaneId, Option<[f32; 4]>)>,
     palette: palette::PaletteState,
     gis_win: Option<[f32; 4]>,
+    /// The geometry each pop-out window was created with. The window builder is made again every frame; it must keep these
+    /// values for as long as the window lives, or every frame would move / resize the window to where it was a frame ago
+    /// (a maximized window then flickers).
+    pop_init: std::collections::HashMap<PaneId, [f32; 4]>,
+    gis_init: Option<[f32; 4]>,
     gis_export: bool,
     /// Save Graphics To File: dpi of each plot pane, the window that asks, and the graphics card handle for the render
     shot_dpi: [f32; 5],
@@ -736,6 +741,8 @@ impl App {
             popped: vec![],
             palette: Default::default(),
             gis_win: None,
+            pop_init: std::collections::HashMap::new(),
+            gis_init: None,
             gis_export: true,
             shot_dpi: [shot_ui::DPI_DEFAULT; 5],
             shot_dlg: false,
@@ -2449,6 +2456,12 @@ impl App {
             self.gis_import_project(&p);
         }
         dropped.retain(|p| !gis_ui::is_project_file(p));
+        // an Esri file geodatabase folder dropped on the window is map data, not a folder of specimens
+        for p in dropped.iter().filter(|p| p.is_dir() && gis_vector::is_vector(p)).cloned().collect::<Vec<_>>() {
+            self.gis.load_map_file(&ctx, p);
+            self.gis_on = true;
+        }
+        dropped.retain(|p| !(p.is_dir() && gis_vector::is_vector(p)));
         if !dropped.is_empty() {
             if let Some(dir) = dropped.iter().find(|p| p.is_dir()) {
                 self.begin_scan(&ctx, dir.clone());
@@ -2649,7 +2662,7 @@ impl App {
                     // the four panes back to the Anisoft 6 settings; the undo sits in the same row while it is offered
                     let undo_left = self.reset_undo_left();
                     ui.horizontal(|ui| {
-                        if ui.button("Reset all panes to default").on_hover_text("The stereonet and the three plots go back to their Anisoft 6 settings (the open file's specimen-specific settings too)").clicked() {
+                        if ui.button("Reset all panes to default").on_hover_text("The stereonet and the three plots go back to their Anisoft 6 settings (the open file's specimen-specific settings too), and panes that were removed come back in their usual places").clicked() {
                             actions.push(Action::ResetPanes);
                             ui.close();
                         }
@@ -3287,6 +3300,8 @@ impl App {
             PaneId::Gis => false,
             _ => alive.contains(p),
         });
+        let popped_now: Vec<PaneId> = self.popped.iter().map(|(p, _)| *p).collect();
+        self.pop_init.retain(|p, _| popped_now.contains(p));
         let list: Vec<(PaneId, Option<[f32; 4]>)> = self.popped.clone();
         let th = self.theme();
         for (id, geom) in list {
@@ -3297,7 +3312,7 @@ impl App {
                 PaneId::Core => "Core viewer".to_string(),
                 PaneId::Gis => continue,
             };
-            let [x, y, w, h] = geom.unwrap_or([f32::NAN, f32::NAN, 900.0, 640.0]);
+            let [x, y, w, h] = *self.pop_init.entry(id).or_insert_with(|| geom.unwrap_or([f32::NAN, f32::NAN, 900.0, 640.0]));
             let mut builder = egui::ViewportBuilder::default().with_title(format!("AMS Studio - {title}")).with_inner_size([w, h]).with_min_inner_size([360.0, 260.0]);
             if x.is_finite() && y.is_finite() {
                 builder = builder.with_position([x, y]);
@@ -3354,6 +3369,10 @@ impl App {
                 }
                 vctx.input(|i| {
                     let v = i.viewport();
+                    // a maximized or minimized window keeps the size it had before (that is what is saved)
+                    if v.maximized == Some(true) || v.minimized == Some(true) {
+                        return;
+                    }
                     if let (Some(o), Some(inner)) = (v.outer_rect, v.inner_rect) {
                         geometry = Some([o.min.x, o.min.y, inner.width(), inner.height()]);
                     }
@@ -3371,6 +3390,7 @@ impl App {
             self.apply_pick(picked.0, picked.1);
             if dock {
                 self.popped.retain(|(p, _)| *p != id);
+                self.pop_init.remove(&id);
             } else if let Some(g) = geometry {
                 if let Some(e) = self.popped.iter_mut().find(|(p, _)| *p == id) {
                     e.1 = Some(g);

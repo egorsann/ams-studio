@@ -153,7 +153,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "ams-core"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "crs-definitions",
  "proj4rs",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "ams-studio"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "ams-core",
  "calamine",
@@ -175,6 +175,8 @@ dependencies = [
  "egui",
  "egui_system_font_provider",
  "embed-resource",
+ "geonative-core",
+ "geonative-filegdb",
  "image",
  "rfd",
  "roxmltree",
@@ -1472,6 +1474,26 @@ checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
  "typenum",
  "version_check",
+]
+
+[[package]]
+name = "geonative-core"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bcdfb1e11d18b00dc2c2f4be17c2ef4397606f158fd4672a2d692205477fb764"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "geonative-filegdb"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05d0c3ff1c8807b672dba725c15c4d2d445d6f21e2fab252f2d372807947271f"
+dependencies = [
+ "geonative-core",
+ "memmap2",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-ams-core = { version = "0.3.2", path = "../ams-core" }
+ams-core = { version = "0.4.0", path = "../ams-core" }
 calamine = "0.38.0"
 cfb = "0.16.0"
 chrono = { version = "0.4.41", default-features = false, features = ["clock", "std"] }
@@ -17,6 +17,8 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 rfd = "0.18.0"
 roxmltree = "0.21"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
+geonative-filegdb = "=0.4.0"
+geonative-core = "=0.4.0"
 serde_json = "1.0.154"
 tiff = { version = "0.11.3", default-features = false }
 ureq = "3"

@@ -580,6 +580,17 @@ pub fn run(out: &Path) -> usize {
         }
     }
 
+    // ---- Reset all panes brings removed plot panes back
+    {
+        h.app.layout_order = vec![pane_layout::PaneId::Stereo, pane_layout::PaneId::Plot(2)];
+        h.step("reset all panes after two panes were removed", |app, c| app.run(c, Action::ResetPanes));
+        let n = h.app.layout_order.len();
+        h.check("reset all panes: the four panes are back", n == 4, format!("{n} panes"));
+        h.step("undo the reset of the panes", |app, c| app.run(c, Action::UndoResetPanes));
+        let n = h.app.layout_order.len();
+        h.check("undo reset: the two panes are as before", n == 2, format!("{n} panes"));
+    }
+
     // ---- the Recombine questions and the phase join
     h.step("recombine question window", |a, _| a.open_win(W_RECOMB_ASK));
     h.step("recombine parts window", |a, _| a.open_win(W_RECOMB));

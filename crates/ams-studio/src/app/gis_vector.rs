@@ -108,7 +108,7 @@ pub struct Loaded {
 }
 
 /// File extensions that are vector data.
-pub const VECTOR_EXTS: [&str; 4] = ["shp", "gpkg", "geojson", "json"];
+pub const VECTOR_EXTS: [&str; 5] = ["shp", "gpkg", "geojson", "json", "gdb"];
 
 pub fn is_vector(path: &Path) -> bool {
     path.extension().map(|e| e.to_string_lossy().to_lowercase()).is_some_and(|e| VECTOR_EXTS.contains(&e.as_str()))
@@ -122,6 +122,7 @@ pub fn read_vector(path: &Path, only: Option<&str>) -> Result<Vec<Loaded>, Strin
         "shp" => read_shp(path, &stem).map(|l| vec![l]),
         "geojson" | "json" => read_geojson(path, &stem).map(|l| vec![l]),
         "gpkg" => read_gpkg(path, &stem, only),
+        "gdb" => read_gdb(path, &stem, only),
         _ => Err(format!("{}: not a shapefile, GeoPackage or GeoJSON file", path.display())),
     };
     layers.map(|mut v| {
@@ -627,6 +628,117 @@ fn read_gpkg(path: &Path, stem: &str, only: Option<&str>) -> Result<Vec<Loaded>,
     Ok(out)
 }
 
+/// The last part of a feature class name of a file geodatabase (`Dataset\\Lithology`, `main.Lithology` -> `Lithology`).
+fn gdb_short(name: &str) -> &str {
+    name.rsplit(['\\', '/', '.']).next().unwrap_or(name)
+}
+
+fn gdb_geometry(g: &geonative_core::Geometry, data: &mut VectorData) {
+    use geonative_core::Geometry as G;
+    let xy = |c: &geonative_core::Coord| [c.x, c.y];
+    let ring = |l: &geonative_core::LineString| -> Vec<[f64; 2]> { l.coords.iter().map(xy).collect() };
+    let poly = |p: &geonative_core::Polygon, data: &mut VectorData| {
+        let mut rings = vec![ring(&p.exterior)];
+        rings.extend(p.holes.iter().map(ring));
+        if rings[0].len() >= 3 {
+            data.polys.push(rings);
+        }
+    };
+    match g {
+        G::Point(c) => data.points.push(xy(c)),
+        G::MultiPoint(cs) => data.points.extend(cs.iter().map(xy)),
+        G::LineString(l) => data.lines.push(ring(l)),
+        G::MultiLineString(ls) => data.lines.extend(ls.iter().map(ring)),
+        G::Polygon(p) => poly(p, data),
+        G::MultiPolygon(ps) => ps.iter().for_each(|p| poly(p, data)),
+        G::GeometryCollection(gs) => gs.iter().for_each(|g| gdb_geometry(g, data)),
+        _ => {}
+    }
+}
+
+/// An Esri file geodatabase (`.gdb` folder): every feature class with points, lines or polygons is a layer. Read only; only
+/// the tables of the geodatabase are read (2D geometry; curves are kept as their straight pieces).
+fn read_gdb(path: &Path, stem: &str, only: Option<&str>) -> Result<Vec<Loaded>, String> {
+    let path = path.to_path_buf();
+    let only = only.map(|o| o.to_string());
+    let stem = stem.to_string();
+    // a damaged geodatabase must give a message, not end the program
+    std::panic::catch_unwind(move || read_gdb_inner(&path, &stem, only.as_deref())).unwrap_or_else(|_| Err("the file geodatabase could not be read (unexpected structure)".to_string()))
+}
+
+fn read_gdb_inner(path: &Path, stem: &str, only: Option<&str>) -> Result<Vec<Loaded>, String> {
+    use geonative_core::Value;
+    let gdb = geonative_filegdb::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let wanted = |name: &str| only.map_or(true, |o| name.eq_ignore_ascii_case(o) || gdb_short(name).eq_ignore_ascii_case(gdb_short(o)));
+    let infos: Vec<String> = gdb.layers().iter().map(|l| l.name.clone()).filter(|n| wanted(n)).collect();
+    let mut out = vec![];
+    let mut problems: Vec<String> = vec![];
+    for name in &infos {
+        let layer = match gdb.layer(name) {
+            Ok(l) => l,
+            Err(e) => {
+                problems.push(format!("{}: {e}", gdb_short(name)));
+                continue;
+            }
+        };
+        let schema = layer.schema();
+        if schema.geometry.is_none() {
+            continue; // an attribute table
+        }
+        let mut data = VectorData::default();
+        data.fields = schema.fields.iter().map(|f| f.name.clone()).collect();
+        let (mut bad, mut feat) = (0usize, 0u32);
+        for f in layer.read() {
+            let Ok(f) = f else {
+                bad += 1;
+                continue;
+            };
+            let Some(g) = f.geometry.as_ref() else { continue };
+            gdb_geometry(g, &mut data);
+            data.fill(feat);
+            feat += 1;
+            data.rows.push(
+                f.attributes
+                    .iter()
+                    .map(|v| match v {
+                        Value::Int16(n) => AttrVal::Num(*n as f64),
+                        Value::Int32(n) => AttrVal::Num(*n as f64),
+                        Value::Int64(n) => AttrVal::Num(*n as f64),
+                        Value::Float32(x) => AttrVal::Num(*x as f64),
+                        Value::Float64(x) => AttrVal::Num(*x),
+                        Value::Bool(b) => AttrVal::Num(if *b { 1.0 } else { 0.0 }),
+                        Value::String(t) | Value::Xml(t) => AttrVal::Text(t.clone()),
+                        Value::DateTime(d) => AttrVal::Num(*d),
+                        _ => AttrVal::Null,
+                    })
+                    .collect(),
+            );
+        }
+        if data.is_empty() {
+            continue;
+        }
+        let crs = match &schema.crs {
+            geonative_core::Crs::Wkt(w) => Crs::from_prj(w).or_else(|| schema.crs.epsg_code().and_then(Crs::from_epsg)),
+            other => other.epsg_code().and_then(Crs::from_epsg),
+        };
+        let mut note = match crs {
+            Some(c) => format!("Coordinate system of the feature class: {}.", c.label()),
+            None => "The feature class's coordinate system is not known here.".to_string(),
+        };
+        if bad > 0 {
+            note += &format!(" (n={bad}) features could not be read.");
+        }
+        let short = gdb_short(name).to_string();
+        let label = if infos.len() > 1 { format!("{stem} - {short}") } else { stem.to_string() };
+        out.push(Loaded { path: PathBuf::new(), name: label, table: name.clone(), data, crs, note });
+    }
+    if out.is_empty() {
+        let why = if problems.is_empty() { String::new() } else { format!(" ({})", problems.join("; ")) };
+        return Err(format!("{}: no feature class with points, lines or polygons{why}", path.display()));
+    }
+    Ok(out)
+}
+
 /// A coordinate system as a short word for the preferences file (`None` for a user-typed PROJ string, which only lives
 /// for the session).
 pub fn crs_token(c: Crs) -> Option<String> {
@@ -1115,5 +1227,40 @@ mod tests {
         assert_eq!(rows[1], vec![AttrVal::Null, AttrVal::Null]);
         assert_eq!(rows[2], vec![AttrVal::Text("zk9".into()), AttrVal::Null]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_geodatabase_gives_its_points_lines_and_polygons_with_attributes() {
+        // made-up demo geodatabase (written by GDAL's OpenFileGDB driver): three feature classes in UTM 43N
+        let gdb = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/demo_gis_vectors.gdb"));
+        let all = read_vector(gdb, None).unwrap();
+        assert_eq!(all.len(), 3, "{:?}", all.iter().map(|l| &l.table).collect::<Vec<_>>());
+        let get = |t: &str| all.iter().find(|l| l.table == t).unwrap_or_else(|| panic!("no {t}"));
+        // a geodatabase stores coordinates as integers of its own resolution (here finer than a millimetre)
+        let near = |a: &[f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3;
+        let pts = get("pts");
+        assert_eq!(pts.data.points.len(), 3);
+        assert!(near(&pts.data.points[0], [412345.678, 5180000.25]) && near(&pts.data.points[1], [412400.5, 5180100.5]), "{:?}", pts.data.points);
+        let (nm, val) = (pts.data.field("name").unwrap(), pts.data.field("val").unwrap());
+        assert_eq!((&pts.data.rows[0][nm], &pts.data.rows[2][val]), (&AttrVal::Text("a".into()), &AttrVal::Num(3.5)));
+        assert_eq!(pts.crs, Crs::from_epsg(32643), "{}", pts.note);
+        let lines = get("lines");
+        assert_eq!(lines.data.lines.len(), 2);
+        let want = [[412000.0, 5180000.0], [412100.5, 5180050.25], [412200.0, 5180300.0]];
+        assert!(lines.data.lines[0].len() == 3 && lines.data.lines[0].iter().zip(want).all(|(a, b)| near(a, b)), "{:?}", lines.data.lines[0]);
+        let polys = get("polys");
+        // the first feature is a square with a hole, the last a multipolygon of two triangles
+        assert_eq!(polys.data.polys.len(), 4);
+        assert_eq!(polys.data.polys[0].len(), 2, "outer ring and one hole");
+        assert_eq!(polys.data.gfeat, vec![0, 1, 2, 2]);
+        let lith = polys.data.field("Lith").unwrap();
+        assert_eq!(polys.data.rows[1][lith], AttrVal::Text("basalt".into()));
+        // one table by name, also by the last part of a dotted name; a plain folder is not a geodatabase
+        assert_eq!(read_vector(gdb, Some("polys")).unwrap().len(), 1);
+        assert_eq!(read_vector(gdb, Some("main.Pts")).unwrap().len(), 1);
+        assert!(read_vector(Path::new(env!("CARGO_MANIFEST_DIR")), None).is_err());
+        // the polygons triangulate like any other
+        let proj = project(&polys.data, Crs::from_epsg(32643).unwrap());
+        assert!(!proj.polys.is_empty());
     }
 }
