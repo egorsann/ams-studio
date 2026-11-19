@@ -235,6 +235,15 @@ fn paint_faces(p: &egui::Painter, r: Rect, faces: Option<&crate::hyper::Faces>, 
     p.rect_stroke(r, 0.0, Stroke::new(0.6, rgb(look.outline)), egui::StrokeKind::Inside);
 }
 
+/// The vertical offset of the cubes from the middle of the pane, kept so that a gap never shows at one edge while the
+/// other edge cuts cubes off: the cubes stay centred while they fit, and when they are taller than the pane (zoomed in)
+/// they may overhang by no more than they really do. Shrinking the pane therefore takes the free space away first and only
+/// then starts to hide cubes. (Sideways the old, looser limit stays.)
+fn clamp_off_y(off_y: f32, content_h: f32, pane_h: f32) -> f32 {
+    let room = ((content_h - pane_h) / 2.0).max(0.0);
+    off_y.clamp_safe(-room, room)
+}
+
 /// Draws the viewer inside `rect` and returns what the pointer did (click, rubber band, hover text).
 /// The cubes (indices into `cubes`) that `draw` would show in `rect` with `view`, and the side of one cube in points.
 /// Same maths as `draw` (the export decodes just these photos, at the size they are drawn at).
@@ -251,7 +260,7 @@ pub fn cubes_in_view(rect: Rect, cubes: &[Cube], view: &View) -> (f32, Vec<usize
     let (cw, ch) = (n_sl * u, rows * u);
     let mut off = view.off;
     off.x = off.x.clamp_safe(-(cw / 2.0 + inner.width() / 2.0 - 20.0), cw / 2.0 + inner.width() / 2.0 - 20.0);
-    off.y = off.y.clamp_safe(-(ch / 2.0 + inner.height() / 2.0 - 20.0), ch / 2.0 + inner.height() / 2.0 - 20.0);
+    off.y = clamp_off_y(off.y, ch, inner.height());
     let (x0, y0) = (inner.center().x + off.x - cw / 2.0, inner.center().y + off.y - ch / 2.0);
     let side = u * (1.0 - CUBE_GAP);
     let seen = cubes
@@ -304,7 +313,7 @@ pub fn draw(ui: &mut Ui, rect: Rect, cubes: &[Cube], textures: &HashMap<(u32, ch
     let (cw, ch) = (n_sl * u, rows * u);
     // keep the core from being pushed out of the pane
     view.off.x = view.off.x.clamp_safe(-(cw / 2.0 + inner.width() / 2.0 - 20.0), cw / 2.0 + inner.width() / 2.0 - 20.0);
-    view.off.y = view.off.y.clamp_safe(-(ch / 2.0 + inner.height() / 2.0 - 20.0), ch / 2.0 + inner.height() / 2.0 - 20.0);
+    view.off.y = clamp_off_y(view.off.y, ch, inner.height());
     let (x0, y0) = (inner.center().x + view.off.x - cw / 2.0, inner.center().y + view.off.y - ch / 2.0);
     let side = u * (1.0 - CUBE_GAP);
     let cube_rect = |c: &Cube| Rect::from_center_size(Pos2::new(x0 + (c.slice - smin) as f32 * u + u / 2.0, y0 + (yhi - c.y - 0.5) * u), Vec2::splat(side));
@@ -507,6 +516,32 @@ mod tests {
         let a1 = cubes.iter().find(|c| c.name() == "A1").unwrap();
         assert_eq!(a1.recs, vec![0]);
         assert!(a1.photo.is_some());
+    }
+
+    #[test]
+    fn shrinking_the_pane_takes_the_gap_away_before_any_cube_is_cut_off() {
+        // a stale vertical offset (content pushed up after a zoom) must not leave a gap below while the top is cut off
+        let (rows, u) = (4.0_f32, 30.0_f32);
+        let ch = rows * u; // 120 px of cubes
+        for pane_h in [260.0_f32, 200.0, 150.0, 121.0, 120.0, 100.0, 60.0] {
+            for off in [-200.0_f32, -60.0, -10.0, 0.0, 10.0, 60.0, 200.0] {
+                let o = clamp_off_y(off, ch, pane_h);
+                let (top, bottom) = (pane_h / 2.0 + o - ch / 2.0, pane_h / 2.0 + o + ch / 2.0); // content edges in the pane
+                if ch <= pane_h {
+                    assert!(top >= -1e-3 && bottom <= pane_h + 1e-3, "fits but is cut: pane {pane_h} off {off}");
+                } else {
+                    assert!(top <= 1e-3 && bottom >= pane_h - 1e-3, "gap while cut: pane {pane_h} off {off}");
+                }
+            }
+        }
+        // a view that is centred already is not moved
+        assert_eq!(clamp_off_y(0.0, 500.0, 100.0), 0.0);
+        // and cubes_in_view agrees: a stale offset does not hide a row of a pane that has room for all of them
+        let cubes: Vec<Cube> = (0..4).map(|r| Cube { slice: 1, letter: (b'A' + r as u8) as char, y: r as f32, recs: vec![], photo: None }).collect();
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(60.0, 4.0 * 12.0 + 20.0)); // inner ~ 34 x 48 -> u = 12
+        let mut v = View::default();
+        v.off = Vec2::new(0.0, -300.0);
+        assert_eq!(cubes_in_view(rect, &cubes, &v).1.len(), 4);
     }
 
     #[test]
