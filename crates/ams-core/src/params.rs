@@ -19,7 +19,14 @@ pub fn is_lab(i: usize) -> bool {
     i >= FIRST_LAB
 }
 
-/// Reference volume of the Kappabridge in cm3: Km is reported for this volume.
+/// Reference (nominal) volume of the Kappabridge in cm3: V0 = 10 cm3 (Safyr7 manual, 3.2.1).
+///
+/// The instrument measures the total susceptibility k_TOT = moment / V0. Safyr7 reports
+/// the volume susceptibility k_VOL = (V0 / V) * k_TOT, V = the actual volume typed in for
+/// the specimen (the Act. vol. of the .asc header, byte 68 of an .ams record). All the
+/// data of this project were measured with V = 10 (Safyr's factor is 1), so the stored Km
+/// is k_TOT and AMS Studio applies k_VOL = (10 / V) * Km once, with the real cube volume.
+/// A file whose recorded volume is not 10 would already be scaled by Safyr.
 pub const REF_VOLUME: f64 = 10.0;
 
 pub const N_PARAMS: usize = PARAM_LABELS.len();

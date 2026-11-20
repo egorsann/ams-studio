@@ -83,6 +83,16 @@ This program's export (`File > Export Data File` and `Export Selection`, also `c
 
 `examples/demo_60_specimens.ams` and `examples/demo_12_specimens.ams` are **made up** by `cargo run -p ams-core --example make_demo -- out.ams N` (fixed seed, two sites, realistic normalised tensors). The 12-specimen file with its Group Statistics result printed by the original is used as a regression test in `stats.rs`.
 
+## Volume normalisation (Km, K')
+
+Source: AGICO Safyr7 user manual, section 3.2.1 (https://www.agico.cz/downloads/documents/manuals/safyr7-man.pdf).
+
+* The Kappabridge measures the total susceptibility `k_TOT` = induced moment / V0, with the nominal volume of the instrument **V0 = 10 cm3**.
+* Safyr7 shows (and, for anisotropy data, always stores) the volume susceptibility **`k_VOL = (V0 / V) * k_TOT`**, `V` being the actual specimen volume typed in for the specimen (the `Act. vol.` line of the `.asc` header; byte 68 of the `.ams` record). Mass-normalised: `chi = (V0 / m) * k_TOT`.
+* In this project's data `V` was entered as 10.00 in every record (the `.asc` headers and a scan of all 251 `.ams` files under PhD_work: 7,127 records with 10.0, 170 blank records with 0.0, none with another volume), so Safyr's factor was exactly 1 and the stored Km is `k_TOT`.
+* AMS Studio therefore applies the one correction itself, with the real cube volume: `Km_vol = Km * 10 / V_cube` (2.963 for a 15 mm cube, 3.375 cm3; 1.25 for a 20 mm cube, 8 cm3). `K'` = `Km_vol * sqrt(sum (k_i - 1)^2 / 3)` and the unnormalised axes scale the same way; shape parameters do not change.
+* A file whose recorded volume is neither 10 nor 0 was already scaled by Safyr (`Km = k_TOT * 10 / V`). Before correcting with a different volume `V'` it must be undone: `Km_vol = Km * (V / 10) * (10 / V') = Km * V / V'`. Studio does not do this automatically; AMS Studio's own Volume Correction also writes its volume into byte 68, with the opposite meaning (Km not yet corrected).
+
 ## `<file>.volume.json` (written by AMS Studio)
 
 Next to an `.ams` file whose volume was entered with Edit > Volume Correction: `{"file": "...", "volume_cm3": 3.375, "shape": "cubic" | "cylindrical", "applied": "YYYY-MM-DD", "records": n}`.

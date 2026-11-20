@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-ams-core = { version = "0.4.7", path = "../ams-core" }
+ams-core = { version = "0.4.8", path = "../ams-core" }
 calamine = "0.38.0"
 cfb = "0.16.0"
 chrono = { version = "0.4.41", default-features = false, features = ["clock", "std"] }

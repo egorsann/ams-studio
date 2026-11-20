@@ -213,7 +213,7 @@ fn param_info(i: usize) -> &'static str {
         21 => "E12: confidence angle (deg) of the K1-K2 plane from the measurement scatter (approximate, about 5 % from the original's value). Small = well defined.",
         22 => "E23: confidence angle (deg) of the K2-K3 plane (approximate). Small = well defined.",
         23 => "E13: confidence angle (deg) of the K1-K3 plane (approximate). Small = well defined.",
-        24 => "Kmean_vol*: mean susceptibility corrected for the sample volume, Kmean * 10 / volume (the Kappabridge reports Km for 10 cm3). Lab sheet quantity (Edit > Volume Correction).",
+        24 => "Kmean_vol*: mean susceptibility corrected for the sample volume, Kmean * 10 / volume, i.e. Safyr's k_VOL = (V0 / V) * k_TOT with V0 = 10 cm3 (the files carry V = 10, so the stored Km is k_TOT). Lab sheet quantity (Edit > Volume Correction).",
         25 => "L_Khan*: lineation after Khan, (K1 - K2) / Kmean, on the volume-corrected values. Lab sheet quantity.",
         26 => "F_Khan*: foliation after Khan, (K2 - K3) / Kmean, on the volume-corrected values. Lab sheet quantity.",
         27 => "H_Owens*: total anisotropy after Owens, (K1 - K3) / Kmean, on the volume-corrected values. Lab sheet quantity.",

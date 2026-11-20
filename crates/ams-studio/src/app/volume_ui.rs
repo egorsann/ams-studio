@@ -251,7 +251,7 @@ impl App {
                     st.first, row_name(st.first), st.last, row_name(st.last), st.last - st.first + 1
                 )).weak().small());
             });
-            ui.label(RichText::new("The Kappabridge reports Km for 10 cm\u{b3}. The parameters marked * (corrected mean susceptibility, unnormalised K1-K3) are multiplied by 10 / volume; Km as shown stays as stored in the file.").weak().small());
+            ui.label(RichText::new("Safyr reports k_VOL = (10 / V) \u{b7} k_TOT for the volume V typed in at the instrument; your files carry V = 10, so Km as stored is k_TOT. The parameters marked * (corrected mean susceptibility, unnormalised K1-K3, K') are multiplied by 10 / volume; Km as shown stays as stored in the file.").weak().small());
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 let go = egui::Button::new(RichText::new("Apply").strong().color(Color32::WHITE)).fill(if dark { Color32::from_rgb(52, 104, 200) } else { Color32::from_rgb(47, 111, 222) }).min_size(Vec2::new(110.0, 0.0));
