@@ -629,6 +629,29 @@ pub fn run(out: &Path) -> usize {
         Err(e) => h.check("many: save", false, e),
     }
     h.check("many: refuses a data folder as output", phase_join_ui::save_pairs(&rows, &rows[0].dir).is_err(), "it wrote into the data folder".to_string());
+    // ---- the curve fit of a scatter pane (a hidden option) draws without trouble, in both phases and on both kinds of axes
+    {
+        let demo = root.join("single").join("demo.ams");
+        h.step("open the demo file for the curve fit", move |a, _| a.open_path(demo));
+        for (name, log) in [("linear axes", false), ("log axes", true)] {
+            h.step(&format!("curve fit on F-test against Kmean, {name}"), move |a, _| {
+                let mut c = PaneCfg::default_for(1, false);
+                c.kind = XyKind::Scatter;
+                c.x = AxisCfg::new(0);
+                c.y = AxisCfg::new(18);
+                c.x.log = log;
+                c.y.log = log;
+                c.fit = true;
+                a.panes[1] = c;
+            });
+            h.frames(4, big);
+        }
+        h.step("curve fit out of phase", |a, c| a.run(c, Action::Phase(true)));
+        h.frames(3, big);
+        h.step("curve fit back to in phase", |a, c| a.run(c, Action::Phase(false)));
+        h.step("curve fit off again", |a, _| a.panes[1] = PaneCfg::default_for(1, false));
+        h.frames(2, big);
+    }
     // ---- the cube size kept with a specimen goes into its records when a file of it is opened
     {
         let f1 = root.join("own").join("ZZ01_AMS").join("ZZ01_use.ams");

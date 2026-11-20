@@ -939,6 +939,61 @@ pub fn histogram(ui: &mut Ui, rect: Rect, pts: &[Pt], bins: usize, cfg: &AxisCfg
     out
 }
 
+/// The fit of the pairs shown, kept between frames: it takes about 20 ms, so it is redone only when the values change.
+fn cached_fit(ui: &Ui, salt: &str, xv: &[f64], yv: &[f64]) -> Option<ams_core::curvefit::BentFit> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    xv.len().hash(&mut h);
+    for v in xv.iter().chain(yv) {
+        v.to_bits().hash(&mut h);
+    }
+    let sig = h.finish();
+    let id = ui.scope_id().with(("bent-fit", salt));
+    if let Some((s, f)) = ui.data(|d| d.get_temp::<(u64, Option<ams_core::curvefit::BentFit>)>(id)) {
+        if s == sig {
+            return f;
+        }
+    }
+    let f = ams_core::curvefit::bent_power_law(xv, yv);
+    ui.data_mut(|d| d.insert_temp(id, (sig, f.clone())));
+    f
+}
+
+/// The fitted curve over the plot (and the bend), with a note of what it is, bottom right.
+fn draw_fit(pa: &egui::Painter, f: &Frame2D, th: &Theme, fit: Option<&ams_core::curvefit::BentFit>, spec: &ScatterSpec, xv: &[f64], scales: (f64, f64)) {
+    let (xsc, ysc) = scales;
+    let (xn, yn) = (spec.x.label(), spec.y.label());
+    let colour = Color32::from_rgb(192, 57, 43);
+    let Some(fit) = fit else {
+        let g = pa.layout_no_wrap("curve fit: needs 12 points with both values above 0".to_string(), FontId::proportional(11.0), th.faint());
+        pa.galley(Pos2::new(f.plot.max.x - g.size().x - 6.0, f.plot.max.y - g.size().y - 4.0), g, th.faint());
+        return;
+    };
+    let (lo, hi) = xv.iter().fold((f64::MAX, f64::MIN), |(l, h), &v| (l.min(v), h.max(v)));
+    let (a, b) = (lo.log10() - 0.05, hi.log10() + 0.05);
+    // to the axes: a log axis holds log10 of the value, a linear one the value divided by its power of ten
+    let tx = |lx: f64| if spec.x.log { lx } else { 10f64.powf(lx) * xsc };
+    let ty = |ly: f64| if spec.y.log { ly } else { 10f64.powf(ly) * ysc };
+    let line: Vec<Pos2> = (0..=240).map(|i| a + (b - a) * i as f64 / 240.0).map(|lx| f.to_screen(tx(lx), ty(fit.log_y(lx)))).collect();
+    let clip = pa.with_clip_rect(f.plot);
+    let stroke = Stroke::new(2.2, colour);
+    if fit.bent() {
+        clip.add(Shape::line(line, egui::epaint::PathStroke::new(2.2, colour)));
+        clip.circle(f.to_screen(tx(fit.x0), ty(fit.y0)), 5.0, Color32::WHITE, stroke);
+    } else {
+        clip.extend(Shape::dashed_line(&line, stroke, 7.0, 4.0));
+    }
+    let text = if fit.bent() {
+        format!("fit: {yn} ~ {xn}^{:.2} below, ^{:+.2} above the bend\nbend at {xn} {:.1e} ({yn} {:.1e}), RMS {:.2} dex", fit.s1, fit.s2, 10f64.powf(fit.x0), 10f64.powf(fit.y0), fit.rms)
+    } else {
+        format!("fit: {yn} ~ {xn}^{:.2}, a straight power law\n(no bend worth fitting), RMS {:.2} dex", fit.line.0, fit.line_rms)
+    };
+    let g = pa.layout_no_wrap(text, FontId::proportional(11.0), th.ink());
+    let r = Rect::from_min_size(Pos2::new(f.plot.max.x - g.size().x - 14.0, f.plot.max.y - g.size().y - 12.0), g.size() + Vec2::new(10.0, 6.0));
+    pa.rect(r, 3.0, th.canvas().gamma_multiply(0.92), Stroke::new(1.0, th.line()), egui::StrokeKind::Inside);
+    pa.galley(r.min + Vec2::new(5.0, 3.0), g, th.ink());
+}
+
 pub struct ScatterSpec<'a> {
     pub x: &'a AxisCfg,
     pub y: &'a AxisCfg,
@@ -948,6 +1003,8 @@ pub struct ScatterSpec<'a> {
     pub connect: bool,
     /// Join the points in the order of their x values (a line plot) instead of file order.
     pub sort_x: bool,
+    /// Draw the bent power law fitted to the points (log-log, whatever the axes are).
+    pub fit: bool,
     pub salt: &'a str,
 }
 
@@ -981,6 +1038,12 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
     }
     mineral_lines(&clip, &f, th, &xm, true);
     mineral_lines(&clip, &f, th, &ym, false);
+    if spec.fit {
+        // the pairs on the plot, as the values of the two parameters themselves
+        let (xv, yv): (Vec<f64>, Vec<f64>) = xs.iter().map(|(i, _, _)| (pts[*i].vals[spec.x.param], pts[*i].vals[spec.y.param])).unzip();
+        let fit = cached_fit(ui, spec.salt, &xv, &yv);
+        draw_fit(&pa, &f, th, fit.as_ref(), spec, &xv, (xsc, ysc));
+    }
     if spec.diagonal {
         // y = x in data units: valid when both axes use the same transformation
         let (a, b) = (xr.0.max(yr.0), xr.1.min(yr.1));
@@ -1589,9 +1652,9 @@ mod plane_tests {
             let mut view = ZoomView::default();
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(500.0, 400.0))), ..Default::default() };
             let mut out = ctx.run_ui(input, |ui| {
-                let spec = ScatterSpec { x: &km, y: &k, zero_line: false, diagonal: false, conf: false, connect: false, sort_x: false, salt: "kp-s" };
+                let spec = ScatterSpec { x: &km, y: &k, zero_line: false, diagonal: false, conf: false, connect: false, sort_x: false, fit: false, salt: "kp-s" };
                 scatter(ui, rect, &pts, &spec, 6.0, &th, &mut view);
-                let spec = ScatterSpec { x: &k, y: &km, zero_line: false, diagonal: false, conf: false, connect: false, sort_x: false, salt: "kp-s2" };
+                let spec = ScatterSpec { x: &k, y: &km, zero_line: false, diagonal: false, conf: false, connect: false, sort_x: false, fit: false, salt: "kp-s2" };
                 scatter(ui, rect, &pts, &spec, 6.0, &th, &mut view);
                 histogram(ui, rect, &pts, 10, &k, &th, "kp-h");
                 binned_plot(ui, rect, &pts, XyKind::Bar, &km, &k, 5, GroupBy::Classes, &th, &mut view, "kp-b");
@@ -1599,5 +1662,42 @@ mod plane_tests {
             });
             out.textures_delta.clear();
         }
+    }
+
+    #[test]
+    fn the_fit_option_draws_the_curve_and_is_kept_between_frames() {
+        let ctx = egui::Context::default();
+        let th = Theme { dark: true, k_colors: [Color32::RED, Color32::GREEN, Color32::BLUE], accent: Color32::LIGHT_BLUE };
+        // F against Km: about Km^2.5 up to 3e-4, then flat
+        let mut seed = 5u64;
+        let mut pts = vec![];
+        for i in 0..120 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let lx = -5.0 + 3.5 * ((seed >> 11) as f64 / (1u64 << 53) as f64);
+            let ly = (5.2 + 2.5 * (lx + 3.5)).min(5.2);
+            let mut vals = [f64::NAN; N_PARAMS];
+            vals[0] = 10f64.powf(lx);
+            vals[18] = 10f64.powf(ly);
+            pts.push(Pt { idx: i, name: format!("A{i}"), di: [(0.0, 0.0); 3], vals, sds: [0.0; 3], selected: false, color: None });
+        }
+        let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(500.0, 360.0));
+        let (x, y) = (AxisCfg::new(0), AxisCfg::new(18));
+        let mut ylog = AxisCfg::new(18);
+        ylog.log = true;
+        for (yc, fit) in [(&y, true), (&ylog, true), (&y, false)] {
+            let mut view = ZoomView::default();
+            for _ in 0..2 {
+                let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 450.0))), ..Default::default() };
+                let mut out = ctx.run_ui(input, |ui| {
+                    let spec = ScatterSpec { x: &x, y: yc, zero_line: false, diagonal: false, conf: false, connect: false, sort_x: false, fit, salt: "fit-s" };
+                    scatter(ui, rect, &pts, &spec, 6.0, &th, &mut view);
+                });
+                out.textures_delta.clear();
+            }
+        }
+        // the fit itself, from the same values
+        let (xv, yv): (Vec<f64>, Vec<f64>) = pts.iter().map(|p| (p.vals[0], p.vals[18])).unzip();
+        let f = ams_core::curvefit::bent_power_law(&xv, &yv).unwrap();
+        assert!(f.bent() && (f.s1 - 2.5).abs() < 0.2 && f.s2.abs() < 0.2, "{f:?}");
     }
 }

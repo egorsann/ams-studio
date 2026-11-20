@@ -3312,7 +3312,7 @@ impl App {
                         XyKind::Histogram => plots::histogram(ui, body, &shown, c.bins, &c.hist, th, SALT[k]),
                         XyKind::Scatter | XyKind::Line => {
                             let line = c.kind == XyKind::Line;
-                            let spec = ScatterSpec { x: &c.x, y: &c.y, zero_line: c.zero, diagonal: c.diag, conf: c.conf, connect: c.connect || line, sort_x: line, salt: SALT[k] };
+                            let spec = ScatterSpec { x: &c.x, y: &c.y, zero_line: c.zero, diagonal: c.diag, conf: c.conf, connect: c.connect || line, sort_x: line, fit: c.fit, salt: SALT[k] };
                             plots::scatter(ui, body, &shown, &spec, self.marker, th, &mut self.views[k])
                         }
                         kind => plots::binned_plot(ui, body, &shown, kind, &c.x, &c.y, c.bins, c.group, th, &mut self.views[k], SALT_BIN[k]),
@@ -3971,6 +3971,12 @@ impl App {
                                             ui.checkbox(&mut c.connect, "Connect symbols").on_hover_text("Join the points in file order");
                                             ui.checkbox(&mut c.legend, "Legend").on_hover_text("Show the colour scale below the plot");
                                         });
+                                        // a little out of the way: closed unless it is on
+                                        if matches!(c.kind, XyKind::Scatter | XyKind::Line) {
+                                            egui::CollapsingHeader::new(RichText::new("Curve fit").small().weak()).id_salt(format!("xy-fit{i}")).default_open(c.fit).show(ui, |ui| {
+                                                ui.checkbox(&mut c.fit, "Bent power law (log-log)").on_hover_text("Fits log Y = a straight line in log X that bends smoothly into a second straight line, with no ceiling imposed (a ceiling shows only if the later slope is near 0), to the points on the plot, and draws it with the two slopes, the bend and the RMS. It is drawn as a straight power law when the bend is not worth its extra parameters (AIC). Both values must be above 0. For the F-test against Kmean in phase it rises as about Km^2.5 and then flattens; out of phase it is flat at low |Km| and then rises as about Km^2.");
+                                            });
+                                        }
                                         ui.separator();
                                         self.pane_color_ui(ui, i, &format!("xy-color{i}"));
                                     }
