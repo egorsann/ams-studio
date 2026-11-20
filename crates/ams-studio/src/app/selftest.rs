@@ -647,6 +647,17 @@ pub fn run(out: &Path) -> usize {
             });
             h.frames(4, big);
         }
+        // a log setting left on a direction or on T is ignored, and the ticks next to the plot stay away
+        h.step("log left on for inclination and T", |a, _| {
+            let mut c = PaneCfg::default_for(1, false);
+            c.kind = XyKind::Scatter;
+            c.x = AxisCfg::new(5);
+            c.y = AxisCfg::new(13);
+            c.x.log = true;
+            c.y.log = true;
+            a.panes[1] = c;
+        });
+        h.frames(3, big);
         h.step("curve fit out of phase", |a, c| a.run(c, Action::Phase(true)));
         h.frames(3, big);
         h.step("curve fit back to in phase", |a, c| a.run(c, Action::Phase(false)));

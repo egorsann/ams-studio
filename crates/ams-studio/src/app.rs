@@ -125,6 +125,18 @@ pub(super) struct HyUi {
     pub status: String,
 }
 
+/// Which of the "log x" and "log y" ticks next to a plot make sense for its settings: an axis gets one only when its
+/// parameter can be logarithmic (not directions or T) and the plot has that axis with numbers on it (the histogram has
+/// only X, a box or bar plot grouped by sample has no numeric X).
+fn log_ticks(c: &PaneCfg) -> (bool, bool) {
+    use plots::log_makes_sense as ok;
+    match c.kind {
+        XyKind::Histogram => (ok(c.hist.param), false),
+        XyKind::Scatter | XyKind::Line => (ok(c.x.param), ok(c.y.param)),
+        XyKind::Bar | XyKind::Box => (c.group != GroupBy::Sample && ok(c.x.param), ok(c.y.param)),
+    }
+}
+
 impl PartialEq for AxisCfg {
     fn eq(&self, o: &Self) -> bool {
         self.param == o.param && self.auto == o.auto && self.min == o.min && self.max == o.max && self.log == o.log
@@ -314,13 +326,16 @@ fn color_param_combo(ui: &mut Ui, id: &str, c: &mut ColorCfg, dark: bool, hy: &H
 
 const HY_INFO: &str = "a hyperspectral parameter of the AMS dashboard code (its feature table next to the data). Every point is coloured with the value of its cube: the median of the shots of the cube's bottom face, or of its other faces when the bottom was not measured; a point whose cube has no value keeps the plain marker colour. The cubes are matched by their names (A12 = cube A, slice 12) in the open specimen.";
 
-fn range_fields(ui: &mut Ui, auto: &mut bool, min: &mut f64, max: &mut f64, log: &mut bool, id: &str) {
+fn range_fields(ui: &mut Ui, auto: &mut bool, min: &mut f64, max: &mut f64, log: &mut bool, id: &str, log_ok: bool) {
     ui.horizontal(|ui| {
         ui.checkbox(auto, "Auto-scale");
-        egui::ComboBox::from_id_salt((id, "scale")).width(96.0).selected_text(if *log { "Log (base 10)" } else { "Linear" }).show_ui(ui, |ui| {
-            ui.selectable_value(log, false, "Linear");
-            ui.selectable_value(log, true, "Log (base 10)");
-        });
+        // a log scale is only offered where it means something (not for directions or T)
+        if log_ok {
+            egui::ComboBox::from_id_salt((id, "scale")).width(96.0).selected_text(if *log { "Log (base 10)" } else { "Linear" }).show_ui(ui, |ui| {
+                ui.selectable_value(log, false, "Linear");
+                ui.selectable_value(log, true, "Log (base 10)");
+            });
+        }
     });
     ui.add_enabled_ui(!*auto, |ui| {
         let speed = 0.01 * max.abs().max(min.abs()).max(1e-6);
@@ -335,7 +350,7 @@ fn range_fields(ui: &mut Ui, auto: &mut bool, min: &mut f64, max: &mut f64, log:
 fn axis_ui(ui: &mut Ui, title: &str, id: &str, cfg: &mut AxisCfg, dark: bool) {
     ui.label(RichText::new(title).strong());
     param_combo(ui, id, &mut cfg.param, dark);
-    range_fields(ui, &mut cfg.auto, &mut cfg.min, &mut cfg.max, &mut cfg.log, id);
+    range_fields(ui, &mut cfg.auto, &mut cfg.min, &mut cfg.max, &mut cfg.log, id, plots::log_makes_sense(cfg.param));
 }
 
 fn color_ui(ui: &mut Ui, id: &str, c: &mut ColorCfg, dark: bool, title: &str, hy: &HyUi) -> bool {
@@ -352,7 +367,8 @@ fn color_ui(ui: &mut Ui, id: &str, c: &mut ColorCfg, dark: bool, title: &str, hy
             // the parameters are read the first time they are wanted
             want_hyper = c.hy && hy.rows.is_empty() && hy.status.is_empty();
             color_param_combo(ui, id, c, dark, hy);
-            range_fields(ui, &mut c.auto, &mut c.min, &mut c.max, &mut c.log, id);
+            let log_ok = plots::log_makes_sense(c.param) || c.hyper_on();
+            range_fields(ui, &mut c.auto, &mut c.min, &mut c.max, &mut c.log, id, log_ok);
             ui.horizontal(|ui| {
                 ui.radio_value(&mut c.palette, 0, "Rainbow");
                 ui.radio_value(&mut c.palette, 1, "Shades");
@@ -1617,6 +1633,7 @@ impl App {
         if !cfg.on {
             return (pts.to_vec(), None);
         }
+        let cfg = &cfg.sane();
         if cfg.by_class {
             // class colours; specimens without a class keep the default marker colour
             let out = pts.iter().map(|p| Pt { color: classes.get(p.idx).copied().flatten(), ..p.clone() }).collect();
@@ -3374,7 +3391,7 @@ impl App {
             if show_bar {
                 let bar = Rect::from_min_max(Pos2::new(body.min.x, body.max.y - 30.0), body.max);
                 body.max.y -= 30.0;
-                plots::color_bar(ui, bar, &self.color[i], crange.unwrap(), th);
+                plots::color_bar(ui, bar, &self.color[i].sane(), crange.unwrap(), th);
             }
             let out = match i {
                 0 => {
@@ -3388,7 +3405,9 @@ impl App {
                     out
                 }
                 _ => {
-                    let c = cfg.unwrap_or_else(|| PaneCfg::default_for(0, false));
+                    let mut c = cfg.unwrap_or_else(|| PaneCfg::default_for(0, false));
+                    // a log setting left over from another parameter does nothing where log means nothing (directions, T)
+                    (c.x, c.y, c.hist) = (c.x.sane(), c.y.sane(), c.hist.sane());
                     let k = i - 1;
                     // "Selection only": just the sub-specimens selected in the specimen list
                     let shown: Vec<Pt> = if c.sel_only { cpts.iter().filter(|p| p.selected).cloned().collect() } else { cpts.clone() };
@@ -3857,8 +3876,9 @@ impl App {
         let c0 = (i >= 1).then(|| self.cfg(i - 1).clone());
         let is_polar = i == 3 && c0.as_ref().map_or(false, |c| c.polar);
         let has_p = is_polar || c0.as_ref().map_or(false, |c| [&c.x, &c.y, &c.hist].iter().any(|a| a.param == 3 || a.param == 4));
-        let has_log = i == 2 && c0.as_ref().map_or(false, |c| matches!(c.kind, XyKind::Scatter | XyKind::Line));
-        let reserved = if i == 0 { 0.0 } else { 118.0 + if has_p { 34.0 } else { 0.0 } + if has_log { 78.0 } else { 0.0 } + if i == 3 { 62.0 + if is_polar { 78.0 } else { 0.0 } } else { 0.0 } };
+        // "log x" and "log y" next to the plot, only for the axes where log means something
+        let (log_x, log_y) = c0.as_ref().filter(|_| !is_polar && i >= 1).map_or((false, false), log_ticks);
+        let reserved = if i == 0 { 0.0 } else { 118.0 + if has_p { 34.0 } else { 0.0 } + if log_x { 56.0 } else { 0.0 } + if log_y { 56.0 } else { 0.0 } + if i == 3 { 62.0 + if is_polar { 78.0 } else { 0.0 } } else { 0.0 } };
         child.add_sized([(header.width() - reserved - 34.0).max(40.0), 18.0], egui::Label::new(txt).truncate());
         let mut changed = false;
         let mut p_changed = false;
@@ -3888,11 +3908,23 @@ impl App {
                         }
                     }
                 }
-                if has_log {
-                    let lab = if c.x.param == 0 { "Log Km" } else { "Log X" };
-                    let mut lg = c.x.log;
-                    if ui.checkbox(&mut lg, lab).on_hover_text("Logarithmic X axis").changed() {
-                        self.cfg_mut(i - 1).x.log = lg;
+                // the checkboxes read and change the axis the tick belongs to (the histogram's one axis is its X)
+                if log_y {
+                    let mut lg = c.y.log;
+                    if ui.checkbox(&mut lg, "log y").on_hover_text("Logarithmic Y axis (values at or below 0 cannot be shown)").changed() {
+                        self.cfg_mut(i - 1).y.log = lg;
+                        cfg_changed = true;
+                    }
+                }
+                if log_x {
+                    let hist = c.kind == XyKind::Histogram;
+                    let mut lg = if hist { c.hist.log } else { c.x.log };
+                    if ui.checkbox(&mut lg, "log x").on_hover_text("Logarithmic X axis (values at or below 0 cannot be shown)").changed() {
+                        if hist {
+                            self.cfg_mut(i - 1).hist.log = lg;
+                        } else {
+                            self.cfg_mut(i - 1).x.log = lg;
+                        }
                         cfg_changed = true;
                     }
                 }
@@ -4029,7 +4061,7 @@ impl App {
                                 ui.label(RichText::new("Data").strong());
                                 param_combo(ui, &format!("hist-param{i}"), &mut c.hist.param, dark);
                                 let h = &mut c.hist;
-                                range_fields(ui, &mut h.auto, &mut h.min, &mut h.max, &mut h.log, &format!("hist{i}"));
+                                range_fields(ui, &mut h.auto, &mut h.min, &mut h.max, &mut h.log, &format!("hist{i}"), plots::log_makes_sense(h.param));
                                 thin_slider(ui, egui::Slider::new(&mut c.bins, 3..=60).text("bins"));
                             } else {
                                 let grouped = matches!(c.kind, XyKind::Bar | XyKind::Box);
@@ -4960,6 +4992,64 @@ impl App {
         self.list_drag = drag;
         self.last_anchor = anchor;
         self.win_table = open;
+    }
+}
+
+#[cfg(test)]
+mod log_tick_tests {
+    use super::*;
+
+    #[test]
+    fn log_means_something_for_magnitudes_and_ratios_but_not_for_directions_or_t() {
+        let ok = plots::log_makes_sense;
+        // directions: declinations, inclinations, lineation plunge, foliation dip and dip direction; T and U
+        for p in [5, 6, 12, 13, 14, 15, 16, 17, 31, 32, 33] {
+            assert!(!ok(p), "{} has no log axis", ams_core::params::PARAM_LABELS[p]);
+        }
+        // Kmean, the shape ratios, K1..K3, the F-tests, the lab quantities and K'
+        for p in [0, 1, 2, 3, 4, 7, 8, 9, 10, 11, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 34] {
+            assert!(ok(p), "{} can have a log axis", ams_core::params::PARAM_LABELS[p]);
+        }
+        // a log setting left on a parameter that cannot have one is ignored
+        let mut a = AxisCfg::new(13);
+        a.log = true;
+        assert!(!a.sane().log);
+        let mut a = AxisCfg::new(0);
+        a.log = true;
+        assert!(a.sane().log);
+        let mut c = ColorCfg { log: true, param: 12, ..ColorCfg::default() };
+        assert!(!c.sane().log);
+        c.param = 0;
+        assert!(c.sane().log);
+    }
+
+    #[test]
+    fn the_ticks_next_to_a_plot_follow_what_its_axes_can_do() {
+        let mut c = PaneCfg::default_for(1, false); // Pj against Kmean
+        c.kind = XyKind::Scatter;
+        assert_eq!(log_ticks(&c), (true, true));
+        // T on Y (the Anisoft bottom right plot is T against Pj): only X
+        c.x = AxisCfg::new(4);
+        c.y = AxisCfg::new(5);
+        assert_eq!(log_ticks(&c), (true, false));
+        // inclination against declination: neither
+        c.x = AxisCfg::new(12);
+        c.y = AxisCfg::new(13);
+        assert_eq!(log_ticks(&c), (false, false));
+        // the histogram has only X
+        c.kind = XyKind::Histogram;
+        c.hist = AxisCfg::new(0);
+        assert_eq!(log_ticks(&c), (true, false));
+        c.hist = AxisCfg::new(14);
+        assert_eq!(log_ticks(&c), (false, false));
+        // a box plot grouped by sample has no numeric X
+        c.kind = XyKind::Box;
+        c.x = AxisCfg::new(0);
+        c.y = AxisCfg::new(0);
+        c.group = GroupBy::Classes;
+        assert_eq!(log_ticks(&c), (true, true));
+        c.group = GroupBy::Sample;
+        assert_eq!(log_ticks(&c), (false, true));
     }
 }
 

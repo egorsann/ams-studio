@@ -80,6 +80,13 @@ pub(crate) fn paint_band(ui: &Ui, clip: Rect, r: Rect, th: &Theme) {
     pa.rect_stroke(r, 0.0, Stroke::new(1.2, th.accent), egui::StrokeKind::Inside);
 }
 
+/// Whether a logarithmic axis means something for a parameter: not for directions (declination, inclination, lineation
+/// plunge, foliation dip and dip direction), which are angles and can be 0 or negative, nor for the shape parameters T
+/// and U, which run from -1 to 1.
+pub fn log_makes_sense(param: usize) -> bool {
+    !matches!(param, 5 | 6 | 12..=17 | 31..=33)
+}
+
 /// One plot axis: which parameter, optional fixed range, linear or log10.
 #[derive(Clone, Debug)]
 pub struct AxisCfg {
@@ -96,6 +103,11 @@ impl AxisCfg {
     }
     pub fn label(&self) -> &'static str {
         PARAM_LABELS[self.param.min(N_PARAMS - 1)]
+    }
+
+    /// The axis as it is drawn: a log setting left over from another parameter is ignored where log means nothing.
+    pub fn sane(&self) -> AxisCfg {
+        AxisCfg { log: self.log && log_makes_sense(self.param), ..self.clone() }
     }
 }
 
@@ -126,6 +138,11 @@ impl Default for ColorCfg {
 }
 
 impl ColorCfg {
+    /// The colour-coding as it is applied: a log setting left over from another parameter is ignored where log means nothing.
+    pub fn sane(&self) -> ColorCfg {
+        ColorCfg { log: self.log && (self.hyper_on() || log_makes_sense(self.param)), ..self.clone() }
+    }
+
     /// The colour comes from a hyperspectral parameter.
     pub fn hyper_on(&self) -> bool {
         self.on && !self.by_class && self.hy && !self.hy_key.is_empty()
@@ -974,15 +991,14 @@ fn cached_fit(ui: &Ui, salt: &str, xv: &[f64], yv: &[f64]) -> Option<ams_core::c
     f
 }
 
-/// The fitted curve over the plot (and the bend), with a note of what it is, bottom right.
-fn draw_fit(pa: &egui::Painter, f: &Frame2D, th: &Theme, fit: Option<&ams_core::curvefit::BentFit>, spec: &ScatterSpec, xv: &[f64], scales: (f64, f64)) {
+/// The fitted curve over the plot (and the bend). Returns the note about it, which is shown on hover of the info icon in
+/// the corner of the plot, not on the plot itself.
+fn draw_fit(pa: &egui::Painter, f: &Frame2D, fit: Option<&ams_core::curvefit::BentFit>, spec: &ScatterSpec, xv: &[f64], scales: (f64, f64)) -> String {
     let (xsc, ysc) = scales;
     let (xn, yn) = (spec.x.label(), spec.y.label());
     let colour = Color32::from_rgb(192, 57, 43);
     let Some(fit) = fit else {
-        let g = pa.layout_no_wrap("curve fit: needs 12 points with both values above 0".to_string(), FontId::proportional(11.0), th.faint());
-        pa.galley(Pos2::new(f.plot.max.x - g.size().x - 6.0, f.plot.max.y - g.size().y - 4.0), g, th.faint());
-        return;
+        return "Curve fit: needs 12 points with both values above 0.".to_string();
     };
     let (lo, hi) = xv.iter().fold((f64::MAX, f64::MIN), |(l, h), &v| (l.min(v), h.max(v)));
     let (a, b) = (lo.log10() - 0.05, hi.log10() + 0.05);
@@ -998,15 +1014,11 @@ fn draw_fit(pa: &egui::Painter, f: &Frame2D, th: &Theme, fit: Option<&ams_core::
     } else {
         clip.extend(Shape::dashed_line(&line, stroke, 7.0, 4.0));
     }
-    let text = if fit.bent() {
-        format!("fit: {yn} ~ {xn}^{:.2} below, ^{:+.2} above the bend\nbend at {xn} {:.1e} ({yn} {:.1e}), RMS {:.2} dex", fit.s1, fit.s2, 10f64.powf(fit.x0), 10f64.powf(fit.y0), fit.rms)
+    if fit.bent() {
+        format!("Curve fit (bent power law, log-log):\n{yn} ~ {xn}^{:.2} below the bend, ^{:+.2} above it\nbend at {xn} {:.1e} ({yn} {:.1e}), RMS {:.2} dex", fit.s1, fit.s2, 10f64.powf(fit.x0), 10f64.powf(fit.y0), fit.rms)
     } else {
-        format!("fit: {yn} ~ {xn}^{:.2}, a straight power law\n(no bend worth fitting), RMS {:.2} dex", fit.line.0, fit.line_rms)
-    };
-    let g = pa.layout_no_wrap(text, FontId::proportional(11.0), th.ink());
-    let r = Rect::from_min_size(Pos2::new(f.plot.max.x - g.size().x - 14.0, f.plot.max.y - g.size().y - 12.0), g.size() + Vec2::new(10.0, 6.0));
-    pa.rect(r, 3.0, th.canvas().gamma_multiply(0.92), Stroke::new(1.0, th.line()), egui::StrokeKind::Inside);
-    pa.galley(r.min + Vec2::new(5.0, 3.0), g, th.ink());
+        format!("Curve fit (bent power law, log-log):\n{yn} ~ {xn}^{:.2}, a straight power law\n(no bend worth fitting), RMS {:.2} dex", fit.line.0, fit.line_rms)
+    }
 }
 
 /// Colours of the two clusters, from the lower X up.
@@ -1039,13 +1051,12 @@ fn cached_gmm(ui: &Ui, salt: &str, xv: &[f64], yv: &[f64]) -> Option<GmmPair> {
     g
 }
 
-/// The 1 and 2 sigma ellipses of the clusters, their centres, and a note with the weights, centres, AIC and BIC.
-fn draw_gmm(pa: &egui::Painter, f: &Frame2D, th: &Theme, g: Option<&GmmPair>, spec: &ScatterSpec, scales: (f64, f64)) {
+/// The 1 and 2 sigma ellipses of the clusters and their centres. Returns the note (weights, centres, AIC and BIC), which
+/// is shown on hover of the info icon in the corner of the plot.
+fn draw_gmm(pa: &egui::Painter, f: &Frame2D, th: &Theme, g: Option<&GmmPair>, spec: &ScatterSpec, scales: (f64, f64)) -> String {
     let (xsc, ysc) = scales;
     let Some(g) = g else {
-        let t = pa.layout_no_wrap("mixture: needs 20 points with both values above 0".to_string(), FontId::proportional(11.0), th.faint());
-        pa.galley(Pos2::new(f.plot.min.x + 6.0, f.plot.max.y - t.size().y - 4.0), t, th.faint());
-        return;
+        return "Gaussian mixture: needs 20 points with both values above 0.".to_string();
     };
     let tx = |lx: f64| if spec.x.log { lx } else { 10f64.powf(lx) * xsc };
     let ty = |ly: f64| if spec.y.log { ly } else { 10f64.powf(ly) * ysc };
@@ -1075,10 +1086,17 @@ fn draw_gmm(pa: &egui::Painter, f: &Frame2D, th: &Theme, g: Option<&GmmPair>, sp
     if let Some(o) = &g.one {
         text += &format!("   (1 cluster: AIC {:.0}, BIC {:.0})", o.aic(), o.bic());
     }
-    let t = pa.layout_no_wrap(text, FontId::proportional(11.0), th.ink());
-    let r = Rect::from_min_size(Pos2::new(f.plot.min.x + 8.0, f.plot.max.y - t.size().y - 12.0), t.size() + Vec2::new(10.0, 6.0));
-    pa.rect(r, 3.0, th.canvas().gamma_multiply(0.92), Stroke::new(1.0, th.line()), egui::StrokeKind::Inside);
-    pa.galley(r.min + Vec2::new(5.0, 3.0), t, th.ink());
+    text
+}
+
+/// A small circled (i) in the bottom right corner of the plot; the notes on the fits show when the pointer rests on it.
+fn fit_info_icon(ui: &Ui, pa: &egui::Painter, plot: Rect, th: &Theme, salt: &str, text: String) {
+    let c = Pos2::new(plot.max.x - 13.0, plot.max.y - 13.0);
+    let resp = ui.interact(Rect::from_center_size(c, Vec2::splat(20.0)), ui.scope_id().with(("fit-info", salt)), Sense::hover());
+    let col = if resp.hovered() { th.ink() } else { th.faint() };
+    pa.circle_stroke(c, 6.5, Stroke::new(1.1, col));
+    pa.text(c + Vec2::new(0.0, 0.3), Align2::CENTER_CENTER, "i", FontId::proportional(9.5), col);
+    resp.on_hover_text(text);
 }
 
 pub struct ScatterSpec<'a> {
@@ -1127,11 +1145,13 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
     }
     mineral_lines(&clip, &f, th, &xm, true);
     mineral_lines(&clip, &f, th, &ym, false);
+    // what the fits say, for the info icon in the corner
+    let mut notes: Vec<String> = vec![];
     if spec.fit {
         // the pairs on the plot, as the values of the two parameters themselves
         let (xv, yv): (Vec<f64>, Vec<f64>) = xs.iter().map(|(i, _, _)| (pts[*i].vals[spec.x.param], pts[*i].vals[spec.y.param])).unzip();
         let fit = cached_fit(ui, spec.salt, &xv, &yv);
-        draw_fit(&pa, &f, th, fit.as_ref(), spec, &xv, (xsc, ysc));
+        notes.push(draw_fit(&pa, &f, fit.as_ref(), spec, &xv, (xsc, ysc)));
     }
     // the mixture's cluster of every point on the plot (by the point's index), when it is on
     let mut cluster: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
@@ -1143,7 +1163,7 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
                 cluster.insert(xs[u].0, l);
             }
         }
-        draw_gmm(&pa, &f, th, g.as_ref(), spec, (xsc, ysc));
+        notes.push(draw_gmm(&pa, &f, th, g.as_ref(), spec, (xsc, ysc)));
     }
     if spec.diagonal {
         // y = x in data units: valid when both axes use the same transformation
@@ -1200,6 +1220,9 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
     }
     if xs.is_empty() {
         pa.text(f.plot.center(), Align2::CENTER_CENTER, "No specimens to show", FontId::proportional(13.0), th.faint());
+    }
+    if !notes.is_empty() {
+        fit_info_icon(ui, &pa, f.plot, th, spec.salt, notes.join("\n\n"));
     }
     if let Some((_, i)) = best {
         let p = &pts[i];
