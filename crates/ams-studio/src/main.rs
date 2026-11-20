@@ -80,6 +80,68 @@ fn main() -> eframe::Result {
             std::process::exit(if bad == 0 && !files.is_empty() { 0 } else { 1 });
         }
     }
+    // `--intervals-from <ams_intervals_dependancy.py> <.ams file or specimen folder>...`: copies the ALTERATION_INTERVALS of the Python
+    // file (the dictionary is read, nothing is run) into the dependency file of each specimen (the entry whose ID starts the file or
+    // folder name); `--intervals-from off <...>` removes them. Cubes outside the intervals are the background of the K1 / K3
+    // deviation parameters. The .ams files are not touched.
+    {
+        let a: Vec<String> = std::env::args().collect();
+        if let Some(i) = a.iter().position(|x| x == "--intervals-from") {
+            let src = a.get(i + 1).map(|s| s.as_str()).unwrap_or("");
+            let off = src == "off";
+            let table = if off {
+                Ok(Default::default())
+            } else {
+                std::fs::read_to_string(src).map_err(|e| format!("{src}: {e}")).and_then(|t| ams_core::alteration::parse_python_intervals(&t))
+            };
+            let table = match table {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("{e}\nusage: ams-studio --intervals-from <ams_intervals_dependancy.py | off> <.ams file or folder>...");
+                    std::process::exit(2);
+                }
+            };
+            let mut bad = 0;
+            let mut n = 0;
+            for arg in &a[i + 2..] {
+                let p = std::path::PathBuf::from(arg);
+                let f = if p.is_dir() {
+                    let mut v: Vec<_> = std::fs::read_dir(&p).map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|e| e.extension().map_or(false, |x| x.eq_ignore_ascii_case("ams"))).collect()).unwrap_or_default();
+                    v.sort();
+                    v.into_iter().next()
+                } else {
+                    Some(p.clone())
+                };
+                let Some(f) = f else {
+                    eprintln!("no .ams file in {arg}");
+                    bad += 1;
+                    continue;
+                };
+                let names = [f.file_name(), f.parent().and_then(|d| d.file_name())];
+                let key = table.keys().find(|k| names.iter().flatten().any(|n| n.to_string_lossy().starts_with(k.as_str()))).cloned();
+                let res = if off {
+                    ams_core::alteration::write_alteration(&f, None, "")
+                } else if let Some(k) = &key {
+                    ams_core::alteration::write_alteration(&f, Some(&table[k]), &format!("{} ({k})", std::path::Path::new(src).file_name().map_or(String::new(), |x| x.to_string_lossy().to_string())))
+                } else {
+                    eprintln!("{}: no entry for this specimen in {src}", f.display());
+                    bad += 1;
+                    continue;
+                };
+                match res {
+                    Ok(()) => {
+                        n += 1;
+                        println!("{}: {}", ams_core::depjson::for_source(&f).display(), if off { "alteration intervals removed".to_string() } else { format!("{} intervals of {}", table[key.as_ref().unwrap()].intervals.len(), key.unwrap()) });
+                    }
+                    Err(e) => {
+                        bad += 1;
+                        eprintln!("{}: {e}", f.display());
+                    }
+                }
+            }
+            std::process::exit(if bad == 0 && n > 0 { 0 } else { 1 });
+        }
+    }
     // `--demo-tree <folder>`: writes made-up specimen folders (own folders, one folder with 7-digit IDs, .ran pairs, split phases)
     {
         let a: Vec<String> = std::env::args().collect();

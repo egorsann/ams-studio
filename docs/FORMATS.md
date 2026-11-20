@@ -83,6 +83,10 @@ This program's export (`File > Export Data File` and `Export Selection`, also `c
 
 `examples/demo_60_specimens.ams` and `examples/demo_12_specimens.ams` are **made up** by `cargo run -p ams-core --example make_demo -- out.ams N` (fixed seed, two sites, realistic normalised tensors). The 12-specimen file with its Group Statistics result printed by the original is used as a regression test in `stats.rs`.
 
+## `alteration` section of the dependency file
+
+`{"source": "ams_intervals_dependancy.py (ER26PB012)", "intervals": [{"type": "phyllic halo", "cubes": {"A": [0, 15], "B": [1, 10]}, "add": ["C24"], "exclude": ["D23"], "priority": 0}, ...]}`, per specimen ID where a folder holds several. The `ALTERATION_INTERVALS` entry of one specimen in the dashboard's `ams_intervals_dependancy.py` (written by `ams-studio --intervals-from`). A cube (letter A-D and slice of its name, `C24` or `A46_CANTED`) belongs to an interval when it is in `add`, or its slice lies in the interval's range for its letter and it is not in `exclude`; cubes in no interval are the background. `K1_dev*` / `K3_dev*` (`ams_core::alteration`) = axial angle to the axial mean of the background cubes whose axis passes its F-tests.
+
 ## Volume normalisation (Km, K')
 
 Source: AGICO Safyr7 user manual, section 3.2.1 (https://www.agico.cz/downloads/documents/manuals/safyr7-man.pdf).

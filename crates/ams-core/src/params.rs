@@ -6,10 +6,11 @@ use crate::ams::{Axes, Phase};
 /// The first 24 are the original's, in the order of its lists. The ones from 24 on (marked with `*`) belong to the
 /// M3ORE lab sheet and are not in Anisoft: volume-corrected mean susceptibility, Khan's L and F, Owens' H, the
 /// unnormalised K1..K3, the lineation plunge and the foliation dip and dip direction.
-pub const PARAM_LABELS: [&str; 35] = [
+pub const PARAM_LABELS: [&str; 37] = [
     "Kmean", "L", "F", "P", "Pj", "T", "U", "Q", "E", "K1", "K2", "K3", "K1_Dec", "K1_Inc", "K2_Dec", "K2_Inc", "K3_Dec", "K3_Inc",
     "FTest", "FTest_F12", "FTest_F23", "E12", "E23", "E13",
     "Kmean_vol*", "L_Khan*", "F_Khan*", "H_Owens*", "K1_unnorm*", "K2_unnorm*", "K3_unnorm*", "Lin_Plunge*", "Fol_Dip*", "Fol_DipDir*", "K_prime*",
+    "K1_dev*", "K3_dev*",
 ];
 
 /// First index of the lab-sheet parameters.
@@ -31,14 +32,23 @@ pub const REF_VOLUME: f64 = 10.0;
 
 pub const N_PARAMS: usize = PARAM_LABELS.len();
 
+/// Index of the deviation of K1 / K3 from the mean of the background cubes (degrees). They depend on the other cubes of the
+/// specimen, so [`param_values_vol`] leaves them NaN and the program fills them in (see `alteration::deviations`).
+pub const K1_DEV: usize = 35;
+pub const K3_DEV: usize = 36;
+
+pub fn is_deviation(i: usize) -> bool {
+    i == K1_DEV || i == K3_DEV
+}
+
 /// Background colour class in the original's lists: 0 none, 1 K1 (pink), 2 K2 (green), 3 K3 (lavender), 4 shape (cyan).
 pub fn param_class(i: usize) -> u8 {
     match i {
         0 => 5,
         1..=8 => 4,
-        9 | 12 | 13 | 28 | 31 => 1,
+        9 | 12 | 13 | 28 | 31 | 35 => 1,
         10 | 14 | 15 | 29 => 2,
-        11 | 16 | 17 | 30 | 32 | 33 => 3,
+        11 | 16 | 17 | 30 | 32 | 33 | 36 => 3,
         24 | 34 => 5,
         25..=27 => 4,
         _ => 0,

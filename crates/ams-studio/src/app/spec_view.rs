@@ -249,7 +249,11 @@ impl App {
                 let d = &self.derived[i];
                 let ph = if self.out_phase { &doc.specs[i].outphase } else { &doc.specs[i].inphase };
                 let vol = if doc.specs[i].volume_cm3 > 0.0 { doc.specs[i].volume_cm3 } else { ams_core::params::REF_VOLUME };
-                param_values_vol(d.km, &d.axes, ph, vol)[p]
+                match (p, self.dev.get(i)) {
+                    (ams_core::params::K1_DEV, Some(v)) => v[0],
+                    (ams_core::params::K3_DEV, Some(v)) => v[1],
+                    _ => param_values_vol(d.km, &d.axes, ph, vol)[p],
+                }
             })
             .collect()
     }

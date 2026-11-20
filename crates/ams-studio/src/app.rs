@@ -11,6 +11,7 @@ mod analysis_ui;
 mod dialogs_ui;
 mod core_links;
 mod core_pane;
+mod deviation;
 mod stereo_planes;
 mod core_ui;
 mod export_ui;
@@ -123,6 +124,8 @@ pub enum Action {
 pub(super) struct HyUi {
     pub rows: Vec<(String, String, String)>,
     pub status: String,
+    /// What the references of the K1 / K3 deviation parameters are for the open specimen (one line each).
+    pub dev_note: String,
 }
 
 /// Which of the "log x" and "log y" ticks next to a plot make sense for its settings: an axis gets one only when its
@@ -179,9 +182,9 @@ fn class_color(class: u8, dark: bool) -> Option<Color32> {
 const PARAM_GROUPS: [(&str, &[usize]); 7] = [
     ("Magnitude", &[0, 24, 34]),
     ("Shape", &[1, 2, 3, 4, 5, 6, 7, 8, 25, 26, 27]),
-    ("K1 (max)", &[9, 12, 13, 28, 31]),
+    ("K1 (max)", &[9, 12, 13, 28, 31, 35]),
     ("K2 (int)", &[10, 14, 15, 29]),
-    ("K3 (min)", &[11, 16, 17, 30, 32, 33]),
+    ("K3 (min)", &[11, 16, 17, 30, 32, 33, 36]),
     ("F-tests", &[18, 19, 20]),
     ("Confidence", &[21, 22, 23]),
 ];
@@ -223,6 +226,8 @@ fn param_info(i: usize) -> &'static str {
         31 => "Lin_Plunge*: plunge of the magnetic lineation (the K1 axis) in deg. Lab sheet quantity.",
         32 => "Fol_Dip*: dip of the magnetic foliation (the plane perpendicular to K3) in deg. Lab sheet quantity.",
         33 => "Fol_DipDir*: dip direction of the magnetic foliation in deg. Lab sheet quantity.",
+        35 => "K1_dev*: how far this cube's K1 direction lies from the K1 of the background, as the axial angle in degrees (0 = parallel, 90 = perpendicular; a K1 at 90/0 and one at 270/0 are the same axis). The reference is the axial mean of the K1 of the cubes of this specimen that lie outside its alteration intervals (kept with the specimen; import them with --intervals-from) and whose K1 passes the F and F12 tests; with fewer than 3 such cubes, or without intervals, all cubes with a resolved K1 make the reference. The colour scale is fixed to 0-90 degrees unless a range is set. It is the fill of the K1 deviation row of the AMS dashboard, in the coordinate system and phase shown.",
+        36 => "K3_dev*: the same as K1_dev* for the K3 direction (the pole of the foliation): the axial angle in degrees to the mean K3 of the background cubes, whose K3 passes the F and F23 tests. The fill of the K3 deviation row of the AMS dashboard.",
         34 => "K_prime* (K'): deviatoric susceptibility (Jelinek 1984), sqrt(((K1 - Km)^2 + (K2 - Km)^2 + (K3 - Km)^2) / 3) in SI, on the volume-corrected values. How far the susceptibility ellipsoid departs from a sphere of diameter Km: it leaves out the isotropic part, so it can be compared with the K' of a pure mineral. When it is on a plot axis, dotted lines mark the minerals that lie within the data and the two just below it (feldspar, olivine, muscovite, hornblende, chlorite, biotite, pyroxene; single-crystal values, not scaled by how much of the mineral the rock holds).",
         _ => "",
     }
@@ -319,7 +324,7 @@ fn color_param_combo(ui: &mut Ui, id: &str, c: &mut ColorCfg, dark: bool, hy: &H
             ui.separator();
             ui.label(RichText::new("* belongs to the M3ORE lab sheet (not in Anisoft). Corrected for the sample volume where it applies: Edit > Volume Correction.").small().weak());
         });
-        info_icon(ui, &if hyper { format!("{}: {HY_INFO}", c.hy_label) } else { param_info(c.param.min(N_PARAMS - 1)).to_string() });
+        info_icon(ui, &if hyper { format!("{}: {HY_INFO}", c.hy_label) } else if ams_core::params::is_deviation(c.param) && !hy.dev_note.is_empty() { format!("{}\n\nOpen specimen, {}", param_info(c.param), hy.dev_note) } else { param_info(c.param.min(N_PARAMS - 1)).to_string() });
     });
     changed
 }
@@ -534,6 +539,11 @@ pub(super) struct OwensUndo {
 pub struct App {
     doc: Option<Doc>,
     derived: Vec<Derived>,
+    /// Deviation of K1 and K3 from the background mean per record (see deviation.rs), the intervals it used, which file they
+    /// belong to, and how the references came about.
+    dev: Vec<[f64; 2]>,
+    alt: Option<(PathBuf, Option<ams_core::alteration::AltIntervals>)>,
+    dev_kind: [ams_core::alteration::RefKind; 2],
     dirty: bool,
     out_phase: bool,
     coord: CoordSys,
@@ -892,6 +902,9 @@ impl App {
         let mut app = App {
             doc: None,
             derived: vec![],
+            dev: vec![],
+            alt: None,
+            dev_kind: [ams_core::alteration::RefKind::None; 2],
             dirty: true,
             out_phase: false,
             coord: CoordSys::Specimen,
@@ -1564,6 +1577,17 @@ impl App {
     fn refresh(&mut self) {
         if self.dirty {
             self.derived = self.doc.as_ref().map(|d| d.derive(self.out_phase, self.coord, &self.orient)).unwrap_or_default();
+            // the alteration intervals of the specimen are read again when the file changes
+            if let Some(d) = &self.doc {
+                if self.alt.as_ref().map(|a| &a.0) != Some(&d.path) {
+                    self.alt = Some((d.path.clone(), if d.synthetic { None } else { ams_core::alteration::read_alteration(&d.path) }));
+                }
+                let (dev, kind) = deviation::compute(d, &self.derived, self.out_phase, self.alt.as_ref().and_then(|a| a.1.as_ref()));
+                self.dev = dev;
+                self.dev_kind = kind;
+            } else {
+                self.dev.clear();
+            }
             self.dirty = false;
         }
     }
@@ -1613,7 +1637,11 @@ impl App {
                 let d = &self.derived[i];
                 let ph = if self.out_phase { &doc.specs[i].outphase } else { &doc.specs[i].inphase };
                 let vol = if doc.specs[i].volume_cm3 > 0.0 { doc.specs[i].volume_cm3 } else { ams_core::params::REF_VOLUME };
-                let vals = param_values_vol(d.km, &d.axes, ph, vol);
+                let mut vals = param_values_vol(d.km, &d.axes, ph, vol);
+                if let Some(v) = self.dev.get(i) {
+                    vals[ams_core::params::K1_DEV] = v[0];
+                    vals[ams_core::params::K3_DEV] = v[1];
+                }
                 Pt {
                     idx: i,
                     name: doc.specs[i].name.clone(),

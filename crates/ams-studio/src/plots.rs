@@ -84,7 +84,7 @@ pub(crate) fn paint_band(ui: &Ui, clip: Rect, r: Rect, th: &Theme) {
 /// plunge, foliation dip and dip direction), which are angles and can be 0 or negative, nor for the shape parameters T
 /// and U, which run from -1 to 1.
 pub fn log_makes_sense(param: usize) -> bool {
-    !matches!(param, 5 | 6 | 12..=17 | 31..=33)
+    !matches!(param, 5 | 6 | 12..=17 | 31..=33 | 35 | 36)
 }
 
 /// One plot axis: which parameter, optional fixed range, linear or log10.
@@ -161,6 +161,10 @@ impl ColorCfg {
             if a.is_finite() && b.is_finite() && b > a {
                 return (a, b);
             }
+        }
+        // an angle to the background mean has a natural scale (the dashboard's 0-90 degrees)
+        if !self.hyper_on() && ams_core::params::is_deviation(self.param) {
+            return (0.0, 90.0);
         }
         let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
         for v in vals.map(f).filter(|v| v.is_finite()) {
@@ -851,6 +855,8 @@ fn axis_label(cfg: &AxisCfg, exp: i32) -> String {
         format!("{name} [E{exp:+03} SI]")
     } else if is_si(cfg.param) {
         format!("{name} [SI]")
+    } else if ams_core::params::is_deviation(cfg.param) {
+        format!("{} [deg]", cfg.label())
     } else {
         format!("{}{}", cfg.label(), if cfg.log { " (log)" } else { "" })
     }

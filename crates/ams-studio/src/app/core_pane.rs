@@ -411,7 +411,9 @@ impl App {
     pub(super) fn hy_ui(&self) -> super::HyUi {
         let rows = self.cv.hy.as_ref().map(|h| h.rows.iter().map(|r| (r.key.clone(), r.label.clone(), r.short.clone())).collect()).unwrap_or_default();
         let status = if self.cv.hy_rx.is_some() { "reading the hyperspectral parameters ...".to_string() } else { self.cv.hy_err.clone() };
-        super::HyUi { rows, status }
+        let has_iv = self.alt.as_ref().map_or(false, |a| a.1.is_some());
+        let dev_note = if self.doc.is_some() { format!("K1 {}; K3 {}.", super::deviation::describe(self.dev_kind[0], has_iv), super::deviation::describe(self.dev_kind[1], has_iv)) } else { String::new() };
+        super::HyUi { rows, status, dev_note }
     }
 
     /// The value of the hyperspectral parameter chosen in `cfg` for every record of the open file (by the record's index),

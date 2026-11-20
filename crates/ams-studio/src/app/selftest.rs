@@ -719,6 +719,47 @@ pub fn run(out: &Path) -> usize {
         h.check("a specimen without a cube size keeps the 10 cm3 reference", !vols.is_empty() && vols.iter().all(|v| (v - 10.0).abs() < 1e-6) && h.app.vol.cube.is_none(), format!("{vols:?}"));
         let _ = ams_core::depjson::write_cube_size(&f1, None);
     }
+    // ---- the K1 / K3 deviation from the background mean: a value for every record, a fixed 0-90 degree colour scale
+    {
+        let f1 = root.join("own").join("ZZ01_AMS").join("ZZ01_use.ams");
+        let g1 = f1.clone();
+        h.step("open a specimen without alteration intervals", move |a, _| a.open_path(g1));
+        let n = h.app.doc.as_ref().map_or(0, |d| d.specs.len());
+        let pts = h.app.points();
+        let k1: Vec<f64> = pts.iter().map(|p| p.vals[ams_core::params::K1_DEV]).collect();
+        let k3: Vec<f64> = pts.iter().map(|p| p.vals[ams_core::params::K3_DEV]).collect();
+        h.check("every record has a K1 and a K3 deviation between 0 and 90 degrees", n > 0 && k1.len() == n && k1.iter().chain(k3.iter()).all(|v| v.is_nan() || (0.0..=90.0).contains(v)) && k1.iter().any(|v| v.is_finite()), format!("{k1:?} {k3:?}"));
+        h.check("without intervals the reference is every cube with a resolved axis", matches!(h.app.dev_kind[0], ams_core::alteration::RefKind::AllCubes(_)), format!("{:?}", h.app.dev_kind));
+        h.check("the colour scale of a deviation is fixed to 0-90 degrees", {
+            let mut c = ColorCfg::default();
+            c.on = true;
+            c.param = ams_core::params::K1_DEV;
+            c.range(k1.iter().copied()) == (0.0, 90.0)
+        }, "range".to_string());
+        h.check("a deviation has no log tick", !plots::log_makes_sense(ams_core::params::K1_DEV) && !plots::log_makes_sense(ams_core::params::K3_DEV), "log".to_string());
+        h.step("colour a pane by the K1 deviation", |a, _| {
+            a.color[1] = ColorCfg { on: true, param: ams_core::params::K1_DEV, ..ColorCfg::default() };
+            a.color_own[1] = true;
+        });
+        h.frames(2, big);
+        let iv = ams_core::alteration::AltIntervals { intervals: vec![ams_core::alteration::AltInterval { kind: "halo".into(), cubes: [('A', (0, 1))].into_iter().collect(), ..Default::default() }] };
+        let w = ams_core::alteration::write_alteration(&f1, Some(&iv), "self-test");
+        h.check("alteration intervals are written to the dependency file", w.is_ok() && ams_core::alteration::read_alteration(&f1) == Some(iv), format!("{w:?}"));
+        let g2 = f1.clone();
+        h.step("open the specimen again with intervals", move |a, _| {
+            a.alt = None;
+            a.dirty = true;
+            a.open_path(g2)
+        });
+        h.check("the intervals are read when the file is opened", h.app.alt.as_ref().map_or(false, |x| x.1.is_some()), "alt".to_string());
+        let _ = ams_core::alteration::write_alteration(&f1, None, "");
+        h.step("reset the colour of the pane", |a, _| {
+            a.color[1] = ColorCfg::default();
+            a.color_own[1] = false;
+            a.alt = None;
+        });
+        h.frames(2, big);
+    }
     h.step("a .ran opened directly joins its partner", |a, _| a.open_path(root.join("ran").join("JE001").join("JE001.ran")));
     h.check("the .ran file opened with both phases", h.app.doc.as_ref().map_or(false, |d| d.specs.len() == 6 && d.specs.iter().all(|s| s.outphase.km < 0.0)), format!("{:?}", h.app.doc.as_ref().map(|d| d.note.clone())));
     h.step("an out-of-phase .ran opened by itself opens the pair", |a, _| a.open_path(root.join("ran").join("JE002").join("JE002_Im.ran")));
