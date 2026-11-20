@@ -629,6 +629,23 @@ pub fn run(out: &Path) -> usize {
         Err(e) => h.check("many: save", false, e),
     }
     h.check("many: refuses a data folder as output", phase_join_ui::save_pairs(&rows, &rows[0].dir).is_err(), "it wrote into the data folder".to_string());
+    // ---- the cube size kept with a specimen goes into its records when a file of it is opened
+    {
+        let f1 = root.join("own").join("ZZ01_AMS").join("ZZ01_use.ams");
+        let f2 = root.join("own").join("ZZ02_AMS").join("ZZ02_use.ams");
+        let cs = ams_core::depjson::CubeSize { side_mm: 15.0, comments: vec![("D".into(), "often shorter in one dimension".into())] };
+        let w = ams_core::depjson::write_cube_size(&f1, Some(&cs));
+        h.check("the cube size of a specimen is written to its dependency file", w.is_ok(), format!("{w:?}"));
+        let g1 = f1.clone();
+        h.step("open a specimen that has a cube size", move |a, _| a.open_path(g1));
+        let vols: Vec<f64> = h.app.doc.as_ref().map(|d| d.specs.iter().map(|s| s.volume_cm3).collect()).unwrap_or_default();
+        h.check("its records have the volume of a 15 mm cube, and the file is not marked as edited", !vols.is_empty() && vols.iter().all(|v| (v - 3.375).abs() < 1e-4) && h.app.doc.as_ref().map_or(false, |d| !d.modified), format!("{vols:?}"));
+        h.check("the comment is kept for the window", h.app.vol.notes.len() == 1 && h.app.volume_summary().contains("15 mm"), h.app.volume_summary());
+        h.step("open a specimen without one", move |a, _| a.open_path(f2));
+        let vols: Vec<f64> = h.app.doc.as_ref().map(|d| d.specs.iter().map(|s| s.volume_cm3).collect()).unwrap_or_default();
+        h.check("a specimen without a cube size keeps the 10 cm3 reference", !vols.is_empty() && vols.iter().all(|v| (v - 10.0).abs() < 1e-6) && h.app.vol.cube.is_none(), format!("{vols:?}"));
+        let _ = ams_core::depjson::write_cube_size(&f1, None);
+    }
     h.step("a .ran opened directly joins its partner", |a, _| a.open_path(root.join("ran").join("JE001").join("JE001.ran")));
     h.check("the .ran file opened with both phases", h.app.doc.as_ref().map_or(false, |d| d.specs.len() == 6 && d.specs.iter().all(|s| s.outphase.km < 0.0)), format!("{:?}", h.app.doc.as_ref().map(|d| d.note.clone())));
     h.step("an out-of-phase .ran opened by itself opens the pair", |a, _| a.open_path(root.join("ran").join("JE002").join("JE002_Im.ran")));

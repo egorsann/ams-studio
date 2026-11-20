@@ -24,6 +24,9 @@
 //!   which still works when the whole data tree is synced to another machine);
 //! * `location`: where the specimen was taken (x, y and the coordinate system as typed or read from a datasheet, and the
 //!   longitude / latitude computed from them), used by the GIS viewer;
+//! * `cube_size`: the side of the cubes this specimen was cut in (mm), with comments on cubes that differ from it
+//!   (for example the D cubes, which are often shorter in one dimension but are still corrected as full cubes); the
+//!   volume correction takes the volume from it when a file of the specimen is opened;
 //! * `stereonet`: planes drawn as great circles in the geographic stereonet, `planes_specimen` (only for this specimen)
 //!   and `planes_global` (shown for every specimen; a copy is kept in the file of each specimen of the file tree).
 
@@ -32,9 +35,9 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 /// What the file says about itself (the `note` key).
-const NOTE: &str = "AMS Studio dependency file of this _geo folder; keep it with the _geo files. files: the drill core reorientation (dip direction and plunge of the hole, the offset of the orientation line from the arrow mark, the face that holds the arrow and its direction) of every record of the .ams files here, which stay exact copies of their sources; the geographic view is computed from it. core_viewer: the folder with the cube photos of this specimen (photo_folder is absolute, photo_folder_relative_to_this_file still works when the data tree is synced elsewhere). stereonet: planes drawn as great circles in the geographic stereonet (dip direction and dip in degrees, a comment, a colour): planes_specimen are for this specimen only, planes_global are shown for every specimen and copied into the file of each specimen of the file tree. location: where this specimen was taken (x, y and crs as typed or taken from a datasheet, lon and lat computed from them), used by the GIS viewer. view: the coordinate system (specimen, geographic, paleo, tectonic) this specimen was last shown in, restored when its file is opened. specimens: when this folder holds the files of several specimens (told apart by the specimen ID in the file names), location and view are kept per specimen ID in here ({ID: {location, view}}) instead of at the top level, so that each specimen has its own.";
+const NOTE: &str = "AMS Studio dependency file of this _geo folder; keep it with the _geo files. files: the drill core reorientation (dip direction and plunge of the hole, the offset of the orientation line from the arrow mark, the face that holds the arrow and its direction) of every record of the .ams files here, which stay exact copies of their sources; the geographic view is computed from it. core_viewer: the folder with the cube photos of this specimen (photo_folder is absolute, photo_folder_relative_to_this_file still works when the data tree is synced elsewhere). stereonet: planes drawn as great circles in the geographic stereonet (dip direction and dip in degrees, a comment, a colour): planes_specimen are for this specimen only, planes_global are shown for every specimen and copied into the file of each specimen of the file tree. cube_size: the side (mm) of the cubes this specimen was cut in and the volume it gives (cm3), with comments on cubes that differ (not corrected, only noted); the volume correction uses it when a file of this specimen is opened. location: where this specimen was taken (x, y and crs as typed or taken from a datasheet, lon and lat computed from them), used by the GIS viewer. view: the coordinate system (specimen, geographic, paleo, tectonic) this specimen was last shown in, restored when its file is opened. specimens: when this folder holds the files of several specimens (told apart by the specimen ID in the file names), location and view are kept per specimen ID in here ({ID: {location, view}}) instead of at the top level, so that each specimen has its own.";
 /// The sections other than `files`.
-const SECTIONS: [&str; 5] = ["core_viewer", "stereonet", "location", "view", "specimens"];
+const SECTIONS: [&str; 6] = ["core_viewer", "stereonet", "location", "view", "specimens", "cube_size"];
 
 /// `<specimen folder>_geo/<specimen folder>_geo_dependancy.json` for any file of a specimen: the source file in the
 /// specimen folder, or its copy in the `_geo` folder.
@@ -183,6 +186,41 @@ pub fn write_section_for(file: &Path, key: &str, val: Option<Value>) -> std::io:
     write_section(&json, "specimens", if empty { None } else { Some(all) })
 }
 
+/// The cubes of a specimen: the side they were cut with, and comments on the ones that differ (cube letter, text).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CubeSize {
+    pub side_mm: f64,
+    pub comments: Vec<(String, String)>,
+}
+
+impl CubeSize {
+    /// Volume of a full cube in cm3.
+    pub fn volume_cm3(&self) -> f64 {
+        self.side_mm.powi(3) / 1000.0
+    }
+}
+
+/// The cube size kept for the specimen of `file` (a source file or its `_geo` copy), if one was stored.
+pub fn read_cube_size(file: &Path) -> Option<CubeSize> {
+    let v = read_section_for(file, "cube_size")?;
+    let side_mm = v.get("side_mm")?.as_f64().filter(|s| s.is_finite() && *s > 0.0)?;
+    let comments = v
+        .get("comments")
+        .and_then(|c| c.as_object())
+        .map(|o| o.iter().filter_map(|(k, t)| Some((k.clone(), t.as_str()?.to_string()))).collect())
+        .unwrap_or_default();
+    Some(CubeSize { side_mm, comments })
+}
+
+/// Stores (or, with `None`, removes) the cube size of the specimen of `file`; the other sections stay.
+pub fn write_cube_size(file: &Path, cs: Option<&CubeSize>) -> std::io::Result<()> {
+    let val = cs.map(|c| {
+        let comments: serde_json::Map<String, Value> = c.comments.iter().filter(|(_, t)| !t.trim().is_empty()).map(|(k, t)| (k.clone(), json!(t.trim()))).collect();
+        json!({ "side_mm": c.side_mm, "volume_cm3": (c.volume_cm3() * 1e6).round() / 1e6, "shape": "cubic", "comments": comments })
+    });
+    write_section_for(file, "cube_size", val)
+}
+
 /// The coordinate system this file was last shown in (per specimen where a folder holds several).
 pub fn read_view_for(file: &Path) -> Option<crate::coords::CoordSys> {
     read_section_for(file, "view")?.get("coordinates")?.as_str().and_then(crate::coords::CoordSys::from_token)
@@ -299,6 +337,29 @@ mod tests {
         assert_eq!(read_hole(&jp), Some((316.135, 67.0)));
         // the location section written first stays
         assert!(read_section(&jp, "location").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_cube_size_of_a_specimen_is_kept_with_its_comments_and_found_from_the_source_and_the_geo_copy() {
+        let dir = std::env::temp_dir().join(format!("depjson-cube-{}", std::process::id()));
+        let src = dir.join("ZZ01_AMS").join("ZZ01_use.ams");
+        let geo = dir.join("ZZ01_AMS").join("ZZ01_AMS_geo").join("ZZ01_use_geo.ams");
+        assert_eq!(read_cube_size(&src), None);
+        let cs = CubeSize { side_mm: 15.0, comments: vec![("D".into(), "often shorter in one dimension".into())] };
+        write_cube_size(&src, Some(&cs)).unwrap();
+        assert_eq!(read_cube_size(&src), Some(cs.clone()));
+        assert_eq!(read_cube_size(&geo), Some(cs.clone()));
+        assert!((cs.volume_cm3() - 3.375).abs() < 1e-12 && (CubeSize { side_mm: 20.0, comments: vec![] }.volume_cm3() - 8.0).abs() < 1e-12);
+        // it sits beside the other sections
+        write_section(&for_source(&src), "location", Some(serde_json::json!({"x": 1.0}))).unwrap();
+        write_cube_size(&src, Some(&CubeSize { side_mm: 20.0, comments: vec![] })).unwrap();
+        assert!(read_section(&for_source(&src), "location").is_some());
+        assert_eq!(read_cube_size(&src).map(|c| c.side_mm), Some(20.0));
+        // removing it leaves the rest
+        write_cube_size(&src, None).unwrap();
+        assert_eq!(read_cube_size(&src), None);
+        assert!(read_section(&for_source(&src), "location").is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

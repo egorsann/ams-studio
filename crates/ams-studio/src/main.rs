@@ -30,6 +30,56 @@ fn main() -> eframe::Result {
             std::process::exit(if r.is_ok() { 0 } else { 1 });
         }
     }
+    // `--cube-size <side mm> [--comment D=text]... <.ams file or specimen folder>...`: keeps the cube size (and comments on cubes that
+    // differ) with each specimen, in its dependency file; `--cube-size off <...>` removes it. The .ams files are not touched.
+    {
+        let a: Vec<String> = std::env::args().collect();
+        if let Some(i) = a.iter().position(|x| x == "--cube-size") {
+            let side = a.get(i + 1).map(|s| s.as_str()).unwrap_or("");
+            let mut comments = vec![];
+            let mut files: Vec<std::path::PathBuf> = vec![];
+            let mut k = i + 2;
+            while k < a.len() {
+                if a[k] == "--comment" {
+                    if let Some((l, t)) = a.get(k + 1).and_then(|c| c.split_once('=')) {
+                        comments.push((l.trim().to_uppercase(), t.trim().to_string()));
+                    }
+                    k += 2;
+                    continue;
+                }
+                let p = std::path::PathBuf::from(&a[k]);
+                // a folder stands for its first .ams file
+                let f = if p.is_dir() {
+                    let mut v: Vec<_> = std::fs::read_dir(&p).map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|e| e.extension().map_or(false, |x| x.eq_ignore_ascii_case("ams"))).collect()).unwrap_or_default();
+                    v.sort();
+                    v.into_iter().next()
+                } else {
+                    Some(p)
+                };
+                match f {
+                    Some(f) => files.push(f),
+                    None => eprintln!("no .ams file in {}", a[k]),
+                }
+                k += 1;
+            }
+            let cs = side.parse::<f64>().ok().filter(|s| *s > 0.0).map(|side_mm| ams_core::depjson::CubeSize { side_mm, comments });
+            if cs.is_none() && side != "off" {
+                eprintln!("usage: ams-studio --cube-size <side in mm | off> [--comment D=text] <.ams file or folder>...");
+                std::process::exit(2);
+            }
+            let mut bad = 0;
+            for f in &files {
+                match ams_core::depjson::write_cube_size(f, cs.as_ref()) {
+                    Ok(()) => println!("{}: {}", ams_core::depjson::for_source(f).display(), cs.as_ref().map_or("cube size removed".to_string(), |c| format!("{} mm cubes, {} cm3", c.side_mm, (c.volume_cm3() * 1e4).round() / 1e4))),
+                    Err(e) => {
+                        bad += 1;
+                        eprintln!("{}: {e}", f.display());
+                    }
+                }
+            }
+            std::process::exit(if bad == 0 && !files.is_empty() { 0 } else { 1 });
+        }
+    }
     // `--demo-tree <folder>`: writes made-up specimen folders (own folders, one folder with 7-digit IDs, .ran pairs, split phases)
     {
         let a: Vec<String> = std::env::args().collect();
