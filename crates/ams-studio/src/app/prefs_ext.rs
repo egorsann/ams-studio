@@ -16,12 +16,14 @@ pub fn from_bits(t: &str, n: usize) -> Option<Vec<bool>> {
 }
 
 pub fn color_to_line(c: &ColorCfg) -> String {
-    format!("{}|{}|{}|{}|{}|{}|{}|{}", c.on as u8, c.param, c.auto as u8, c.min, c.max, c.log as u8, c.palette, c.by_class as u8)
+    let clean = |s: &str| s.replace(['|', '\n', '\r'], " ");
+    format!("{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}", c.on as u8, c.param, c.auto as u8, c.min, c.max, c.log as u8, c.palette, c.by_class as u8, c.hy as u8, clean(&c.hy_key), clean(&c.hy_label))
 }
 
 pub fn color_from_line(t: &str) -> Option<ColorCfg> {
     let p: Vec<&str> = t.split('|').collect();
-    if p.len() != 8 {
+    // 8 fields: written before the hyperspectral values existed
+    if p.len() != 8 && p.len() != 11 {
         return None;
     }
     let flag = |s: &str| s == "1";
@@ -34,6 +36,9 @@ pub fn color_from_line(t: &str) -> Option<ColorCfg> {
         log: flag(p[5]),
         palette: p[6].parse().ok().filter(|v| *v <= 2)?,
         by_class: flag(p[7]),
+        hy: p.get(8).map_or(false, |s| flag(s)),
+        hy_key: p.get(9).map(|s| s.to_string()).unwrap_or_default(),
+        hy_label: p.get(10).map(|s| s.to_string()).unwrap_or_default(),
     })
 }
 
@@ -117,9 +122,17 @@ mod tests {
 
     #[test]
     fn the_colour_coding_of_a_pane_round_trips() {
-        let c = ColorCfg { on: true, param: 5, auto: false, min: -0.25, max: 1.5e-3, log: true, palette: 2, by_class: true };
+        let c = ColorCfg { on: true, param: 5, auto: false, min: -0.25, max: 1.5e-3, log: true, palette: 2, by_class: true, hy: true, hy_key: "cube_d2200".into(), hy_label: "White mica D2200".into() };
         let back = color_from_line(&color_to_line(&c)).unwrap();
         assert_eq!((back.on, back.param, back.auto, back.min, back.max, back.log, back.palette, back.by_class), (true, 5, false, -0.25, 1.5e-3, true, 2, true));
+        // the hyperspectral choice comes back too (the colour bar needs its label without reading the table)
+        assert!(back.hy && back.hy_key == "cube_d2200" && back.hy_label == "White mica D2200" && !back.hyper_on(), "not while it is colouring by class");
+        let h = ColorCfg { on: true, by_class: false, ..c.clone() };
+        let back = color_from_line(&color_to_line(&h)).unwrap();
+        assert!(back.hyper_on() && back.label() == "White mica D2200");
+        // a line from before the hyperspectral values (8 fields) reads with them off
+        let old = color_from_line("1|5|0|-0.25|0.0015|1|2|0").unwrap();
+        assert!(!old.hy && old.hy_key.is_empty() && !old.hyper_on() && old.label() == ams_core::params::PARAM_LABELS[5]);
         assert!(color_from_line("1|2|3").is_none());
         assert!(color_from_line("1|999|1|0|1|0|0|0").is_none());
         assert!(color_from_line("1|1|1|NaN|1|0|0|0").is_none());

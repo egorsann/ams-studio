@@ -112,15 +112,30 @@ pub struct ColorCfg {
     pub palette: u8,
     /// Colour by the data classes of the file instead of a parameter.
     pub by_class: bool,
+    /// The parameter list also holds the hyperspectral parameters of the AMS dashboard code (a tick), and the one chosen
+    /// (its key and its label, empty = a parameter of the list above is used).
+    pub hy: bool,
+    pub hy_key: String,
+    pub hy_label: String,
 }
 
 impl Default for ColorCfg {
     fn default() -> Self {
-        ColorCfg { on: false, param: 0, auto: true, min: 0.0, max: 1.0, log: false, palette: 0, by_class: false }
+        ColorCfg { on: false, param: 0, auto: true, min: 0.0, max: 1.0, log: false, palette: 0, by_class: false, hy: false, hy_key: String::new(), hy_label: String::new() }
     }
 }
 
 impl ColorCfg {
+    /// The colour comes from a hyperspectral parameter.
+    pub fn hyper_on(&self) -> bool {
+        self.on && !self.by_class && self.hy && !self.hy_key.is_empty()
+    }
+
+    /// What the colour bar calls the quantity.
+    pub fn label(&self) -> String {
+        if self.hyper_on() && !self.hy_label.is_empty() { self.hy_label.clone() } else { PARAM_LABELS[self.param.min(N_PARAMS - 1)].to_string() }
+    }
+
     /// (low, high) of the colour scale for the given values (log10 applied when `log`).
     pub fn range(&self, vals: impl Iterator<Item = f64>) -> (f64, f64) {
         let f = |v: f64| if self.log { if v > 0.0 { v.log10() } else { f64::NAN } } else { v };
@@ -174,7 +189,7 @@ pub fn color_bar(ui: &Ui, rect: Rect, cfg: &ColorCfg, range: (f64, f64), th: &Th
     };
     pa.text(Pos2::new(bar.min.x - 5.0, bar.center().y), Align2::RIGHT_CENTER, txt(range.0), f.clone(), th.ink());
     pa.text(Pos2::new(bar.max.x + 5.0, bar.center().y), Align2::LEFT_CENTER, txt(range.1), f.clone(), th.ink());
-    let name = format!("{}{}", PARAM_LABELS[cfg.param.min(N_PARAMS - 1)], if cfg.log { " (log)" } else { "" });
+    let name = format!("{}{}", cfg.label(), if cfg.log { " (log)" } else { "" });
     pa.text(Pos2::new(bar.center().x, bar.max.y + 2.0), Align2::CENTER_TOP, name, f, th.faint());
 }
 
@@ -994,6 +1009,78 @@ fn draw_fit(pa: &egui::Painter, f: &Frame2D, th: &Theme, fit: Option<&ams_core::
     pa.galley(r.min + Vec2::new(5.0, 3.0), g, th.ink());
 }
 
+/// Colours of the two clusters, from the lower X up.
+const CLUSTER_COL: [Color32; 2] = [Color32::from_rgb(43, 108, 176), Color32::from_rgb(221, 138, 29)];
+
+/// The mixtures of one and two clusters of the pairs shown (the one-cluster fit is for the AIC / BIC comparison).
+#[derive(Clone)]
+struct GmmPair {
+    two: ams_core::gmm::Gmm,
+    one: Option<ams_core::gmm::Gmm>,
+}
+
+/// The mixture, kept between frames (the fit takes about 60 ms) and redone only when the values change.
+fn cached_gmm(ui: &Ui, salt: &str, xv: &[f64], yv: &[f64]) -> Option<GmmPair> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    xv.len().hash(&mut h);
+    for v in xv.iter().chain(yv) {
+        v.to_bits().hash(&mut h);
+    }
+    let sig = h.finish();
+    let id = ui.scope_id().with(("gmm2", salt));
+    if let Some((s, g)) = ui.data(|d| d.get_temp::<(u64, Option<GmmPair>)>(id)) {
+        if s == sig {
+            return g;
+        }
+    }
+    let g = ams_core::gmm::fit_log_log(xv, yv, 2).map(|two| GmmPair { two, one: ams_core::gmm::fit_log_log(xv, yv, 1) });
+    ui.data_mut(|d| d.insert_temp(id, (sig, g.clone())));
+    g
+}
+
+/// The 1 and 2 sigma ellipses of the clusters, their centres, and a note with the weights, centres, AIC and BIC.
+fn draw_gmm(pa: &egui::Painter, f: &Frame2D, th: &Theme, g: Option<&GmmPair>, spec: &ScatterSpec, scales: (f64, f64)) {
+    let (xsc, ysc) = scales;
+    let Some(g) = g else {
+        let t = pa.layout_no_wrap("mixture: needs 20 points with both values above 0".to_string(), FontId::proportional(11.0), th.faint());
+        pa.galley(Pos2::new(f.plot.min.x + 6.0, f.plot.max.y - t.size().y - 4.0), t, th.faint());
+        return;
+    };
+    let tx = |lx: f64| if spec.x.log { lx } else { 10f64.powf(lx) * xsc };
+    let ty = |ly: f64| if spec.y.log { ly } else { 10f64.powf(ly) * ysc };
+    let clip = pa.with_clip_rect(f.plot);
+    let m = &g.two;
+    for j in 0..m.k() {
+        let col = CLUSTER_COL[j.min(1)];
+        for (ns, dashed) in [(1.0, false), (2.0, true)] {
+            let line: Vec<Pos2> = m.ellipse(j, ns, 90).iter().map(|p| f.to_screen(tx(p[0]), ty(p[1]))).collect();
+            if dashed {
+                clip.extend(Shape::dashed_line(&line, Stroke::new(1.4, col), 6.0, 4.0));
+            } else {
+                clip.add(Shape::line(line, egui::epaint::PathStroke::new(1.6, col)));
+            }
+        }
+        let c = f.to_screen(tx(m.means[j][0]), ty(m.means[j][1]));
+        let s = Stroke::new(2.2, th.ink());
+        clip.line_segment([c + Vec2::new(-5.0, -5.0), c + Vec2::new(5.0, 5.0)], s);
+        clip.line_segment([c + Vec2::new(-5.0, 5.0), c + Vec2::new(5.0, -5.0)], s);
+    }
+    let (xn, yn) = (spec.x.label(), spec.y.label());
+    let mut text = String::from("Gaussian mixture, 2 clusters (log-log):");
+    for j in 0..m.k() {
+        text += &format!("\n{}: {:.0} %   {xn} {:.1e}   {yn} {:.1e}", j + 1, m.weights[j] * 100.0, 10f64.powf(m.means[j][0]), 10f64.powf(m.means[j][1]));
+    }
+    text += &format!("\nAIC {:.0}   BIC {:.0}", m.aic(), m.bic());
+    if let Some(o) = &g.one {
+        text += &format!("   (1 cluster: AIC {:.0}, BIC {:.0})", o.aic(), o.bic());
+    }
+    let t = pa.layout_no_wrap(text, FontId::proportional(11.0), th.ink());
+    let r = Rect::from_min_size(Pos2::new(f.plot.min.x + 8.0, f.plot.max.y - t.size().y - 12.0), t.size() + Vec2::new(10.0, 6.0));
+    pa.rect(r, 3.0, th.canvas().gamma_multiply(0.92), Stroke::new(1.0, th.line()), egui::StrokeKind::Inside);
+    pa.galley(r.min + Vec2::new(5.0, 3.0), t, th.ink());
+}
+
 pub struct ScatterSpec<'a> {
     pub x: &'a AxisCfg,
     pub y: &'a AxisCfg,
@@ -1005,6 +1092,8 @@ pub struct ScatterSpec<'a> {
     pub sort_x: bool,
     /// Draw the bent power law fitted to the points (log-log, whatever the axes are).
     pub fit: bool,
+    /// Draw a Gaussian mixture of two clusters fitted to the points (log-log) and colour the points by cluster.
+    pub gmm: bool,
     pub salt: &'a str,
 }
 
@@ -1044,6 +1133,18 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
         let fit = cached_fit(ui, spec.salt, &xv, &yv);
         draw_fit(&pa, &f, th, fit.as_ref(), spec, &xv, (xsc, ysc));
     }
+    // the mixture's cluster of every point on the plot (by the point's index), when it is on
+    let mut cluster: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    if spec.gmm {
+        let (xv, yv): (Vec<f64>, Vec<f64>) = xs.iter().map(|(i, _, _)| (pts[*i].vals[spec.x.param], pts[*i].vals[spec.y.param])).unzip();
+        let g = cached_gmm(ui, spec.salt, &xv, &yv);
+        if let Some(g) = &g {
+            for (&u, &l) in g.two.used.iter().zip(&g.two.labels) {
+                cluster.insert(xs[u].0, l);
+            }
+        }
+        draw_gmm(&pa, &f, th, g.as_ref(), spec, (xsc, ysc));
+    }
     if spec.diagonal {
         // y = x in data units: valid when both axes use the same transformation
         let (a, b) = (xr.0.max(yr.0), xr.1.min(yr.1));
@@ -1073,7 +1174,7 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
                 let (a, b) = (f.to_screen(*x, y - sd), f.to_screen(*x, y + sd));
                 clip.line_segment([a, b], Stroke::new(1.0, th.line()));
             }
-            marker(&clip, s, 2, size, pts[*i].color.map(|c| th.soft(c)).unwrap_or(th.accent), th.edge(), pts[*i].selected);
+            marker(&clip, s, 2, size, cluster.get(i).map(|&l| th.soft(CLUSTER_COL[l.min(1)])).or_else(|| pts[*i].color.map(|c| th.soft(c))).unwrap_or(th.accent), th.edge(), pts[*i].selected);
             if let Some(b) = done {
                 if b.contains(s) {
                     inside.push(pts[*i].idx);
@@ -1597,7 +1698,7 @@ mod plane_tests {
         let pts = vec![Pt { idx: 0, name: "A1".into(), di: [(0.0, 0.0); 3], vals, sds: [0.0; 3], selected: false, color: None }];
         let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(400.0, 300.0));
         let mut view = ZoomView::default();
-        let mut run = |events: Vec<egui::Event>, view: &mut ZoomView| {
+        let run = |events: Vec<egui::Event>, view: &mut ZoomView| {
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(500.0, 400.0))), events, ..Default::default() };
             let mut out = ctx.run_ui(input, |ui| {
                 polar(ui, rect, &pts, 4, false, 6.0, &th, "polar-test", view);
@@ -1652,9 +1753,9 @@ mod plane_tests {
             let mut view = ZoomView::default();
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(500.0, 400.0))), ..Default::default() };
             let mut out = ctx.run_ui(input, |ui| {
-                let spec = ScatterSpec { x: &km, y: &k, zero_line: false, diagonal: false, conf: false, connect: false, sort_x: false, fit: false, salt: "kp-s" };
+                let spec = ScatterSpec { x: &km, y: &k, zero_line: false, diagonal: false, conf: false, connect: false, sort_x: false, fit: false, gmm: false, salt: "kp-s" };
                 scatter(ui, rect, &pts, &spec, 6.0, &th, &mut view);
-                let spec = ScatterSpec { x: &k, y: &km, zero_line: false, diagonal: false, conf: false, connect: false, sort_x: false, fit: false, salt: "kp-s2" };
+                let spec = ScatterSpec { x: &k, y: &km, zero_line: false, diagonal: false, conf: false, connect: false, sort_x: false, fit: false, gmm: false, salt: "kp-s2" };
                 scatter(ui, rect, &pts, &spec, 6.0, &th, &mut view);
                 histogram(ui, rect, &pts, 10, &k, &th, "kp-h");
                 binned_plot(ui, rect, &pts, XyKind::Bar, &km, &k, 5, GroupBy::Classes, &th, &mut view, "kp-b");
@@ -1689,7 +1790,7 @@ mod plane_tests {
             for _ in 0..2 {
                 let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 450.0))), ..Default::default() };
                 let mut out = ctx.run_ui(input, |ui| {
-                    let spec = ScatterSpec { x: &x, y: yc, zero_line: false, diagonal: false, conf: false, connect: false, sort_x: false, fit, salt: "fit-s" };
+                    let spec = ScatterSpec { x: &x, y: yc, zero_line: false, diagonal: false, conf: false, connect: false, sort_x: false, fit, gmm: fit, salt: "fit-s" };
                     scatter(ui, rect, &pts, &spec, 6.0, &th, &mut view);
                 });
                 out.textures_delta.clear();

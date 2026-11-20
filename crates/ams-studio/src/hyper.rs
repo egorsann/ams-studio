@@ -590,6 +590,29 @@ impl Hyper {
     }
 }
 
+impl Hyper {
+    /// One number per cube of a specimen for one parameter, for colouring the points of a plot: the median of the shots
+    /// of the bottom face (the face that fills the square on the dashboard's cube), else the median of the faces that
+    /// have a value. Cubes without any value are not in the map.
+    pub fn cube_values(&self, specimen: &str, row: usize) -> HashMap<(u32, char), f64> {
+        let mut out = HashMap::new();
+        for (cube, faces) in self.faces(specimen, row) {
+            let v = match faces[0] {
+                Face::Value(v, _) => v,
+                _ => {
+                    let rest: Vec<f64> = faces[1..].iter().filter_map(|f| if let Face::Value(v, _) = f { Some(*v) } else { None }).collect();
+                    if rest.is_empty() {
+                        continue;
+                    }
+                    quantile(&rest, 0.5)
+                }
+            };
+            out.insert(cube, v);
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,5 +763,22 @@ WATER_RICH_W1400 = 1413.0
             let f = h.faces("ER26PB012", i);
             println!("{:<16} {:<4} {:<30} scale {:.3} .. {:.3} ({}) cubes {}", r.key, if r.in_dashboard { "dash" } else { "" }, r.label, r.vmin, r.vmax, r.unit, f.len());
         }
+    }
+
+    #[test]
+    fn a_cube_takes_the_value_of_its_bottom_face_else_the_median_of_its_other_faces() {
+        let h = load();
+        let row = h.rows.iter().position(|r| r.key == "cube_d2200").unwrap();
+        let v = h.cube_values("ER1", row);
+        // A1: bottom face median of 0.20 and 0.30; B1: bottom 0.40
+        assert!((v[&(1, 'A')] - 0.25).abs() < 1e-9 && (v[&(1, 'B')] - 0.40).abs() < 1e-9);
+        assert!(!v.contains_key(&(7, 'A')));
+        // a cube measured on a side face only gets the median of the sides
+        let csv = "specimen,cube,side,D2200,2200_ok,W2200,W900,900_ok,ISM,ISM_ok,zeolite_flag,1400_ok,W1400\n\
+            ER1,C1,BK,0.10,True,2200.0,880.0,True,2.0,True,False,True,1410.0\n\
+            ER1,C1,L,0.30,True,2200.0,880.0,True,2.0,True,False,True,1410.0\n";
+        let h2 = Hyper::from_parts(SRC, "ISM_MIN_D2200 = 0.05\n", csv, &["cube_d2200".into()]).unwrap();
+        let row = h2.rows.iter().position(|r| r.key == "cube_d2200").unwrap();
+        assert!((h2.cube_values("ER1", row)[&(1, 'C')] - 0.20).abs() < 1e-9);
     }
 }

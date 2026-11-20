@@ -32,6 +32,9 @@ pub(super) struct PaneCfg {
     pub polar_log: bool,
     /// Draw the bent power law fitted to the points of a scatter plot (a hidden option: Curve fit, in the pane's settings).
     pub fit: bool,
+    /// Draw a Gaussian mixture of two clusters fitted to the points of a scatter plot, and colour the points by cluster
+    /// (also in the hidden Curve fit section of the pane's settings).
+    pub gmm: bool,
 }
 
 impl PaneCfg {
@@ -55,6 +58,7 @@ impl PaneCfg {
             polar: false,
             polar_log: false,
             fit: false,
+            gmm: false,
         };
         if k == 2 {
             c.x = AxisCfg::new(p);
@@ -71,15 +75,15 @@ impl PaneCfg {
         let a = |a: &AxisCfg| format!("{}:{}:{}:{}:{}", a.param, a.auto as u8, a.min, a.max, a.log as u8);
         let kind = XyKind::ALL.iter().position(|k| *k == self.kind).unwrap_or(0);
         format!(
-            "{kind}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-            a(&self.hist), a(&self.x), a(&self.y), self.bins, self.sel_only as u8, self.diag as u8, self.conf as u8, self.connect as u8, self.legend as u8, self.zero as u8, (self.group == GroupBy::Sample) as u8, self.polar as u8, self.polar_log as u8, self.fit as u8
+            "{kind}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            a(&self.hist), a(&self.x), a(&self.y), self.bins, self.sel_only as u8, self.diag as u8, self.conf as u8, self.connect as u8, self.legend as u8, self.zero as u8, (self.group == GroupBy::Sample) as u8, self.polar as u8, self.polar_log as u8, self.fit as u8, self.gmm as u8
         )
     }
 
     fn from_line(s: &str) -> Option<PaneCfg> {
         let f: Vec<&str> = s.trim().split('|').collect();
-        // 11 fields: written before the group-by choice existed; 12: before the polar plot; 14: before the curve fit
-        if f.len() != 11 && f.len() != 12 && f.len() != 14 && f.len() != 15 {
+        // 11 fields: written before the group-by choice existed; 12: before the polar plot; 14: before the curve fit; 15: before the mixture
+        if f.len() != 11 && f.len() != 12 && f.len() != 14 && f.len() != 15 && f.len() != 16 {
             return None;
         }
         let axis = |t: &str| -> Option<AxisCfg> {
@@ -111,6 +115,7 @@ impl PaneCfg {
             polar: f.get(12).map_or(false, |t| flag(t)),
             polar_log: f.get(13).map_or(false, |t| flag(t)),
             fit: f.get(14).map_or(false, |t| flag(t)),
+            gmm: f.get(15).map_or(false, |t| flag(t)),
         })
     }
 }
@@ -331,13 +336,18 @@ mod tests {
         c.polar = true;
         c.polar_log = true;
         c.fit = true;
+        c.gmm = true;
         let back = PaneCfg::from_line(&c.to_line()).unwrap();
-        assert!(back == c && back.fit);
+        assert!(back == c && back.fit && back.gmm);
         assert!(PaneCfg::from_line("garbage").is_none());
         // a line written before the curve fit existed (14 fields) reads with it off
         let old: Vec<String> = c.to_line().split('|').take(14).map(|s| s.to_string()).collect();
         let back = PaneCfg::from_line(&old.join("|")).unwrap();
-        assert!(!back.fit && back.polar_log && back.bins == 7);
+        assert!(!back.fit && !back.gmm && back.polar_log && back.bins == 7);
+        // and one from before the mixture (15 fields) reads with that off
+        let old: Vec<String> = c.to_line().split('|').take(15).map(|s| s.to_string()).collect();
+        let back = PaneCfg::from_line(&old.join("|")).unwrap();
+        assert!(back.fit && !back.gmm);
     }
 
     #[test]

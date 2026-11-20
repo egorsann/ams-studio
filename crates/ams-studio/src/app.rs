@@ -117,6 +117,14 @@ pub enum Action {
     GisToggleLayer(u32),
 }
 
+/// The hyperspectral parameters as the colour-coding settings see them: (key, label, short label) of each, and the reason
+/// when there are none (still reading, or the dashboard code was not found).
+#[derive(Clone, Default)]
+pub(super) struct HyUi {
+    pub rows: Vec<(String, String, String)>,
+    pub status: String,
+}
+
 impl PartialEq for AxisCfg {
     fn eq(&self, o: &Self) -> bool {
         self.param == o.param && self.auto == o.auto && self.min == o.min && self.max == o.max && self.log == o.log
@@ -124,7 +132,7 @@ impl PartialEq for AxisCfg {
 }
 impl PartialEq for ColorCfg {
     fn eq(&self, o: &Self) -> bool {
-        self.on == o.on && self.param == o.param && self.auto == o.auto && self.min == o.min && self.max == o.max && self.log == o.log && self.palette == o.palette && self.by_class == o.by_class
+        self.on == o.on && self.param == o.param && self.auto == o.auto && self.min == o.min && self.max == o.max && self.log == o.log && self.palette == o.palette && self.by_class == o.by_class && self.hy == o.hy && self.hy_key == o.hy_key
     }
 }
 
@@ -243,6 +251,69 @@ fn param_combo(ui: &mut Ui, id: &str, v: &mut usize, dark: bool) -> bool {
     changed
 }
 
+/// The parameter drop-down of the colour-coding. With the Hyperspectral tick on, the list gets one more column: the
+/// hyperspectral parameters of the AMS dashboard code (their dashboard labels, the short ones on the buttons). Choosing
+/// one of them sets `hy_key`; choosing an ordinary parameter clears it.
+fn color_param_combo(ui: &mut Ui, id: &str, c: &mut ColorCfg, dark: bool, hy: &HyUi) -> bool {
+    let mut changed = false;
+    let hyper = c.hy && !c.hy_key.is_empty();
+    let cur = if hyper && !c.hy_label.is_empty() {
+        RichText::new(c.hy_label.clone())
+    } else {
+        let t = RichText::new(PARAM_LABELS[c.param.min(N_PARAMS - 1)]);
+        match class_color(param_class(c.param), dark) { Some(col) => t.background_color(col).color(Color32::BLACK), None => t }
+    };
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt(id).width(120.0).selected_text(cur).show_ui(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                for (title, items) in PARAM_GROUPS {
+                    ui.vertical(|ui| {
+                        ui.set_min_width(88.0);
+                        ui.label(RichText::new(title).small().strong());
+                        for &i in items {
+                            let t = RichText::new(PARAM_LABELS[i]);
+                            let t = match class_color(param_class(i), dark) { Some(col) => t.background_color(col).color(Color32::BLACK), None => t };
+                            if ui.add(egui::Button::selectable(!hyper && c.param == i, t).min_size(Vec2::new(84.0, 0.0))).on_hover_text(param_info(i)).clicked() {
+                                c.param = i;
+                                c.hy_key.clear();
+                                c.hy_label.clear();
+                                changed = true;
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.add_space(6.0);
+                }
+                if c.hy {
+                    ui.vertical(|ui| {
+                        ui.set_min_width(120.0);
+                        ui.label(RichText::new("Hyperspectral").small().strong());
+                        if hy.rows.is_empty() {
+                            let why = if hy.status.is_empty() { "reading the hyperspectral parameters ...".to_string() } else { hy.status.clone() };
+                            ui.label(RichText::new(why).small().weak());
+                        }
+                        for (key, label, short) in &hy.rows {
+                            let b = egui::Button::selectable(hyper && c.hy_key == *key, short.replace('\n', " ")).min_size(Vec2::new(110.0, 0.0));
+                            if ui.add(b).on_hover_text(format!("{}: {HY_INFO}", label.replace('\n', " "))).clicked() {
+                                c.hy_key = key.clone();
+                                c.hy_label = label.replace('\n', " ");
+                                changed = true;
+                                ui.close();
+                            }
+                        }
+                    });
+                }
+            });
+            ui.separator();
+            ui.label(RichText::new("* belongs to the M3ORE lab sheet (not in Anisoft). Corrected for the sample volume where it applies: Edit > Volume Correction.").small().weak());
+        });
+        info_icon(ui, &if hyper { format!("{}: {HY_INFO}", c.hy_label) } else { param_info(c.param.min(N_PARAMS - 1)).to_string() });
+    });
+    changed
+}
+
+const HY_INFO: &str = "a hyperspectral parameter of the AMS dashboard code (its feature table next to the data). Every point is coloured with the value of its cube: the median of the shots of the cube's bottom face, or of its other faces when the bottom was not measured; a point whose cube has no value keeps the plain marker colour. The cubes are matched by their names (A12 = cube A, slice 12) in the open specimen.";
+
 fn range_fields(ui: &mut Ui, auto: &mut bool, min: &mut f64, max: &mut f64, log: &mut bool, id: &str) {
     ui.horizontal(|ui| {
         ui.checkbox(auto, "Auto-scale");
@@ -267,7 +338,8 @@ fn axis_ui(ui: &mut Ui, title: &str, id: &str, cfg: &mut AxisCfg, dark: bool) {
     range_fields(ui, &mut cfg.auto, &mut cfg.min, &mut cfg.max, &mut cfg.log, id);
 }
 
-fn color_ui(ui: &mut Ui, id: &str, c: &mut ColorCfg, dark: bool, title: &str) {
+fn color_ui(ui: &mut Ui, id: &str, c: &mut ColorCfg, dark: bool, title: &str, hy: &HyUi) -> bool {
+    let mut want_hyper = false;
     ui.checkbox(&mut c.on, RichText::new(title).strong());
     // the settings only show while colour-coding is on (keeps the pop-outs short enough for the screen)
     if c.on {
@@ -276,15 +348,22 @@ fn color_ui(ui: &mut Ui, id: &str, c: &mut ColorCfg, dark: bool, title: &str) {
             ui.radio_value(&mut c.by_class, true, "Data Classes").on_hover_text("Colour by the classes set in Edit > Set Data Classes");
         });
         ui.add_enabled_ui(!c.by_class, |ui| {
-            param_combo(ui, id, &mut c.param, dark);
+            ui.checkbox(&mut c.hy, "Hyperspectral values").on_hover_text("Adds the hyperspectral parameters of the AMS dashboard code (white mica, Al-OH and Fe3+ positions, ISM, ...) to the parameter list below, to colour the points by the value of their cube");
+            // the parameters are read the first time they are wanted
+            want_hyper = c.hy && hy.rows.is_empty() && hy.status.is_empty();
+            color_param_combo(ui, id, c, dark, hy);
             range_fields(ui, &mut c.auto, &mut c.min, &mut c.max, &mut c.log, id);
             ui.horizontal(|ui| {
                 ui.radio_value(&mut c.palette, 0, "Rainbow");
                 ui.radio_value(&mut c.palette, 1, "Shades");
                 ui.radio_value(&mut c.palette, 2, "Grayscales");
             });
+            if c.hy && c.hyper_on() && hy.rows.is_empty() && !hy.status.is_empty() {
+                ui.label(RichText::new(hy.status.clone()).small().weak());
+            }
         });
     }
+    want_hyper
 }
 
 /// A drag over rows of a list: anchor position, whether it adds to the previous selection, and that selection.
@@ -1487,7 +1566,10 @@ impl App {
     fn pane_color_ui(&mut self, ui: &mut Ui, i: usize, id: &str) {
         let dark = self.dark;
         let before = self.color[i].clone();
-        color_ui(ui, id, &mut self.color[i], dark, "Color-coding (this plot only)");
+        let hy = self.hy_ui();
+        if color_ui(ui, id, &mut self.color[i], dark, "Color-coding (this plot only)", &hy) {
+            self.cv_hyper_load(ui.ctx());
+        }
         if before != self.color[i] {
             self.color_own[i] = true;
         }
@@ -1529,8 +1611,9 @@ impl App {
             .collect()
     }
 
-    /// Copy of the points coloured according to `cfg`, and the colour range when colouring is on.
-    fn colorized(pts: &[Pt], cfg: &ColorCfg, classes: &[Option<Color32>]) -> (Vec<Pt>, Option<(f64, f64)>) {
+    /// Copy of the points coloured according to `cfg`, and the colour range when colouring is on. `hy` holds the value of
+    /// the hyperspectral parameter for every record (by index) when `cfg` uses one.
+    fn colorized(pts: &[Pt], cfg: &ColorCfg, classes: &[Option<Color32>], hy: Option<&std::collections::HashMap<usize, f64>>) -> (Vec<Pt>, Option<(f64, f64)>) {
         if !cfg.on {
             return (pts.to_vec(), None);
         }
@@ -1540,8 +1623,10 @@ impl App {
             return (out, None);
         }
         let k = cfg.param.min(N_PARAMS - 1);
-        let range = cfg.range(pts.iter().map(|p| p.vals[k]));
-        let out = pts.iter().map(|p| Pt { color: cfg.color(p.vals[k], range), ..p.clone() }).collect();
+        // the value each point is coloured by: a hyperspectral parameter (NaN where the cube has none), else the parameter
+        let val = |p: &Pt| if cfg.hyper_on() { hy.and_then(|m| m.get(&p.idx)).copied().unwrap_or(f64::NAN) } else { p.vals[k] };
+        let range = cfg.range(pts.iter().map(|p| val(p)));
+        let out = pts.iter().map(|p| Pt { color: cfg.color(val(p), range), ..p.clone() }).collect();
         (out, Some(range))
     }
 
@@ -3167,7 +3252,10 @@ impl App {
             let before = self.color_master.clone();
             let dark = self.dark;
             ui.label(RichText::new("General colour-coding: every plot and this list").small().weak()).on_hover_text("A UI-wide setting. Plots that have their own colour-coding (their options) keep it.");
-            color_ui(ui, "metric_panel", &mut self.color_master, dark, "Color-coding (all plots)");
+            let hy = self.hy_ui();
+            if color_ui(ui, "metric_panel", &mut self.color_master, dark, "Color-coding (all plots)", &hy) {
+                self.cv_hyper_load(ui.ctx());
+            }
             if before != self.color_master {
                 self.apply_master_color();
             }
@@ -3176,7 +3264,8 @@ impl App {
         let row_cols: Vec<Option<Color32>> = match &self.doc {
             Some(d) if self.color_master.on => {
                 let th = self.theme();
-                let (cp, _) = Self::colorized(&self.points(), &self.color_master, &self.class_colors());
+                let hy = self.hy_values(&self.color_master);
+                let (cp, _) = Self::colorized(&self.points(), &self.color_master, &self.class_colors(), hy.as_deref());
                 let mut v = vec![None; d.specs.len()];
                 for p in cp {
                     v[p.idx] = p.color.map(|c| th.soft(c));
@@ -3270,7 +3359,8 @@ impl App {
             let kms: Vec<f64> = idx.iter().map(|&i| self.derived[i].km).collect();
             overlay_gs = ams_core::stats::group_stats(&tensors, &kms);
         }
-        SlotData { pts, cs_label, names, class_cols, overlay_gs }
+        let hy = [0, 1, 2, 3].map(|i| self.hy_values(&self.color[i]));
+        SlotData { pts, cs_label, names, class_cols, overlay_gs, hy }
     }
 
     /// One plot pane (slot 0 the stereonet, 1 to 3 the plots) drawn into `prect`, in the main window or in a window of its own.
@@ -3279,7 +3369,7 @@ impl App {
             // the settings of the three plot panes (the stereonet has none)
             let cfg: Option<PaneCfg> = (i >= 1).then(|| self.cfg(i - 1).clone());
             let coloured = i == 0 || cfg.as_ref().map_or(false, |c| matches!(c.kind, XyKind::Scatter | XyKind::Line) || (i == 3 && c.polar));
-            let (cpts, crange) = if coloured { Self::colorized(&d.pts, &self.color[i], &d.class_cols) } else { (d.pts.clone(), None) };
+            let (cpts, crange) = if coloured { Self::colorized(&d.pts, &self.color[i], &d.class_cols, d.hy[i].as_deref()) } else { (d.pts.clone(), None) };
             let show_bar = coloured && crange.is_some() && (i == 0 || cfg.as_ref().map_or(false, |c| c.legend));
             if show_bar {
                 let bar = Rect::from_min_max(Pos2::new(body.min.x, body.max.y - 30.0), body.max);
@@ -3312,7 +3402,7 @@ impl App {
                         XyKind::Histogram => plots::histogram(ui, body, &shown, c.bins, &c.hist, th, SALT[k]),
                         XyKind::Scatter | XyKind::Line => {
                             let line = c.kind == XyKind::Line;
-                            let spec = ScatterSpec { x: &c.x, y: &c.y, zero_line: c.zero, diagonal: c.diag, conf: c.conf, connect: c.connect || line, sort_x: line, fit: c.fit, salt: SALT[k] };
+                            let spec = ScatterSpec { x: &c.x, y: &c.y, zero_line: c.zero, diagonal: c.diag, conf: c.conf, connect: c.connect || line, sort_x: line, fit: c.fit, gmm: c.gmm, salt: SALT[k] };
                             plots::scatter(ui, body, &shown, &spec, self.marker, th, &mut self.views[k])
                         }
                         kind => plots::binned_plot(ui, body, &shown, kind, &c.x, &c.y, c.bins, c.group, th, &mut self.views[k], SALT_BIN[k]),
@@ -3973,8 +4063,9 @@ impl App {
                                         });
                                         // a little out of the way: closed unless it is on
                                         if matches!(c.kind, XyKind::Scatter | XyKind::Line) {
-                                            egui::CollapsingHeader::new(RichText::new("Curve fit").small().weak()).id_salt(format!("xy-fit{i}")).default_open(c.fit).show(ui, |ui| {
+                                            egui::CollapsingHeader::new(RichText::new("Curve fit").small().weak()).id_salt(format!("xy-fit{i}")).default_open(c.fit || c.gmm).show(ui, |ui| {
                                                 ui.checkbox(&mut c.fit, "Bent power law (log-log)").on_hover_text("Fits log Y = a straight line in log X that bends smoothly into a second straight line, with no ceiling imposed (a ceiling shows only if the later slope is near 0), to the points on the plot, and draws it with the two slopes, the bend and the RMS. It is drawn as a straight power law when the bend is not worth its extra parameters (AIC). Both values must be above 0. For the F-test against Kmean in phase it rises as about Km^2.5 and then flattens; out of phase it is flat at low |Km| and then rises as about Km^2.");
+                                                ui.checkbox(&mut c.gmm, "Gaussian mixture, 2 clusters (log-log)").on_hover_text("Fits two Gaussian clusters, with their own shapes and sizes, to the points in log-log space (EM, best of 30 starts), draws their 1 and 2 sigma ellipses and centres, colours the points by cluster (blue: lower X, orange: higher X) and notes the weights, the centres and the AIC and BIC (also of one cluster, to compare). Both values must be above 0 and at least 20 points are needed. It groups the points by where they lie; it does not fit a curve.");
                                             });
                                         }
                                         ui.separator();
@@ -4108,6 +4199,8 @@ pub(crate) struct SlotData {
     names: [String; 4],
     class_cols: Vec<Option<Color32>>,
     overlay_gs: Option<ams_core::stats::GroupStats>,
+    /// the hyperspectral values of each pane's colour-coding, for the panes that use one
+    hy: [Option<std::sync::Arc<std::collections::HashMap<usize, f64>>>; 4],
 }
 
 const ROW_H: f32 = 22.0;

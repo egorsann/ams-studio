@@ -111,6 +111,9 @@ pub(super) struct CoreViewState {
     /// A mode step asked for before the parameters were read (applied when they arrive).
     hy_step: i32,
     hy_faces: HashMap<(String, usize), Arc<HashMap<(u32, char), crate::hyper::Faces>>>,
+    /// One value per cube for a hyperspectral parameter (specimen, key), for the colour-coding of the plots; kept until
+    /// the parameters are read again. A cell, because the plot panes only borrow the program.
+    hy_cube: std::cell::RefCell<HashMap<(String, String), Arc<HashMap<(u32, char), f64>>>>,
 }
 
 impl Default for CoreViewState {
@@ -152,6 +155,7 @@ impl Default for CoreViewState {
             mode_key: String::new(),
             hy_step: 0,
             hy_faces: HashMap::new(),
+            hy_cube: Default::default(),
             frac: 0.28,
             export: true,
             hover: String::new(),
@@ -400,6 +404,36 @@ impl App {
 
     pub(super) fn cv_open_id(&self) -> String {
         self.doc.as_ref().filter(|d| !d.synthetic).map(|d| spec_id(&d.path)).unwrap_or_default()
+    }
+
+    /// What the colour-coding settings need to offer the hyperspectral parameters: their keys, labels and short labels
+    /// (empty until they are read) and why there are none (reading, or not found).
+    pub(super) fn hy_ui(&self) -> super::HyUi {
+        let rows = self.cv.hy.as_ref().map(|h| h.rows.iter().map(|r| (r.key.clone(), r.label.clone(), r.short.clone())).collect()).unwrap_or_default();
+        let status = if self.cv.hy_rx.is_some() { "reading the hyperspectral parameters ...".to_string() } else { self.cv.hy_err.clone() };
+        super::HyUi { rows, status }
+    }
+
+    /// The value of the hyperspectral parameter chosen in `cfg` for every record of the open file (by the record's index),
+    /// for colouring the points: the value of the record's cube (see `Hyper::cube_values`). `None` when `cfg` does not
+    /// use one, the parameters are not read yet, or the file is not one of the specimens of the table.
+    pub(super) fn hy_values(&self, cfg: &crate::plots::ColorCfg) -> Option<Arc<HashMap<usize, f64>>> {
+        if !cfg.hyper_on() {
+            return None;
+        }
+        let h = self.cv.hy.as_ref()?;
+        let row = h.rows.iter().position(|r| r.key == cfg.hy_key)?;
+        let d = self.doc.as_ref().filter(|d| !d.synthetic)?;
+        let specimen = spec_id(&d.path);
+        let cubes = self.cv.hy_cube.borrow_mut().entry((specimen.clone(), cfg.hy_key.clone())).or_insert_with(|| Arc::new(h.cube_values(&specimen, row))).clone();
+        let mut out = HashMap::new();
+        for (i, s) in d.specs.iter().enumerate() {
+            let letter = s.name.trim().chars().next().unwrap_or('A').to_ascii_uppercase();
+            if let Some(v) = ams_core::core::slice_of(&s.name).and_then(|sl| cubes.get(&(sl, letter))) {
+                out.insert(i, *v);
+            }
+        }
+        Some(Arc::new(out))
     }
 
     /// The photo folder linked to a specimen file: from the `core_viewer` section of its dependency file, else from the
@@ -750,6 +784,7 @@ impl App {
                             let n = h.rows.len();
                             self.cv.hy = Some(Arc::new(h));
                             self.cv.hy_faces.clear();
+                            self.cv.hy_cube.borrow_mut().clear();
                             if let Some(k) = self.cv.hy.as_ref().and_then(|h| h.rows.iter().position(|r| r.key == self.cv.mode_key)) {
                                 self.cv.mode = k + 1;
                             } else if !self.cv.mode_key.is_empty() {
@@ -771,6 +806,10 @@ impl App {
                 Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
                 Err(_) => self.cv.hy_rx = None,
             }
+        }
+        // a plot coloured by a hyperspectral parameter needs them too, whether or not the viewer is on
+        if (self.color_master.hyper_on() || self.color.iter().any(|c| c.hyper_on())) && self.cv.hy.is_none() && self.cv.hy_rx.is_none() && self.cv.hy_err.is_empty() {
+            self.cv_hyper_load(ctx);
         }
         // a remembered parameter is read in as soon as the viewer is on, so the cubes come back as they were
         if self.cv.on && !self.cv.mode_key.is_empty() && self.cv.hy.is_none() && self.cv.hy_rx.is_none() && self.cv.hy_err.is_empty() {

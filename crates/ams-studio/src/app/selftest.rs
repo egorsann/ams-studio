@@ -642,6 +642,7 @@ pub fn run(out: &Path) -> usize {
                 c.x.log = log;
                 c.y.log = log;
                 c.fit = true;
+                c.gmm = true;
                 a.panes[1] = c;
             });
             h.frames(4, big);
@@ -650,6 +651,44 @@ pub fn run(out: &Path) -> usize {
         h.frames(3, big);
         h.step("curve fit back to in phase", |a, c| a.run(c, Action::Phase(false)));
         h.step("curve fit off again", |a, _| a.panes[1] = PaneCfg::default_for(1, false));
+        h.frames(2, big);
+    }
+    // ---- colour-coding by a hyperspectral parameter: every point gets the value of its cube
+    {
+        let f = root.join("hy").join("ZZ01_use.ams");
+        let mut s2 = 99u64;
+        let mut bytes = vec![];
+        for n in ["A1", "B1", "C1", "D1", "A2", "B2"] {
+            bytes.extend(build_record_with(n, &phase(&mut s2, 2e-3), &phase(&mut s2, -3e-6), 400.0, 1220.0, "KLY5"));
+        }
+        w(&f, &bytes);
+        h.step("open a specimen with cube names", move |a, _| a.open_path(f));
+        // a small feature table: B2 is not in it, A1 has two shots on its bottom face
+        let src = "FEATURES_CSV = os.path.join(_SPEC_OUT, \"x.csv\")\nCUBE_ROWS = {\n    \"cube_d2200\": (\"D2200\", \"2200_ok\", \"White mica\\nD2200\", \"depth\"),\n}\n";
+        let mut csv = String::from("specimen,cube,side,D2200,2200_ok,W2200,W900,900_ok,ISM,ISM_ok,zeolite_flag,1400_ok,W1400\n");
+        for (c, v) in [("A1", 0.10), ("A1", 0.30), ("B1", 0.20), ("C1", 0.40), ("D1", 0.50), ("A2", 0.60)] {
+            csv += &format!("ZZ01,{c},BTM,{v},True,2200.0,880.0,True,2.0,True,False,True,1410.0\n");
+        }
+        let hy = crate::hyper::Hyper::from_parts(src, "ISM_MIN_D2200 = 0.05\n", &csv, &["cube_d2200".to_string()]).unwrap();
+        h.app.cv.hy = Some(std::sync::Arc::new(hy));
+        let cfg = ColorCfg { on: true, hy: true, hy_key: "cube_d2200".into(), hy_label: "White mica D2200".into(), ..ColorCfg::default() };
+        let vals = h.app.hy_values(&cfg);
+        let n_vals = vals.as_ref().map_or(0, |m| m.len());
+        let a1 = vals.as_ref().and_then(|m| m.get(&0)).copied().unwrap_or(f64::NAN);
+        h.check("the points get the value of their cube (the median of the shots; a cube not in the table has none)", n_vals == 5 && (a1 - 0.20).abs() < 1e-9, format!("{n_vals} values, A1 = {a1}"));
+        let (cp, range) = App::colorized(&h.app.points(), &cfg, &[], vals.as_deref());
+        let coloured = cp.iter().filter(|p| p.color.is_some()).count();
+        h.check("five of the six points are coloured, on the range of the values", coloured == 5 && range.map_or(false, |r| (r.0 - 0.20).abs() < 1e-9 && (r.1 - 0.60).abs() < 1e-9), format!("{coloured} coloured, {range:?}"));
+        let c2 = cfg.clone();
+        h.step("a pane coloured by a hyperspectral parameter", move |a, _| {
+            a.color[1] = c2;
+            a.color_own[1] = true;
+        });
+        h.frames(4, big);
+        h.step("the hyperspectral colour-coding off again", |a, _| {
+            a.color[1] = ColorCfg::default();
+            a.color_own[1] = false;
+        });
         h.frames(2, big);
     }
     // ---- the cube size kept with a specimen goes into its records when a file of it is opened
