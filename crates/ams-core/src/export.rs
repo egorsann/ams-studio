@@ -25,7 +25,7 @@ pub fn csv(specimens: &[&Specimen], out_of_phase: bool) -> String {
 }
 
 /// Per-phase columns, in this order (the `ip_` / `op_` prefix is added in the header).
-pub const PHASE_COLUMNS: [&str; 65] = [
+pub const PHASE_COLUMNS: [&str; 66] = [
     "Km", "K1", "K1_SD", "K2", "K2_SD", "K3", "K3_SD", "K1_Dec", "K1_Inc", "K2_Dec", "K2_Inc", "K3_Dec", "K3_Inc",
     "L", "F", "P", "Pj", "T", "U", "Q", "E", "FTest_F", "FTest_F12", "FTest_F23", "E12", "E23", "E13",
     "Tyy", "Txx", "Tzz",
@@ -35,6 +35,8 @@ pub const PHASE_COLUMNS: [&str; 65] = [
     "K1_frac", "K2_frac", "K3_frac", "Km_frac", "K1_un_frac", "K2_un_frac", "K3_un_frac",
     "L_frac", "L_abs", "L_Khan_frac", "L_Khan_abs", "F_frac", "F_abs", "F_Khan_frac", "F_Khan_abs",
     "P_frac", "P_abs", "H_frac", "H_abs", "Pj_frac", "Pj_abs", "T_frac", "T_abs", "U_frac", "U_abs",
+    // deviatoric susceptibility K' (SI, on the volume-corrected Km)
+    "K_prime",
 ];
 
 /// Header of [`csv_both`]: `Specimen,Field,Freq,ip_*...,op_*...,opKm_over_ipKm_percent`.
@@ -93,6 +95,7 @@ fn phase_fields(ph: &Phase, vol_cm3: f64) -> Vec<String> {
         o.push(g(val.frac, 6));
         o.push(g(val.abs, 6));
     }
+    o.push(g(v[34], 6));
     o
 }
 

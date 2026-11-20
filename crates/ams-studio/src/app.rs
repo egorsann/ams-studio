@@ -157,7 +157,7 @@ fn class_color(class: u8, dark: bool) -> Option<Color32> {
 
 /// Parameters grouped by type, one column per group, in the order of the original's list.
 const PARAM_GROUPS: [(&str, &[usize]); 7] = [
-    ("Magnitude", &[0, 24]),
+    ("Magnitude", &[0, 24, 34]),
     ("Shape", &[1, 2, 3, 4, 5, 6, 7, 8, 25, 26, 27]),
     ("K1 (max)", &[9, 12, 13, 28, 31]),
     ("K2 (int)", &[10, 14, 15, 29]),
@@ -203,6 +203,7 @@ fn param_info(i: usize) -> &'static str {
         31 => "Lin_Plunge*: plunge of the magnetic lineation (the K1 axis) in deg. Lab sheet quantity.",
         32 => "Fol_Dip*: dip of the magnetic foliation (the plane perpendicular to K3) in deg. Lab sheet quantity.",
         33 => "Fol_DipDir*: dip direction of the magnetic foliation in deg. Lab sheet quantity.",
+        34 => "K_prime* (K'): deviatoric susceptibility (Jelinek 1984), sqrt(((K1 - Km)^2 + (K2 - Km)^2 + (K3 - Km)^2) / 3) in SI, on the volume-corrected values. How far the susceptibility ellipsoid departs from a sphere of diameter Km: it leaves out the isotropic part, so it can be compared with the K' of a pure mineral. When it is on a plot axis, dotted lines mark the minerals that lie within the data and the two just below it (feldspar, olivine, muscovite, hornblende, chlorite, biotite, pyroxene; single-crystal values, not scaled by how much of the mineral the rock holds).",
         _ => "",
     }
 }
@@ -515,7 +516,7 @@ pub struct App {
     oop_highlight: bool,
     oop_hint_rect: Rect,
     st_plane_comments: bool,
-    /// How planes are typed in: 0 strike with the left-hand rule (default), 1 strike with the right-hand rule, 2 dip direction.
+    /// How planes are typed in: 0 strike with the left-hand rule (default, dip direction = strike + 90, as in the Owens window), 1 strike with the right-hand rule (strike - 90), 2 dip direction.
     st_plane_conv: u8,
     /// The open file the planes were last loaded for, edits not written yet (since when), and the planes of the first
     /// version (preferences folder) waiting to move into the specimens' dependency files.

@@ -6,10 +6,10 @@ use crate::ams::{Axes, Phase};
 /// The first 24 are the original's, in the order of its lists. The ones from 24 on (marked with `*`) belong to the
 /// M3ORE lab sheet and are not in Anisoft: volume-corrected mean susceptibility, Khan's L and F, Owens' H, the
 /// unnormalised K1..K3, the lineation plunge and the foliation dip and dip direction.
-pub const PARAM_LABELS: [&str; 34] = [
+pub const PARAM_LABELS: [&str; 35] = [
     "Kmean", "L", "F", "P", "Pj", "T", "U", "Q", "E", "K1", "K2", "K3", "K1_Dec", "K1_Inc", "K2_Dec", "K2_Inc", "K3_Dec", "K3_Inc",
     "FTest", "FTest_F12", "FTest_F23", "E12", "E23", "E13",
-    "Kmean_vol*", "L_Khan*", "F_Khan*", "H_Owens*", "K1_unnorm*", "K2_unnorm*", "K3_unnorm*", "Lin_Plunge*", "Fol_Dip*", "Fol_DipDir*",
+    "Kmean_vol*", "L_Khan*", "F_Khan*", "H_Owens*", "K1_unnorm*", "K2_unnorm*", "K3_unnorm*", "Lin_Plunge*", "Fol_Dip*", "Fol_DipDir*", "K_prime*",
 ];
 
 /// First index of the lab-sheet parameters.
@@ -32,7 +32,7 @@ pub fn param_class(i: usize) -> u8 {
         9 | 12 | 13 | 28 | 31 => 1,
         10 | 14 | 15 | 29 => 2,
         11 | 16 | 17 | 30 | 32 | 33 => 3,
-        24 => 5,
+        24 | 34 => 5,
         25..=27 => 4,
         _ => 0,
     }
@@ -82,7 +82,43 @@ pub fn param_values_vol(km: f64, ax: &Axes, ph: &Phase, vol_cm3: f64) -> [f64; N
     v[31] = ax.dec_inc[0].1;
     v[32] = 90.0 - ax.dec_inc[2].1;
     v[33] = if ax.dec_inc[2].0 > 180.0 { ax.dec_inc[2].0 - 180.0 } else { ax.dec_inc[2].0 + 180.0 };
+    v[34] = k_prime(l.km_vol, ax.k_norm);
     v
+}
+
+/// Deviatoric susceptibility K' (Jelinek 1984), in SI: `sqrt(((K1 - Km)^2 + (K2 - Km)^2 + (K3 - Km)^2) / 3)` with
+/// the unnormalised axes, i.e. `Km * sqrt(sum (kn_i - 1)^2 / 3)` for the normalised `kn` (mean 1). It is the size of
+/// the departure of the susceptibility ellipsoid from a sphere of diameter Km, so unlike Pj it keeps the absolute
+/// magnitude and can be compared with the K' of a pure mineral ([`MINERAL_KPRIME`]).
+pub fn k_prime(km: f64, k_norm: [f64; 3]) -> f64 {
+    km.abs() * (k_norm.iter().map(|k| (k - 1.0).powi(2)).sum::<f64>() / 3.0).sqrt()
+}
+
+/// K' of the pure (single-crystal) minerals, in SI, smallest first. Olivine, biotite, hornblende, pyroxene and
+/// feldspar are the values of Koopmans (2022) / Latimer (2024) as given by the lab; muscovite and chlorite are the
+/// means of the room-temperature values of the single crystals in Biedermann et al. (2014), Table 4 (chlorite
+/// varies about nine-fold with its Fe content). They are not scaled by how much of the mineral a rock holds.
+pub const MINERAL_KPRIME: [(&str, f64); 7] = [
+    ("Feldspar", 1.60e-9),
+    ("Olivine", 3.10e-9),
+    ("Muscovite", 5.10e-9),
+    ("Hornblende", 1.19e-8),
+    ("Chlorite", 3.01e-8),
+    ("Biotite", 4.96e-8),
+    ("Pyroxene", 1.21e-7),
+];
+
+/// The minerals to show next to a set of K' values spanning `lo..=hi`: every mineral whose K' lies inside, and the
+/// `below` nearest ones under `lo` (so it is clear how far above the expected silicate floor a magnetite-bearing
+/// rock sits). Nothing above `hi`. Empty when the range is not positive.
+pub fn minerals_near(lo: f64, hi: f64, below: usize) -> Vec<(&'static str, f64)> {
+    if !(lo.is_finite() && hi.is_finite() && lo > 0.0 && hi >= lo) {
+        return vec![];
+    }
+    let under: Vec<_> = MINERAL_KPRIME.iter().copied().filter(|m| m.1 < lo).collect();
+    let mut out: Vec<_> = under[under.len().saturating_sub(below)..].to_vec();
+    out.extend(MINERAL_KPRIME.iter().copied().filter(|m| m.1 >= lo && m.1 <= hi));
+    out
 }
 
 /// Standard deviation of a parameter where the file stores one (K1..K3), else `NaN`.
@@ -127,6 +163,34 @@ mod tests {
         // with the reference volume the corrected mean is the stored one
         assert_eq!(param_values(2e-3, &ax, &ph)[24], 2e-3);
         assert!(is_lab(30) && !is_lab(23));
+    }
+
+    #[test]
+    fn k_prime_is_the_rms_deviation_of_the_axes_from_their_mean() {
+        let ph = Phase { km: 2e-3, sd: [0.0; 3], tensor: sym(1.2, 1.0, 0.8, 0.0, 0.0, 0.0), ftest: [0.0; 3] };
+        let ax = Axes::from_tensor(&ph.tensor);
+        let v = param_values(ph.km, &ax, &ph);
+        // axes 2.4e-3, 2.0e-3, 1.6e-3: deviations +-4e-4 and 0
+        let want = (2.0 * (4e-4f64).powi(2) / 3.0).sqrt();
+        assert_eq!(PARAM_LABELS[34], "K_prime*");
+        assert!((v[34] - want).abs() < 1e-12, "K' = {}", v[34]);
+        // it follows the volume-corrected mean: 5 cm3 doubles it
+        assert!((param_values_vol(ph.km, &ax, &ph, 5.0)[34] - 2.0 * want).abs() < 1e-12);
+        // an isotropic specimen has none
+        let iso = Axes::from_tensor(&sym(1.0, 1.0, 1.0, 0.0, 0.0, 0.0));
+        assert!(k_prime(1e-3, iso.k_norm).abs() < 1e-15);
+    }
+
+    #[test]
+    fn the_minerals_shown_are_those_in_range_and_the_two_below() {
+        fn names(v: Vec<(&'static str, f64)>) -> Vec<&'static str> { v.into_iter().map(|m| m.0).collect() }
+        // a magnetite-bearing rock far above every silicate: only the two nearest below
+        assert_eq!(names(minerals_near(1e-5, 4e-5, 2)), vec!["Biotite", "Pyroxene"]);
+        // data that spans biotite: the two below it (chlorite, hornblende) and the one inside
+        assert_eq!(names(minerals_near(4e-8, 6e-8, 2)), vec!["Hornblende", "Chlorite", "Biotite"]);
+        // nothing above the data
+        assert!(!names(minerals_near(1e-9, 2e-9, 2)).contains(&"Olivine"));
+        assert!(minerals_near(0.0, 1.0, 2).is_empty() && minerals_near(f64::NAN, 1.0, 2).is_empty());
     }
 
     #[test]

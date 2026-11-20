@@ -106,12 +106,13 @@ impl StPlane {
 /// How a plane is typed in: strike with the left-hand rule (the default), strike with the right-hand rule, or the dip direction.
 pub(super) const CONV_NAMES: [&str; 3] = ["Strike / dip (left-hand rule)", "Strike / dip (right-hand rule)", "Dip direction / dip"];
 
-/// Dip direction from what was typed. Left-hand rule: the plane dips to the left when looking along the strike
-/// (dip direction = strike - 90); right-hand rule: to the right (strike + 90).
+/// Dip direction from what was typed. Left-hand rule, as the Owens window reads it (index finger along the strike,
+/// thumb towards the dip direction): dip direction = strike + 90, so a strike of 270 dips north and 90 dips south;
+/// right-hand rule: strike - 90.
 pub(super) fn to_dip_dir(conv: u8, typed: f64) -> f64 {
     match conv {
-        0 => (typed - 90.0).rem_euclid(360.0),
-        1 => (typed + 90.0).rem_euclid(360.0),
+        0 => (typed + 90.0).rem_euclid(360.0),
+        1 => (typed - 90.0).rem_euclid(360.0),
         _ => typed.rem_euclid(360.0),
     }
 }
@@ -119,8 +120,8 @@ pub(super) fn to_dip_dir(conv: u8, typed: f64) -> f64 {
 /// What is shown in the field for a stored dip direction (the inverse of `to_dip_dir`).
 pub(super) fn from_dip_dir(conv: u8, dip_dir: f64) -> f64 {
     match conv {
-        0 => (dip_dir + 90.0).rem_euclid(360.0),
-        1 => (dip_dir - 90.0).rem_euclid(360.0),
+        0 => (dip_dir - 90.0).rem_euclid(360.0),
+        1 => (dip_dir + 90.0).rem_euclid(360.0),
         _ => dip_dir.rem_euclid(360.0),
     }
 }
@@ -430,7 +431,7 @@ impl App {
                             ui.selectable_value(&mut self.st_plane_conv, k as u8, *n);
                         }
                     });
-                    info_icon(ui, "Left-hand rule: looking along the strike direction the plane dips to the left (dip direction = strike - 90 degrees). Right-hand rule: it dips to the right (strike + 90 degrees). The letter behind the dip is the side the entry is read as dipping towards (E or W; N or S for a plane that strikes exactly east-west), so the reading can be checked.");
+                    info_icon(ui, "Left-hand rule (the same as in the Owens window: index finger along the strike, thumb towards the dip direction): dip direction = strike + 90 degrees, so a strike of 270 dips north and a strike of 90 dips south. Right-hand rule: dip direction = strike - 90 degrees. The letter behind the dip is the side the entry is read as dipping towards (E or W; N or S for a plane that strikes exactly east-west), so the reading can be checked.");
                 });
                 let mut remove: Option<usize> = None;
                 let conv = self.st_plane_conv.min(2);
@@ -571,17 +572,17 @@ mod tests {
     }
 
     #[test]
-    fn the_left_hand_rule_dips_to_the_left_of_the_strike_and_the_letter_says_which_side() {
-        // strike 0 (north): left-hand rule dips to the west, right-hand rule to the east
-        assert!((to_dip_dir(0, 0.0) - 270.0).abs() < 1e-9 && side_letter(to_dip_dir(0, 0.0)) == "W");
-        assert!((to_dip_dir(1, 0.0) - 90.0).abs() < 1e-9 && side_letter(to_dip_dir(1, 0.0)) == "E");
+    fn the_left_hand_rule_puts_the_dip_direction_90_degrees_after_the_strike() {
+        // strike 0 (north): left-hand rule dips to the east, right-hand rule to the west
+        assert!((to_dip_dir(0, 0.0) - 90.0).abs() < 1e-9 && side_letter(to_dip_dir(0, 0.0)) == "E");
+        assert!((to_dip_dir(1, 0.0) - 270.0).abs() < 1e-9 && side_letter(to_dip_dir(1, 0.0)) == "W");
         assert_eq!(to_dip_dir(2, 135.0), 135.0);
-        // strike 45: left-hand rule dips towards 315 (north-west, W), right-hand towards 135 (south-east, E)
-        assert_eq!(side_letter(to_dip_dir(0, 45.0)), "W");
-        assert_eq!(side_letter(to_dip_dir(1, 45.0)), "E");
-        // a plane striking east-west dips north or south
-        assert_eq!(side_letter(to_dip_dir(0, 90.0)), "N");
-        assert_eq!(side_letter(to_dip_dir(0, 270.0)), "S");
+        // strike 45: left-hand rule dips towards 135 (south-east, E), right-hand towards 315 (north-west, W)
+        assert_eq!(side_letter(to_dip_dir(0, 45.0)), "E");
+        assert_eq!(side_letter(to_dip_dir(1, 45.0)), "W");
+        // a plane striking east-west: strike 270 dips towards north (0), strike 90 towards south (180)
+        assert!(to_dip_dir(0, 270.0).abs() < 1e-9 && side_letter(to_dip_dir(0, 270.0)) == "N");
+        assert!((to_dip_dir(0, 90.0) - 180.0).abs() < 1e-9 && side_letter(to_dip_dir(0, 90.0)) == "S");
         // the entry converts back to what was typed
         for conv in 0..3u8 {
             for a in [0.0, 17.5, 90.0, 200.0, 359.0] {

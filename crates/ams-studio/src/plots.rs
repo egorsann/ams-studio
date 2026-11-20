@@ -796,9 +796,17 @@ pub fn stereonet(ui: &mut Ui, rect: Rect, pts: &[Pt], opts: &StereoOpts, th: &Th
     out
 }
 
-/// Exponent used to print a parameter divided by a power of ten (only Kmean).
+/// Index of the deviatoric susceptibility K' in the parameter list.
+pub const KPRIME: usize = 34;
+
+/// The parameters in SI that are printed divided by a power of ten: Kmean and K'.
+fn is_si(param: usize) -> bool {
+    param == 0 || param == KPRIME
+}
+
+/// Exponent used to print a parameter divided by a power of ten (Kmean and K' only), from the values of that parameter.
 pub fn scale_exp(param: usize, vals: impl Iterator<Item = f64>) -> i32 {
-    if param != 0 {
+    if !is_si(param) {
         return 0;
     }
     let hi = vals.filter(|v| v.is_finite()).map(f64::abs).fold(0.0f64, f64::max);
@@ -806,12 +814,47 @@ pub fn scale_exp(param: usize, vals: impl Iterator<Item = f64>) -> i32 {
 }
 
 fn axis_label(cfg: &AxisCfg, exp: i32) -> String {
-    if cfg.param == 0 && !cfg.log {
-        format!("Kmean [E{exp:+03} SI]")
-    } else if cfg.param == 0 {
-        "Kmean [SI]".to_string()
+    let name = if cfg.param == KPRIME { "K'" } else { cfg.label() };
+    if is_si(cfg.param) && !cfg.log {
+        format!("{name} [E{exp:+03} SI]")
+    } else if is_si(cfg.param) {
+        format!("{name} [SI]")
     } else {
         format!("{}{}", cfg.label(), if cfg.log { " (log)" } else { "" })
+    }
+}
+
+/// The pure minerals whose K' is near the K' values on this axis (inside their range and the two just below it), as
+/// (name, K' in SI, position on the axis). Empty unless the axis is K'. `scale` is the divisor of a linear axis.
+fn mineral_marks(cfg: &AxisCfg, pts: &[Pt], scale: f64) -> Vec<(&'static str, f64, f64)> {
+    if cfg.param != KPRIME {
+        return vec![];
+    }
+    let v: Vec<f64> = pts.iter().map(|p| p.vals[KPRIME]).filter(|x| x.is_finite() && *x > 0.0).collect();
+    let (lo, hi) = (v.iter().copied().fold(f64::INFINITY, f64::min), v.iter().copied().fold(0.0f64, f64::max));
+    ams_core::params::minerals_near(lo, hi, 2)
+        .into_iter()
+        .map(|(n, k)| (n, k, if cfg.log { k.log10() } else { k * scale }))
+        .collect()
+}
+
+/// Dotted lines across the plot at the mineral K' values, each named; `vertical` when the K' axis runs along x.
+fn mineral_lines(pa: &egui::Painter, f: &Frame2D, th: &Theme, marks: &[(&'static str, f64, f64)], vertical: bool) {
+    let font = FontId::proportional(10.5);
+    for (i, (name, k, c)) in marks.iter().enumerate() {
+        let (a, b) = if vertical { (f.to_screen(*c, f.y.0), f.to_screen(*c, f.y.1)) } else { (f.to_screen(f.x.0, *c), f.to_screen(f.x.1, *c)) };
+        let inside = if vertical { *c >= f.x.0 && *c <= f.x.1 } else { *c >= f.y.0 && *c <= f.y.1 };
+        if !inside {
+            continue;
+        }
+        pa.extend(Shape::dashed_line(&[a, b], Stroke::new(1.0, th.faint()), 3.0, 3.0));
+        let text = format!("{name}  K' {k:.2E}");
+        if vertical {
+            // staggered, so neighbouring labels do not sit on each other
+            pa.text(Pos2::new(a.x + 3.0, f.plot.min.y + 3.0 + 12.0 * (i % 3) as f32), Align2::LEFT_TOP, text, font.clone(), th.faint());
+        } else {
+            pa.text(Pos2::new(f.plot.min.x + 4.0, a.y - 1.0), Align2::LEFT_BOTTOM, text, font.clone(), th.faint());
+        }
     }
 }
 
@@ -849,10 +892,13 @@ fn axis_range(cfg: &AxisCfg, vals: &[f64], scale: f64, pad: f64) -> (f64, f64) {
 
 /// Histogram of one parameter (N vs parameter).
 pub fn histogram(ui: &mut Ui, rect: Rect, pts: &[Pt], bins: usize, cfg: &AxisCfg, th: &Theme, salt: &str) -> PlotOut {
-    let exp = scale_exp(cfg.param, pts.iter().map(|p| p.vals[0]));
+    let exp = scale_exp(cfg.param, pts.iter().map(|p| p.vals[cfg.param]));
     let scale = if cfg.log { 1.0 } else { 10f64.powi(-exp) };
     let (vals, hidden) = axis_values(pts, cfg, scale);
-    let (mut lo, mut hi) = axis_range(cfg, &vals.iter().map(|v| v.1).collect::<Vec<_>>(), scale, 0.0);
+    let marks = mineral_marks(cfg, pts, scale);
+    let mut all: Vec<f64> = vals.iter().map(|v| v.1).collect();
+    all.extend(marks.iter().map(|m| m.2));
+    let (mut lo, mut hi) = axis_range(cfg, &all, scale, 0.0);
     if (hi - lo).abs() < 1e-30 {
         lo -= 0.5;
         hi += 0.5;
@@ -889,6 +935,7 @@ pub fn histogram(ui: &mut Ui, rect: Rect, pts: &[Pt], bins: usize, cfg: &AxisCfg
             out.hover = Some(format!("{} = {:.3E}   N = {n}", cfg.label(), shown));
         }
     }
+    mineral_lines(&ui.painter_at(f.plot), &f, th, &marks, true);
     out
 }
 
@@ -905,8 +952,8 @@ pub struct ScatterSpec<'a> {
 }
 
 pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f32, th: &Theme, view: &mut ZoomView) -> PlotOut {
-    let xexp = scale_exp(spec.x.param, pts.iter().map(|p| p.vals[0]));
-    let yexp = scale_exp(spec.y.param, pts.iter().map(|p| p.vals[0]));
+    let xexp = scale_exp(spec.x.param, pts.iter().map(|p| p.vals[spec.x.param]));
+    let yexp = scale_exp(spec.y.param, pts.iter().map(|p| p.vals[spec.y.param]));
     let (xs_, xh) = axis_values(pts, spec.x, if spec.x.log { 1.0 } else { 10f64.powi(-xexp) });
     let (ys_, yh) = axis_values(pts, spec.y, if spec.y.log { 1.0 } else { 10f64.powi(-yexp) });
     let mut ymap = std::collections::HashMap::new();
@@ -914,8 +961,10 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
         ymap.insert(*i, *v);
     }
     let xs: Vec<(usize, f64, f64)> = xs_.iter().filter_map(|(i, x)| ymap.get(i).map(|y| (*i, *x, *y))).collect();
-    let xr = axis_range(spec.x, &xs.iter().map(|v| v.1).collect::<Vec<_>>(), if spec.x.log { 1.0 } else { 10f64.powi(-xexp) }, 0.06);
-    let yr = axis_range(spec.y, &xs.iter().map(|v| v.2).collect::<Vec<_>>(), if spec.y.log { 1.0 } else { 10f64.powi(-yexp) }, 0.06);
+    let (xsc, ysc) = (if spec.x.log { 1.0 } else { 10f64.powi(-xexp) }, if spec.y.log { 1.0 } else { 10f64.powi(-yexp) });
+    let (xm, ym) = (mineral_marks(spec.x, pts, xsc), mineral_marks(spec.y, pts, ysc));
+    let xr = axis_range(spec.x, &xs.iter().map(|v| v.1).chain(xm.iter().map(|m| m.2)).collect::<Vec<_>>(), xsc, 0.06);
+    let yr = axis_range(spec.y, &xs.iter().map(|v| v.2).chain(ym.iter().map(|m| m.2)).collect::<Vec<_>>(), ysc, 0.06);
     // zoom and pan first, so that the axes are drawn for the range that is visible
     let plot0 = plot_rect(rect, spec.y.log);
     let resp = ui.interact(plot0, ui.scope_id().with(spec.salt), Sense::click_and_drag());
@@ -930,6 +979,8 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
     if spec.zero_line && !spec.y.log && yr.0 < 0.0 && yr.1 > 0.0 {
         clip.line_segment([f.to_screen(xr.0, 0.0), f.to_screen(xr.1, 0.0)], Stroke::new(1.2, th.line()));
     }
+    mineral_lines(&clip, &f, th, &xm, true);
+    mineral_lines(&clip, &f, th, &ym, false);
     if spec.diagonal {
         // y = x in data units: valid when both axes use the same transformation
         let (a, b) = (xr.0.max(yr.0), xr.1.min(yr.1));
@@ -988,7 +1039,8 @@ pub fn scatter(ui: &mut Ui, rect: Rect, pts: &[Pt], spec: &ScatterSpec, size: f3
     }
     if let Some((_, i)) = best {
         let p = &pts[i];
-        out.hover = Some(format!("{}   {} = {:.4}   {} = {:.4}", p.name, spec.x.label(), p.vals[spec.x.param], spec.y.label(), p.vals[spec.y.param]));
+        let show = |param: usize| if is_si(param) { format!("{:.3E}", p.vals[param]) } else { format!("{:.4}", p.vals[param]) };
+        out.hover = Some(format!("{}   {} = {}   {} = {}", p.name, spec.x.label(), show(spec.x.param), spec.y.label(), show(spec.y.param)));
         // Alt + hover: the sub-specimen ID next to the marker, at once
         if ui.input(|i| i.modifiers.alt) {
             if let Some((_, _, y)) = xs.iter().find(|(k, _, _)| *k == i) {
@@ -1200,14 +1252,16 @@ pub enum GroupBy {
 /// Bar plot (mean and SD of Y) or box plot (quartiles, whiskers at 1.5 IQR, outliers) of Y per group: classes of X,
 /// or one group per sample.
 pub fn binned_plot(ui: &mut Ui, rect: Rect, pts: &[Pt], kind: XyKind, x: &AxisCfg, y: &AxisCfg, bins: usize, group: GroupBy, th: &Theme, view: &mut ZoomView, salt: &str) -> PlotOut {
-    let xexp = scale_exp(x.param, pts.iter().map(|p| p.vals[0]));
-    let yexp = scale_exp(y.param, pts.iter().map(|p| p.vals[0]));
+    let xexp = scale_exp(x.param, pts.iter().map(|p| p.vals[x.param]));
+    let yexp = scale_exp(y.param, pts.iter().map(|p| p.vals[y.param]));
     let (xscale, yscale) = (if x.log { 1.0 } else { 10f64.powi(-xexp) }, if y.log { 1.0 } else { 10f64.powi(-yexp) });
     let (xs_, _) = axis_values(pts, x, xscale);
     let (ys_, _) = axis_values(pts, y, yscale);
     let ymap: std::collections::HashMap<usize, f64> = ys_.into_iter().collect();
     let data: Vec<(usize, f64, f64)> = xs_.iter().filter_map(|(i, xv)| ymap.get(i).map(|yv| (*i, *xv, *yv))).collect();
     let by_sample = group == GroupBy::Sample;
+    let xm = if by_sample { vec![] } else { mineral_marks(x, pts, xscale) };
+    let ym = mineral_marks(y, pts, yscale);
     let mut labels: Vec<String> = vec![];
     let (xlo, xhi, nb, mut groups): (f64, f64, usize, Vec<Vec<f64>>) = if by_sample {
         // one group per sample, in the order a person reads the names
@@ -1224,7 +1278,7 @@ pub fn binned_plot(ui: &mut Ui, rect: Rect, pts: &[Pt], kind: XyKind, x: &AxisCf
         labels = map.iter().map(|(n, _)| n.clone()).collect();
         (0.0, n as f64, n, map.into_iter().map(|(_, v)| v).collect())
     } else {
-        let (a, b) = axis_range(x, &data.iter().map(|v| v.1).collect::<Vec<_>>(), xscale, 0.0);
+        let (a, b) = axis_range(x, &data.iter().map(|v| v.1).chain(xm.iter().map(|m| m.2)).collect::<Vec<_>>(), xscale, 0.0);
         let (lo, hi) = if (b - a).abs() < 1e-30 { (a - 0.5, b + 0.5) } else { (a, b) };
         let nb = bins.clamp(1, 60);
         let w = (hi - lo) / nb as f64;
@@ -1261,6 +1315,7 @@ pub fn binned_plot(ui: &mut Ui, rect: Rect, pts: &[Pt], kind: XyKind, x: &AxisCf
             ext.extend([g[0], g[g.len() - 1]]);
         }
     }
+    ext.extend(ym.iter().map(|m| m.2));
     let yr = if y.auto || ext.is_empty() { range_of(ext.iter().copied(), 0.08) } else { axis_range(y, &[], yscale, 0.0) };
     let plot0 = plot_rect(rect, y.log);
     let resp = ui.interact(plot0, ui.scope_id().with(salt), Sense::click_and_drag());
@@ -1269,6 +1324,8 @@ pub fn binned_plot(ui: &mut Ui, rect: Rect, pts: &[Pt], kind: XyKind, x: &AxisCf
     let xlabel = if by_sample { "Sample (specimen name)".to_string() } else { axis_label(x, xexp) };
     let f = draw_axes_ex(ui, rect, xr, yr, &xlabel, &axis_label(y, yexp), th, x.log && !by_sample, y.log, by_sample);
     let pa = ui.painter_at(f.plot);
+    mineral_lines(&pa, &f, th, &xm, true);
+    mineral_lines(&pa, &f, th, &ym, false);
     let mut out = PlotOut::default();
     let hover = resp.hover_pos();
     let base = f.to_screen(xr.0, 0.0_f64.clamp_safe(yr.0, yr.1)).y;
@@ -1492,5 +1549,55 @@ mod plane_tests {
         assert!(view.x.1 - view.x.0 < 0.9);
         view.reset();
         assert!(!view.is_zoomed());
+    }
+
+    fn kp_pt(idx: usize, kp: f64) -> Pt {
+        let mut vals = [f64::NAN; N_PARAMS];
+        vals[KPRIME] = kp;
+        vals[0] = 1e-3;
+        Pt { idx, name: format!("A{idx}"), di: [(0.0, 0.0); 3], vals, sds: [0.0; 3], selected: false, color: None }
+    }
+
+    #[test]
+    fn the_k_prime_axis_names_the_minerals_near_the_data_and_is_scaled_in_si() {
+        let pts = vec![kp_pt(0, 1.2e-5), kp_pt(1, 3.5e-5)];
+        let lin = AxisCfg::new(KPRIME);
+        // a magnetite-bearing rock: the two nearest minerals below the data, none above it
+        let m = mineral_marks(&lin, &pts, 1e5);
+        assert_eq!(m.iter().map(|m| m.0).collect::<Vec<_>>(), vec!["Biotite", "Pyroxene"]);
+        assert!((m[0].2 - 4.96e-8 * 1e5).abs() < 1e-12, "linear position is in the printed unit");
+        let mut log = AxisCfg::new(KPRIME);
+        log.log = true;
+        assert!((mineral_marks(&log, &pts, 1.0)[1].2 - 1.21e-7f64.log10()).abs() < 1e-12);
+        // only the K' axis gets them
+        assert!(mineral_marks(&AxisCfg::new(4), &pts, 1.0).is_empty() && mineral_marks(&AxisCfg::new(0), &pts, 1.0).is_empty());
+        assert_eq!(scale_exp(KPRIME, pts.iter().map(|p| p.vals[KPRIME])), -5);
+        assert_eq!(axis_label(&lin, -5), "K' [E-05 SI]");
+        assert_eq!(axis_label(&log, 0), "K' [SI]");
+    }
+
+    #[test]
+    fn plots_with_k_prime_on_an_axis_draw_without_trouble() {
+        let ctx = egui::Context::default();
+        let th = Theme { dark: true, k_colors: [Color32::RED, Color32::GREEN, Color32::BLUE], accent: Color32::LIGHT_BLUE };
+        let pts = vec![kp_pt(0, 1.2e-5), kp_pt(1, 3.5e-5), kp_pt(2, 8e-6)];
+        let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(400.0, 300.0));
+        for log in [false, true] {
+            let (mut k, mut km) = (AxisCfg::new(KPRIME), AxisCfg::new(0));
+            k.log = log;
+            km.log = log;
+            let mut view = ZoomView::default();
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(500.0, 400.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                let spec = ScatterSpec { x: &km, y: &k, zero_line: false, diagonal: false, conf: false, connect: false, sort_x: false, salt: "kp-s" };
+                scatter(ui, rect, &pts, &spec, 6.0, &th, &mut view);
+                let spec = ScatterSpec { x: &k, y: &km, zero_line: false, diagonal: false, conf: false, connect: false, sort_x: false, salt: "kp-s2" };
+                scatter(ui, rect, &pts, &spec, 6.0, &th, &mut view);
+                histogram(ui, rect, &pts, 10, &k, &th, "kp-h");
+                binned_plot(ui, rect, &pts, XyKind::Bar, &km, &k, 5, GroupBy::Classes, &th, &mut view, "kp-b");
+                binned_plot(ui, rect, &pts, XyKind::Bar, &k, &km, 5, GroupBy::Classes, &th, &mut view, "kp-b2");
+            });
+            out.textures_delta.clear();
+        }
     }
 }
